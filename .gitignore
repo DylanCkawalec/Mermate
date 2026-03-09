@@ -1,6 +1,11 @@
 node_modules/
 flows/
 archs/flows/
+
+# Ignore everything in archs/ except the production axiom spec
+archs/*
+!archs/mermaid_axioms.md
+
 **/.DS_Store
 .DS_Store
 *.log
