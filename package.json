@@ -1,0 +1,18 @@
+{
+  "name": "mermaid-gpt",
+  "version": "1.0.0",
+  "description": "Local Mermaid diagram renderer with chat-style UI and optional GPT enhancement",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node --test test/test-*.js"
+  },
+  "dependencies": {
+    "@mermaid-js/mermaid-cli": "^11.4.0",
+    "express": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "private": true
+}
