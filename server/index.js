@@ -26,10 +26,24 @@ app.use('/api', renderRouter);
 
 // Start server only when run directly (not imported by tests)
 if (require.main === module) {
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     logger.info('server.started', { port: PORT });
     console.log(`\n  Mermaid-GPT running at http://localhost:${PORT}\n`);
   });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      logger.error('server.port_in_use', { port: PORT });
+      console.error(`\n  Error: port ${PORT} is already in use.\n  Run: kill $(lsof -ti :${PORT}) && ./mermaid.sh start\n`);
+    } else {
+      logger.error('server.error', { error: err.message });
+      console.error(`\n  Server error: ${err.message}\n`);
+    }
+    process.exit(1);
+  });
+
+  process.on('SIGTERM', () => server.close(() => process.exit(0)));
+  process.on('SIGINT',  () => server.close(() => process.exit(0)));
 }
 
 module.exports = app;

@@ -121,8 +121,19 @@ check_enhancer() {
     echo "  Enhancer: unavailable (app will use passthrough mode)"
 }
 
+clear_port() {
+    local pid
+    pid=$(lsof -ti :"${APP_PORT}" 2>/dev/null || true)
+    if [ -n "${pid}" ]; then
+        echo "  Port ${APP_PORT} in use by PID ${pid} — stopping it..."
+        kill "${pid}" 2>/dev/null || true
+        sleep 1
+    fi
+}
+
 start_service() {
     check_deps
+    clear_port
     check_enhancer
 
     echo ""
