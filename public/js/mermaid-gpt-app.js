@@ -55,7 +55,7 @@
   const MODES = {
     idea: {
       placeholder: 'Describe your system, workflow, or diagram idea...\n\nStart simply:\n  "A user logs in, the server checks credentials, then redirects to dashboard"\n\nOr more structured:\n  "Payment flow: Browser \u2192 API Gateway \u2192 Payment Service \u2192 Stripe \u2192 Bank\n   - on success: return confirmation to browser\n   - on failure: show error, retry up to 3 times \u2192 dead letter queue"\n\nUseful signals: actors, services, arrows (\u2192), steps, decisions, states, failures',
-      hint: 'Type an idea and the system will generate a diagram \u00b7 Ctrl+Return to enhance',
+      hint: 'Type an idea and press Render \u00b7 \u2318\u23ce / Ctrl+Return to generate \u00b7 Tab to accept suggestion',
       enhanceDefault: true,
       showUpload: false,
     },
@@ -336,11 +336,6 @@
 
   input.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-      if (currentMode === 'idea' && copilot) {
-        // Copilot handles Ctrl+Return in idea mode (its keydown handler fires first).
-        // If copilot is not available, fall through to render.
-        return;
-      }
       e.preventDefault();
       render();
     }

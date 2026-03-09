@@ -7,6 +7,105 @@ const { validate } = require('./mermaid-validator');
 const enhancerBridge = require('./gpt-enhancer-bridge');
 const logger = require('../utils/logger');
 
+// ---- Local text-to-mmd fallback (no enhancer required) ----------------------
+
+const FLOW_VERB_RE = /\b(sends?\s+(?:request\s+)?to|calls?|connects?\s+to|routes?\s+to|triggers?|requests?|reads?\s+from|writes?\s+to|stores?\s+in|queries?|goes?\s+to|flows?\s+to|talks?\s+to|uses?|emits?\s+(?:event\s+)?to|publishes?\s+to|subscribes?\s+to|forwards?\s+to|fetches?\s+from|posts?\s+to|logs?\s+(?:in\s+)?to|redirects?\s+to|proxies?\s+to|delegates?\s+to|dispatches?\s+to|passes?\s+to)\b/i;
+const DECISION_RE  = /\b(if|when|validate|check|approve|reject|gate|decision|condition|verify)\b/i;
+const STORE_RE     = /\b(database|db|cache|redis|mongo|postgres|mysql|queue|bucket|s3|store|storage|index|kafka|dynamo)\b/i;
+const EXTERNAL_RE  = /\b(user|client|browser|admin|operator|customer|external)\b/i;
+
+function _cleanLabel(str) {
+  return str.trim()
+    .replace(/['"]/g, '')
+    .replace(/[^a-zA-Z0-9\s\-_.]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(w => w.length > 1)
+    .slice(0, 4)
+    .join(' ');
+}
+
+function _nodeShape(label) {
+  if (DECISION_RE.test(label)) return `{"${label}"}`;
+  if (STORE_RE.test(label))    return `[("${label}")]`;
+  if (EXTERNAL_RE.test(label)) return `(["${label}"])`;
+  return `["${label}"]`;
+}
+
+function localTextToMmd(source) {
+  const diagramHint = selectDiagramType(source);
+  const directive   = diagramHint.directive || 'flowchart TB';
+
+  if (directive === 'sequenceDiagram') return _localSequence(source);
+
+  const sentences = source
+    .split(/[.!?\n]+/)
+    .map(s => s.trim())
+    .filter(s => s.length > 3);
+
+  const nodeMap = new Map(); // label -> id
+  const edges   = [];
+  let   counter = 0;
+
+  function getOrCreate(raw) {
+    const label = _cleanLabel(raw);
+    if (!label) return null;
+    if (!nodeMap.has(label)) nodeMap.set(label, 'N' + (++counter));
+    return nodeMap.get(label);
+  }
+
+  for (const sentence of sentences) {
+    const m = sentence.match(
+      new RegExp(`^(.+?)\\s+${FLOW_VERB_RE.source}\\s+(.+?)$`, 'i'),
+    );
+    if (m) {
+      const fromId = getOrCreate(m[1]);
+      const toId   = getOrCreate(m[m.length - 1]);
+      if (fromId && toId && fromId !== toId) edges.push({ from: fromId, to: toId });
+    }
+  }
+
+  // Fallback: extract noun-like chunks from sentences
+  if (edges.length === 0) {
+    const STOP = new Set(['the','a','an','is','are','was','were','and','or','but','with','for','in','on','at','to','of','by','that','this','which','it','its','be','has','have','had','not','no','from','as','into','via','through','through','against','before','after']);
+    const chunks = sentences.map(s =>
+      s.split(/\s+/)
+        .filter(w => w.length > 2 && !STOP.has(w.toLowerCase()) && /^[a-zA-Z]/.test(w))
+        .slice(0, 3)
+        .join(' '),
+    ).filter(c => c.length > 2);
+    const unique = [...new Set(chunks)].slice(0, 8);
+    const ids = unique.map(c => getOrCreate(c)).filter(Boolean);
+    for (let i = 0; i < ids.length - 1; i++) {
+      edges.push({ from: ids[i], to: ids[i + 1] });
+    }
+  }
+
+  let mmd = directive + '\n';
+  for (const [label, id] of nodeMap) mmd += `    ${id}${_nodeShape(label)}\n`;
+  for (const edge of edges)          mmd += `    ${edge.from} --> ${edge.to}\n`;
+  return mmd;
+}
+
+function _localSequence(source) {
+  const ACTOR_RE = /\b(user|client|browser|server|api|service|database|gateway|auth)\b/gi;
+  const actors = [
+    ...new Set(
+      (source.match(ACTOR_RE) || ['Client', 'Server'])
+        .map(a => a.charAt(0).toUpperCase() + a.slice(1).toLowerCase()),
+    ),
+  ].slice(0, 6);
+
+  let mmd = 'sequenceDiagram\n';
+  actors.forEach(a => { mmd += `    participant ${a}\n`; });
+  for (let i = 0; i < actors.length - 1; i++) {
+    mmd += `    ${actors[i]}->>${actors[i + 1]}: request\n`;
+    mmd += `    ${actors[i + 1]}-->>${actors[i]}: response\n`;
+  }
+  return mmd;
+}
+
 const FENCED_MERMAID_RE = /```mermaid\s*\n([\s\S]*?)```/g;
 
 /**
@@ -137,19 +236,12 @@ async function route(source, options = {}) {
 
   // ---- PATH A: text input ----
   if (state === CONTENT_STATES.TEXT) {
-    if (!enhance) {
-      throw new RouterError(
-        'enhancer_required',
-        'Plain text input requires the Enhance option to convert your idea into a diagram. ' +
-        'Check the Enhance box and try again, or paste Mermaid source directly.',
-      );
-    }
-    if (!enhancerUp) {
-      throw new RouterError(
-        'enhancer_unavailable',
-        'Plain text input requires the GPT enhancer service, which is currently unavailable. ' +
-        'Start the enhancer or paste Mermaid source directly.',
-      );
+    if (!enhance || !enhancerUp) {
+      // Local fallback: convert plain text to a basic diagram without the enhancer
+      logger.info('input.local_fallback', { reason: enhance ? 'enhancer_unavailable' : 'enhance_off' });
+      const mmdSource = localTextToMmd(source);
+      stagesExecuted.push('local_text_to_mmd');
+      return buildResult(mmdSource, state, false, null, stagesExecuted, startMs, source);
     }
 
     const diagramHint = selectDiagramType(source);

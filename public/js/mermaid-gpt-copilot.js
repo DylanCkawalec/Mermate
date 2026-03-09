@@ -11,13 +11,14 @@ window.MermaidCopilot = class MermaidCopilot {
     this.onAccept = options.onAccept || (() => {});
 
     // Config
-    this.IDLE_DELAY_MS = Math.max(1500, options.idleDelay || 3000);
-    this.MIN_SUGGEST_GAP = 8000;
-    this.SUGGEST_TIMEOUT = 4000;
-    this.ENHANCE_TIMEOUT = 12000;
-    this.COOLDOWN_CHARS = 3;
-    this.HEALTH_INTERVAL = 30000;
-    this.MAX_SUGGESTION_LEN = 80;
+    this.IDLE_DELAY_MS      = Math.max(1200, options.idleDelay || 1800);
+    this.MIN_SUGGEST_GAP    = 5000;   // AI suggestions
+    this.LOCAL_SUGGEST_GAP  = 2000;   // Local suggestions
+    this.SUGGEST_TIMEOUT    = 4000;
+    this.ENHANCE_TIMEOUT    = 12000;
+    this.COOLDOWN_CHARS     = 3;
+    this.HEALTH_INTERVAL    = 30000;
+    this.MAX_SUGGESTION_LEN = 120;
 
     // Timers
     this._idleTimer = null;
@@ -142,8 +143,9 @@ window.MermaidCopilot = class MermaidCopilot {
   }
 
   _onKeyDown(e) {
-    // Enter: accept ghost text if visible
-    if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.shiftKey && this.ghostVisible) {
+    // Tab or Enter (no modifier): accept ghost text if visible
+    if ((e.key === 'Tab' || (e.key === 'Enter' && !e.ctrlKey && !e.metaKey && !e.shiftKey))
+        && this.ghostVisible) {
       e.preventDefault();
       this._acceptGhost();
       return;
@@ -158,16 +160,10 @@ window.MermaidCopilot = class MermaidCopilot {
       return;
     }
 
-    // Ctrl/Cmd+Return: active enhancement
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-      e.preventDefault();
-      this.enhance();
-      return;
-    }
+    // Ctrl/Cmd+Return is handled by the app (triggers render). Do NOT intercept it here.
 
-    // Any other key while ghost visible: dismiss ghost
-    if (this.ghostVisible && e.key !== 'Tab' && e.key !== 'Shift' && e.key !== 'Control' &&
-        e.key !== 'Meta' && e.key !== 'Alt') {
+    // Any other printable key while ghost visible: dismiss ghost
+    if (this.ghostVisible && e.key.length === 1) {
       this._dismissGhost();
       this._enterCooldown();
     }
@@ -181,48 +177,54 @@ window.MermaidCopilot = class MermaidCopilot {
   // ---- Idle detection -------------------------------------------------------
 
   _onIdle() {
-    if (!this._canSuggest()) return;
-
     const text = this.input.value;
-    const hash = this._hash(text);
 
-    // Rate limit: 8s minimum between calls
-    if (Date.now() - this.lastSuggestAt < this.MIN_SUGGEST_GAP) return;
+    if (this._isHealthy()) {
+      // ---- AI suggestion path ----
+      if (!this._canSuggestAI()) return;
+      if (Date.now() - this.lastSuggestAt < this.MIN_SUGGEST_GAP) return;
 
-    this._suggestTextHash = hash;
-    this.isSuggesting = true;
+      const hash = this._hash(text);
+      this._suggestTextHash = hash;
+      this.isSuggesting = true;
 
-    this._suggestAC = new AbortController();
-    const timeoutId = setTimeout(() => this._suggestAC && this._suggestAC.abort(), this.SUGGEST_TIMEOUT);
+      this._suggestAC = new AbortController();
+      const timeoutId = setTimeout(() => this._suggestAC && this._suggestAC.abort(), this.SUGGEST_TIMEOUT);
 
-    this._callSuggest(text, this._suggestAC.signal)
-      .then(data => {
-        clearTimeout(timeoutId);
-        this.isSuggesting = false;
+      this._callSuggest(text, this._suggestAC.signal)
+        .then(data => {
+          clearTimeout(timeoutId);
+          this.isSuggesting = false;
+          this.lastSuggestAt = Date.now();
+          this._suggestAC = null;
+
+          if (!data) return;
+          if (this._hash(this.input.value) !== this._suggestTextHash) return;
+          if (data.confidence === 'low') return;
+
+          const suggestion = (data.suggestion || '').slice(0, this.MAX_SUGGESTION_LEN);
+          if (!suggestion.trim()) return;
+          this._showGhost(suggestion);
+        })
+        .catch(() => {
+          clearTimeout(timeoutId);
+          this.isSuggesting = false;
+          this._suggestAC = null;
+        });
+    } else {
+      // ---- Local suggestion path (no enhancer needed) ----
+      if (!this._canSuggestLocal()) return;
+      if (Date.now() - this.lastSuggestAt < this.LOCAL_SUGGEST_GAP) return;
+
+      const suggestion = this._localSuggest(text);
+      if (suggestion) {
         this.lastSuggestAt = Date.now();
-        this._suggestAC = null;
-
-        if (!data) return;
-
-        // Stale check: user may have typed since request was sent
-        if (this._hash(this.input.value) !== this._suggestTextHash) return;
-
-        // Low confidence: discard silently
-        if (data.confidence === 'low') return;
-
-        const suggestion = (data.suggestion || '').slice(0, this.MAX_SUGGESTION_LEN);
-        if (!suggestion.trim()) return;
-
         this._showGhost(suggestion);
-      })
-      .catch(() => {
-        clearTimeout(timeoutId);
-        this.isSuggesting = false;
-        this._suggestAC = null;
-      });
+      }
+    }
   }
 
-  _canSuggest() {
+  _canSuggestAI() {
     const text = this.input.value;
     if (text.length < 10) return false;
     if (this.ghostVisible) return false;
@@ -230,12 +232,8 @@ window.MermaidCopilot = class MermaidCopilot {
     if (this.isEnhancing) return false;
     if (this.inCooldown) return false;
     if (this.input.readOnly) return false;
-    if (!this._isHealthy()) return false;
     if (document.activeElement !== this.input) return false;
-
-    // No-suggestion: text ends with complete sentence and last line > 60 chars
     const lines = text.split('\n');
-    const lastLine = '';
     for (let i = lines.length - 1; i >= 0; i--) {
       if (lines[i].trim()) {
         const l = lines[i].trim();
@@ -243,8 +241,65 @@ window.MermaidCopilot = class MermaidCopilot {
         break;
       }
     }
-
     return true;
+  }
+
+  _canSuggestLocal() {
+    const text = this.input.value;
+    if (text.length < 5) return false;
+    if (this.ghostVisible) return false;
+    if (this.isSuggesting) return false;
+    if (this.isEnhancing) return false;
+    if (this.inCooldown) return false;
+    if (this.input.readOnly) return false;
+    if (document.activeElement !== this.input) return false;
+    // Don't suggest if the text is already Mermaid source
+    if (/^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|mindmap|timeline|journey)\b/i.test(text.trim())) return false;
+    return true;
+  }
+
+  // ---- Local (offline) suggestions ------------------------------------------
+
+  _getLastActiveLine(text) {
+    const lines = text.split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (lines[i].trim()) return lines[i].trim();
+    }
+    return '';
+  }
+
+  _localSuggest(text) {
+    const last = this._getLastActiveLine(text);
+    if (!last || last.length < 3) return null;
+
+    // Don't suggest if last line already has an arrow or looks like mermaid syntax
+    if (/-->|->|==>|subgraph|classDef|%%/.test(last)) return null;
+
+    const lc = last.toLowerCase();
+
+    // Pattern-based contextual hints
+    if (/\buser\b|\bclient\b|\bbrowser\b/.test(lc))
+      return ' → API Gateway → Service → Database';
+    if (/\bapi\s*gateway\b|\bgateway\b/.test(lc))
+      return ' → Auth Service → Backend Service';
+    if (/\bauth\b|\blogin\b|\bsso\b/.test(lc))
+      return ' → validate token → grant access';
+    if (/\bpayment\b|\bcheckout\b/.test(lc))
+      return ' → Payment Service → Stripe → Bank';
+    if (/\bkafka\b|\bqueue\b|\bevent\s*bus\b/.test(lc))
+      return ' → Consumer A\n[broker] → Consumer B';
+    if (/\bservice\b|\bserver\b|\bbackend\b/.test(lc))
+      return ' → Database';
+    if (/\bdeployment\b|\bdeploy\b|\bci\b|\bcd\b/.test(lc))
+      return ' → build → test → staging → production';
+    if (/\bstate\b|\blifecycle\b|\btransition\b/.test(lc))
+      return ': Pending → Running → Succeeded / Failed';
+
+    // Generic: hint that an arrow can connect the next idea
+    if (/\w+$/.test(last) && last.split(/\s+/).length >= 2)
+      return ' → [connects to]';
+
+    return null;
   }
 
   // ---- Ghost text -----------------------------------------------------------

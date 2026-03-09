@@ -799,8 +799,9 @@ body {
 }
 
 .copilot-ghost-text {
-  color: #b0b0b0;
-  font-style: normal;
+  color: #a0a8c0;
+  font-style: italic;
+  opacity: 0.75;
 }
 
 .copilot-thinking {
