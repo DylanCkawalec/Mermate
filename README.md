@@ -314,6 +314,10 @@ The project also includes Cursor-facing guidance for architecture work:
 
 Together, these files act as the project's prompt and behavior layer for the architecture agent experience.
 
+### Local AI scripts (`.cursor/scripts`)
+
+The `.cursor/scripts/` directory contains Python modules for a **local AI enhancer extension**. These scripts are **not meant to be run from this repo**. They are reference implementations for an LLM extension you should host in a **separate top-level directory** (e.g. `gpt_oss/extensions/mermaid_enhancer/` or your LLM framework's extension path). Copy or symlink them into your local AI project and run the enhancer service there. Mermate connects to it via `MERMAID_ENHANCER_URL` when the service is running.
+
 ---
 
 ## Route overview
