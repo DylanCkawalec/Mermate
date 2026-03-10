@@ -254,7 +254,8 @@ router.post('/render', async (req, res) => {
     // 1. Analyze input holistically (maturity, quality, shadow model, intent)
     const profile = analyze(source, 'idea');
 
-    const useMax = !!(max_mode && provider.isMaxAvailable());
+    const maxRequested = !!(max_mode && provider.isMaxAvailable());
+    let useMax = maxRequested;
 
     logger.info('render.analyzed', {
       maturity: profile.maturity,
@@ -262,6 +263,8 @@ router.post('/render', async (req, res) => {
       completeness: profile.completenessScore,
       recommendation: profile.recommendation,
       contentState: profile.contentState,
+      complexity: profile.complexity,
+      shouldDecompose: profile.shouldDecompose,
       maxMode: useMax,
     });
 
@@ -271,10 +274,40 @@ router.post('/render', async (req, res) => {
     const shouldUseProvider = isTextOrMd && enhance;
 
     if (shouldUseProvider) {
-      // ---- Provider-backed render (decompose for complex, single-shot otherwise) ----
-      const prepResult = profile.shouldDecompose
-        ? await decomposeAndRender(source, profile, useMax)
-        : await renderPrepare(source, profile, useMax);
+      // ---- Provider-backed render: deliberate routing ----
+      const wantsDecompose = profile.shouldDecompose;
+      const strongEnoughForSingleShot = profile.qualityScore >= 0.6
+        && (profile.shadow?.entities?.length || 0) <= 15
+        && profile.completenessScore >= 0.5;
+      const useDecompose = wantsDecompose && !strongEnoughForSingleShot;
+
+      logger.info('render.routing', {
+        shouldDecompose: wantsDecompose,
+        strongEnoughForSingleShot,
+        useDecompose,
+        complexity: profile.complexity,
+        quality: profile.qualityScore,
+        completeness: profile.completenessScore,
+      });
+
+      let effectiveMax = useMax;
+
+      if (maxRequested && !useDecompose) {
+        const normalResult = await renderPrepare(source, profile, false);
+        const normalValid = require('../services/mermaid-validator').validate(normalResult.mmdSource);
+        const normalNodes = normalValid.stats?.nodeCount || 0;
+        const normalEdges = normalValid.stats?.edgeCount || 0;
+        const normalStrong = normalValid.valid && normalNodes >= 5 && normalEdges >= 4;
+
+        if (normalStrong) {
+          logger.info('render.max_gate_skipped', { reason: 'normal result already strong', nodes: normalNodes, edges: normalEdges });
+          effectiveMax = false;
+        }
+      }
+
+      const prepResult = useDecompose
+        ? await decomposeAndRender(source, profile, effectiveMax)
+        : await renderPrepare(source, profile, effectiveMax);
       routeResult = {
         mmdSource: prepResult.mmdSource,
         diagramType: '',

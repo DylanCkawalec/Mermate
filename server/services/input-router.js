@@ -108,11 +108,14 @@ function localTextToMmd(source, shadow) {
 function _shadowToFlowchart(directive, shadow) {
   const nodeMap = new Map();
   let counter = 0;
+  const RESERVED = new Set(['end', 'subgraph', 'graph', 'flowchart', 'style', 'class', 'click', 'default']);
 
   function _toId(name) {
-    const clean = name.replace(/[^a-zA-Z0-9]/g, '');
-    const id = clean.charAt(0).toUpperCase() + clean.slice(1);
-    return id || ('N' + (++counter));
+    let clean = name.replace(/[^a-zA-Z0-9]/g, '');
+    let id = clean.charAt(0).toUpperCase() + clean.slice(1);
+    if (!id) id = 'N' + (++counter);
+    if (RESERVED.has(id.toLowerCase())) id += 'Node';
+    return id;
   }
 
   function getOrCreate(name, type) {
@@ -133,24 +136,71 @@ function _shadowToFlowchart(directive, shadow) {
     const toId = getOrCreate(rel.to, 'component');
     if (fromId !== toId) {
       const edgeStyle = rel.type === 'async' ? '-.->' : '-->';
-      const label = rel.verb ? `|${rel.verb}|` : '';
+      const label = rel.verb ? `|"${rel.verb}"|` : '';
       edges.push({ from: fromId, to: toId, style: edgeStyle, label });
     }
   }
 
-  // Add failure path edges as dashed
+  const failureSourceNodes = new Set();
   for (const fp of shadow.failurePaths) {
     const desc = fp.description.toLowerCase();
-    const failNode = getOrCreate('Error Handler', 'decision');
-    const lastRuntimeEdge = edges.find(e => e.style === '-->');
-    if (lastRuntimeEdge) {
-      edges.push({ from: lastRuntimeEdge.from, to: failNode, style: '-.->', label: '|failure|' });
+    let sourceNode = null;
+    for (const [key, node] of nodeMap) {
+      if (desc.includes(key)) { sourceNode = node.id; break; }
+    }
+    if (!sourceNode) {
+      const runtimeEdge = edges.find(e => e.style === '-->');
+      sourceNode = runtimeEdge?.from;
+    }
+    if (sourceNode && !failureSourceNodes.has(sourceNode)) {
+      failureSourceNodes.add(sourceNode);
+      const failTarget = getOrCreate('Error Recovery', 'decision');
+      const shortDesc = fp.description.slice(0, 30).replace(/"/g, "'");
+      edges.push({ from: sourceNode, to: failTarget, style: '-.->', label: `|"${shortDesc}"|` });
+    }
+  }
+
+  const hasBoundaries = shadow.boundaryTerms.length > 0;
+  const boundaryMap = new Map();
+
+  if (hasBoundaries) {
+    for (const term of shadow.boundaryTerms) {
+      boundaryMap.set(term.toLowerCase(), []);
+    }
+    for (const [key, node] of nodeMap) {
+      let assigned = false;
+      for (const [bTerm, bNodes] of boundaryMap) {
+        if (key.includes(bTerm) || node.name.toLowerCase().includes(bTerm)) {
+          bNodes.push(node);
+          assigned = true;
+          break;
+        }
+      }
+      if (!assigned) {
+        const defaultBoundary = shadow.boundaryTerms[0].toLowerCase();
+        boundaryMap.get(defaultBoundary)?.push(node);
+      }
     }
   }
 
   let mmd = directive + '\n';
-  for (const [, node] of nodeMap) {
-    mmd += `    ${node.id}${_nodeShape(node.name)}\n`;
+
+  if (hasBoundaries && boundaryMap.size > 0) {
+    let sgIndex = 0;
+    for (const [bTerm, bNodes] of boundaryMap) {
+      if (bNodes.length === 0) continue;
+      const sgId = 'SG' + (sgIndex++);
+      const sgLabel = bTerm.charAt(0).toUpperCase() + bTerm.slice(1);
+      mmd += `    subgraph ${sgId}["${sgLabel}"]\n`;
+      for (const node of bNodes) {
+        mmd += `        ${node.id}${_nodeShape(node.name)}\n`;
+      }
+      mmd += `    end\n`;
+    }
+  } else {
+    for (const [, node] of nodeMap) {
+      mmd += `    ${node.id}${_nodeShape(node.name)}\n`;
+    }
   }
   for (const edge of edges) {
     mmd += `    ${edge.from} ${edge.style}${edge.label} ${edge.to}\n`;
@@ -293,9 +343,38 @@ async function renderPrepare(source, profile, useMax = false) {
 
 // ---- Decompose-and-render for complex inputs --------------------------------
 
+function _scoreSubView(mmdSource, parentShadow) {
+  const mmdMetrics = require('./mermaid-validator').validate(mmdSource);
+  const nodeCount = mmdMetrics.stats?.nodeCount || 0;
+  const edgeCount = mmdMetrics.stats?.edgeCount || 0;
+
+  const compilability = mmdMetrics.valid ? 1.0 : 0.0;
+
+  const mmdLower = mmdSource.toLowerCase();
+  const parentEntityNames = (parentShadow?.entities || []).map(e => e.name.toLowerCase());
+  const coveredCount = parentEntityNames.filter(n => mmdLower.includes(n)).length;
+  const entityCoverage = parentEntityNames.length > 0
+    ? Math.min(1.0, coveredCount / parentEntityNames.length)
+    : 0.5;
+
+  const edgeDensity = nodeCount > 1
+    ? Math.min(1.0, edgeCount / (nodeCount - 1))
+    : 0.0;
+
+  const composite = +(0.4 * compilability + 0.3 * entityCoverage + 0.3 * edgeDensity).toFixed(3);
+
+  return { compilability, entityCoverage, edgeDensity, composite, nodeCount, edgeCount };
+}
+
+function _extractLineNumber(errorStr) {
+  if (!errorStr) return null;
+  const m = errorStr.match(/(?:Parse error|Error) on line (\d+)/i);
+  return m ? parseInt(m[1], 10) : null;
+}
+
 async function decomposeAndRender(source, profile, useMax = false) {
   const stagesExecuted = [];
-  const { buildDecomposeUserPrompt } = require('./axiom-prompts');
+  const { buildDecomposeUserPrompt, buildRepairFromTraceUserPrompt } = require('./axiom-prompts');
 
   const decomposePrompt = buildDecomposeUserPrompt(source, profile);
   const decomposeResult = await provider.infer('decompose', { userPrompt: decomposePrompt });
@@ -333,12 +412,16 @@ async function decomposeAndRender(source, profile, useMax = false) {
     const compileOut = await compileWithRetry(prep.mmdSource, outputDir, 'subview');
 
     if (!compileOut.result.ok) {
-      const { buildRepairFromTraceUserPrompt } = require('./axiom-prompts');
+      const viewShadow = viewProfile.shadow;
+      const errorStr = compileOut.result.error || 'compilation failed';
+      const lineNumber = _extractLineNumber(errorStr);
+
       const tracePrompt = buildRepairFromTraceUserPrompt(
         prep.mmdSource,
-        compileOut.result.error || 'compilation failed',
-        profile.shadow,
+        errorStr,
+        viewShadow,
         viewDesc,
+        { lineNumber, priorAttempts: compileOut.attempts, deterministicChanges: compileOut.repairChanges },
       );
       const repairResult = await provider.infer('repair_from_trace', { userPrompt: tracePrompt });
       stagesExecuted.push('repair_from_trace');
@@ -346,17 +429,15 @@ async function decomposeAndRender(source, profile, useMax = false) {
       if (repairResult.output) {
         const repairedCompile = await compileWithRetry(repairResult.output, outputDir, 'subview');
         if (repairedCompile.result.ok) {
-          results.push({ mmdSource: repairedCompile.mmdSource, score: 1.0, viewName: view.viewName, compileResult: repairedCompile.result });
+          const repairedScore = _scoreSubView(repairedCompile.mmdSource, profile.shadow);
+          results.push({ mmdSource: repairedCompile.mmdSource, score: repairedScore.composite, scoreFactors: repairedScore, viewName: view.viewName, compileResult: repairedCompile.result });
           continue;
         }
       }
-      results.push({ mmdSource: prep.mmdSource, score: 0.0, viewName: view.viewName, compileResult: compileOut.result });
+      results.push({ mmdSource: prep.mmdSource, score: 0.0, scoreFactors: null, viewName: view.viewName, compileResult: compileOut.result });
     } else {
-      const mmdMetrics = require('./mermaid-validator').validate(compileOut.mmdSource);
-      const nodeCount = mmdMetrics.stats?.nodeCount || 0;
-      const edgeCount = mmdMetrics.stats?.edgeCount || 0;
-      const score = mmdMetrics.valid ? (0.5 + 0.3 * Math.min(1, nodeCount / 8) + 0.2 * Math.min(1, edgeCount / 6)) : 0.3;
-      results.push({ mmdSource: compileOut.mmdSource, score, viewName: view.viewName, compileResult: compileOut.result });
+      const viewScore = _scoreSubView(compileOut.mmdSource, profile.shadow);
+      results.push({ mmdSource: compileOut.mmdSource, score: viewScore.composite, scoreFactors: viewScore, viewName: view.viewName, compileResult: compileOut.result });
     }
   }
 
@@ -368,7 +449,12 @@ async function decomposeAndRender(source, profile, useMax = false) {
   results.sort((a, b) => b.score - a.score);
   const best = results[0];
 
-  logger.info('decompose.selected', { viewName: best.viewName, score: best.score });
+  logger.info('decompose.selected', {
+    viewName: best.viewName,
+    score: best.score,
+    factors: best.scoreFactors,
+    candidateCount: results.length,
+  });
 
   return {
     mmdSource: best.mmdSource,

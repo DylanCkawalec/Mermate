@@ -419,23 +419,55 @@ function generateHint(recommendation, maturity, gaps, contentState) {
 
 const DOMAIN_BREADTH_RE = /\b(security|observability|event.?driven|infrastructure|deployment|auth|monitoring|tracing|resilience|compliance|governance|scaling|caching|load.?balancing)\b/gi;
 
-function scoreComplexity(shadow, intent) {
-  const entityScore = Math.min(1.0, shadow.entities.length / 12);
-  const relScore = Math.min(1.0, shadow.relationships.length / 10);
+function scoreComplexity(shadow, intent, qualityScore = 0) {
+  const factors = {};
+
+  factors.entityDensity = Math.min(1.0, shadow.entities.length / 12);
+  factors.relationshipDensity = Math.min(1.0, shadow.relationships.length / 10);
+
+  const relTypes = new Set(shadow.relationships.map(r => r.type));
+  const relVerbs = new Set(shadow.relationships.map(r => r.verb?.toLowerCase()));
+  factors.relationshipDiversity = Math.min(1.0, (relTypes.size + Math.min(relVerbs.size, 6)) / 8);
+
+  factors.failurePathDensity = Math.min(1.0, shadow.failurePaths.length / 3);
+  factors.boundaryPresence = Math.min(1.0, shadow.boundaryTerms.length / 3);
+
   const domainTerms = new Set();
-  for (const e of shadow.entities) {
-    const m = e.name.match(DOMAIN_BREADTH_RE);
-    if (m) m.forEach(d => domainTerms.add(d.toLowerCase()));
+  const fullText = shadow.entities.map(e => e.name).join(' ') + ' ' + (intent?.problemDomain || '');
+  const domainMatches = fullText.match(DOMAIN_BREADTH_RE) || [];
+  domainMatches.forEach(d => domainTerms.add(d.toLowerCase()));
+  factors.domainBreadth = Math.min(1.0, domainTerms.size / 3);
+
+  const decisionCount = countMatches(
+    shadow.entities.map(e => e.name).join(' '),
+    DECISION_RE,
+  );
+  factors.decisionDensity = Math.min(1.0, decisionCount / 3);
+
+  factors.intentComplexity = (intent?.problemDomain && intent.problemDomain !== 'general') ? 0.6 : 0.0;
+  if (['eventDriven', 'infrastructure', 'dataPipeline'].includes(intent?.problemDomain)) {
+    factors.intentComplexity = 1.0;
   }
-  const boundaryScore = Math.min(1.0, shadow.boundaryTerms.length / 3);
-  const domainScore = Math.min(1.0, domainTerms.size / 3);
 
-  const score = +(0.35 * entityScore + 0.25 * relScore + 0.2 * boundaryScore + 0.2 * domainScore).toFixed(3);
-  const shouldDecompose = score > 0.7
-    || (shadow.entities.length >= 8 && shadow.relationships.length >= 6)
-    || (shadow.entities.length >= 10);
+  const score = +(
+    0.22 * factors.entityDensity
+    + 0.15 * factors.relationshipDensity
+    + 0.10 * factors.relationshipDiversity
+    + 0.12 * factors.failurePathDensity
+    + 0.12 * factors.boundaryPresence
+    + 0.12 * factors.domainBreadth
+    + 0.07 * factors.decisionDensity
+    + 0.10 * factors.intentComplexity
+  ).toFixed(3);
 
-  return { score, shouldDecompose };
+  const meetsQualityFloor = qualityScore >= 0.3;
+  const shouldDecompose = meetsQualityFloor && (
+    +score > 0.65
+    || (shadow.entities.length >= 8 && shadow.relationships.length >= 6 && shadow.failurePaths.length >= 1)
+    || (shadow.entities.length >= 12)
+  );
+
+  return { score: +score, shouldDecompose, factors };
 }
 
 // ---- Main entry point -----------------------------------------------------
@@ -481,7 +513,7 @@ function analyze(text, mode = 'idea') {
   const intent = inferIntent(source);
   const diagramSelection = contentState === 'text' ? selectDiagramType(source) : null;
 
-  const complexity = scoreComplexity(shadow, intent);
+  const complexity = scoreComplexity(shadow, intent, quality.score);
 
   const recommendation = decideAction(
     contentState, maturity, quality.score, completeness.score, validationResult,
@@ -504,6 +536,7 @@ function analyze(text, mode = 'idea') {
     diagramSelection,
     validation: validationResult,
     complexity: complexity.score,
+    complexityFactors: complexity.factors,
     shouldDecompose: complexity.shouldDecompose,
   };
 }

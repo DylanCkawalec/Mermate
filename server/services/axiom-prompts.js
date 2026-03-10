@@ -518,7 +518,7 @@ function buildRepairFromTracePrompt() {
   return { system, outputFormat: 'text', temperature: 0.0 };
 }
 
-function buildRepairFromTraceUserPrompt(mmdSource, compileError, shadow, originalDescription) {
+function buildRepairFromTraceUserPrompt(mmdSource, compileError, shadow, originalDescription, traceContext) {
   const parts = [];
 
   if (shadow) {
@@ -530,6 +530,18 @@ function buildRepairFromTraceUserPrompt(mmdSource, compileError, shadow, origina
     }
     if (shadow.gaps?.length > 0) {
       parts.push(`[ARCHITECTURE GAPS] ${shadow.gaps.join('; ')}`);
+    }
+  }
+
+  if (traceContext) {
+    const diagnostics = [];
+    if (traceContext.lineNumber) diagnostics.push(`Error at line ${traceContext.lineNumber}`);
+    if (traceContext.priorAttempts) diagnostics.push(`${traceContext.priorAttempts} prior compile attempts failed`);
+    if (traceContext.deterministicChanges?.length > 0) {
+      diagnostics.push(`Deterministic repairs already tried: ${traceContext.deterministicChanges.join('; ')}`);
+    }
+    if (diagnostics.length > 0) {
+      parts.push(`[REPAIR DIAGNOSTICS] ${diagnostics.join('. ')}`);
     }
   }
 
