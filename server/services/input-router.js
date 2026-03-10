@@ -4,6 +4,10 @@ const { detect, CONTENT_STATES } = require('./input-detector');
 const { classify } = require('./mermaid-classifier');
 const { selectDiagramType } = require('./diagram-selector');
 const { validate } = require('./mermaid-validator');
+const { repair: deterministicRepair } = require('./mermaid-repairer');
+const { extractShadow, analyze } = require('./input-analyzer');
+const { buildRenderPrepareUserPrompt, buildModelRepairUserPrompt } = require('./axiom-prompts');
+const provider = require('./inference-provider');
 const enhancerBridge = require('./gpt-enhancer-bridge');
 const logger = require('../utils/logger');
 
@@ -33,18 +37,23 @@ function _nodeShape(label) {
   return `["${label}"]`;
 }
 
-function localTextToMmd(source) {
+function localTextToMmd(source, shadow) {
   const diagramHint = selectDiagramType(source);
   const directive   = diagramHint.directive || 'flowchart TB';
 
-  if (directive === 'sequenceDiagram') return _localSequence(source);
+  if (directive === 'sequenceDiagram') return _localSequence(source, shadow);
+
+  // If we have a pre-computed shadow model, use its structured entities/relationships
+  if (shadow && shadow.entities.length >= 2 && shadow.relationships.length >= 1) {
+    return _shadowToFlowchart(directive, shadow);
+  }
 
   const sentences = source
     .split(/[.!?\n]+/)
     .map(s => s.trim())
     .filter(s => s.length > 3);
 
-  const nodeMap = new Map(); // label -> id
+  const nodeMap = new Map();
   const edges   = [];
   let   counter = 0;
 
@@ -66,7 +75,6 @@ function localTextToMmd(source) {
     }
   }
 
-  // Fallback: extract noun-like chunks from sentences
   if (edges.length === 0) {
     const STOP = new Set(['the','a','an','is','are','was','were','and','or','but','with','for','in','on','at','to','of','by','that','this','which','it','its','be','has','have','had','not','no','from','as','into','via','through','through','against','before','after']);
     const chunks = sentences.map(s =>
@@ -88,6 +96,59 @@ function localTextToMmd(source) {
   return mmd;
 }
 
+function _shadowToFlowchart(directive, shadow) {
+  const nodeMap = new Map();
+  let counter = 0;
+
+  function _toId(name) {
+    const clean = name.replace(/[^a-zA-Z0-9]/g, '');
+    const id = clean.charAt(0).toUpperCase() + clean.slice(1);
+    return id || ('N' + (++counter));
+  }
+
+  function getOrCreate(name, type) {
+    const key = name.toLowerCase().trim();
+    if (nodeMap.has(key)) return nodeMap.get(key).id;
+    const id = _toId(name);
+    nodeMap.set(key, { id, name: name.trim(), type: type || 'component' });
+    return id;
+  }
+
+  for (const entity of shadow.entities) {
+    getOrCreate(entity.name, entity.type);
+  }
+
+  const edges = [];
+  for (const rel of shadow.relationships) {
+    const fromId = getOrCreate(rel.from, 'component');
+    const toId = getOrCreate(rel.to, 'component');
+    if (fromId !== toId) {
+      const edgeStyle = rel.type === 'async' ? '-.->' : '-->';
+      const label = rel.verb ? `|${rel.verb}|` : '';
+      edges.push({ from: fromId, to: toId, style: edgeStyle, label });
+    }
+  }
+
+  // Add failure path edges as dashed
+  for (const fp of shadow.failurePaths) {
+    const desc = fp.description.toLowerCase();
+    const failNode = getOrCreate('Error Handler', 'decision');
+    const lastRuntimeEdge = edges.find(e => e.style === '-->');
+    if (lastRuntimeEdge) {
+      edges.push({ from: lastRuntimeEdge.from, to: failNode, style: '-.->', label: '|failure|' });
+    }
+  }
+
+  let mmd = directive + '\n';
+  for (const [, node] of nodeMap) {
+    mmd += `    ${node.id}${_nodeShape(node.name)}\n`;
+  }
+  for (const edge of edges) {
+    mmd += `    ${edge.from} ${edge.style}${edge.label} ${edge.to}\n`;
+  }
+  return mmd;
+}
+
 function _localSequence(source) {
   const ACTOR_RE = /\b(user|client|browser|server|api|service|database|gateway|auth)\b/gi;
   const actors = [
@@ -104,6 +165,121 @@ function _localSequence(source) {
     mmd += `    ${actors[i + 1]}-->>${actors[i]}: response\n`;
   }
   return mmd;
+}
+
+// ---- Compile with retry loop ------------------------------------------------
+
+const { compile } = require('./mermaid-compiler');
+
+const VALID_DIRECTIVE_RE = /^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|gitgraph|mindmap|timeline|journey|C4Context|C4Container|C4Component|C4Dynamic|quadrantChart|requirementDiagram|sankey-beta|xychart-beta|block-beta)\b/i;
+
+function _sanitizeCompileError(raw) {
+  if (!raw || typeof raw !== 'string') return 'Compilation failed';
+  let cleaned = raw
+    .replace(/\u001b\[[0-9;]*m/g, '')
+    .replace(/\[npm-security-monitor\][^\n]*/g, '')
+    .replace(/═{3,}[^═]*═{3,}/gs, '')
+    .replace(/⚠️[^\n]*/g, '')
+    .replace(/Explanation:[\s\S]*?Action Taken:[\s\S]*?\n/g, '')
+    .replace(/•[^\n]*/g, '')
+    .replace(/at\s+\S+\s+\([^)]+\)/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  const mermaidErr = cleaned.match(/((?:UnknownDiagramError|Error|Parse error)[^\n]+)/);
+  if (mermaidErr) return mermaidErr[1].trim();
+  return cleaned.slice(0, 300) || 'Compilation failed';
+}
+
+/**
+ * Compile Mermaid source with a disciplined retry loop:
+ *   Attempt 1: compile as-is
+ *   Attempt 2: deterministic repair + recompile
+ *   Attempt 3: model-assisted repair + deterministic repair + recompile
+ *
+ * @param {string} mmdSource
+ * @param {string} outputDir
+ * @param {string} baseName
+ * @returns {Promise<{result: object, mmdSource: string, attempts: number, repairChanges: string[]}>}
+ */
+async function compileWithRetry(mmdSource, outputDir, baseName) {
+  const repairChanges = [];
+
+  // Attempt 1: compile as-is
+  let result = await compile(mmdSource, outputDir, baseName);
+  if (result.ok) return { result, mmdSource, attempts: 1, repairChanges };
+
+  const attempt1Error = _sanitizeCompileError(result.error);
+  logger.warn('compile.attempt1_failed', { baseName, error: attempt1Error });
+
+  // Attempt 2: deterministic repair + recompile
+  const repaired = deterministicRepair(mmdSource);
+  if (repaired.changes.length > 0) {
+    repairChanges.push(...repaired.changes);
+    logger.info('compile.deterministic_repair', { changes: repaired.changes });
+    result = await compile(repaired.source, outputDir, baseName);
+    if (result.ok) return { result, mmdSource: repaired.source, attempts: 2, repairChanges };
+  }
+
+  const sourceForModelRepair = repaired.changes.length > 0 ? repaired.source : mmdSource;
+  const attempt2Error = _sanitizeCompileError(result.error);
+  logger.warn('compile.attempt2_failed', { baseName, error: attempt2Error });
+
+  // Attempt 3: model-assisted repair via provider + deterministic repair + recompile
+  const repairUserPrompt = buildModelRepairUserPrompt(sourceForModelRepair, attempt2Error);
+  const modelResult = await provider.infer('model_repair', { userPrompt: repairUserPrompt });
+
+  if (modelResult.output && modelResult.output.trim() !== sourceForModelRepair.trim()) {
+    const firstLine = modelResult.output.split('\n').find(l => l.trim() && !l.trim().startsWith('%%'));
+    if (firstLine && VALID_DIRECTIVE_RE.test(firstLine.trim())) {
+      repairChanges.push(`model-assisted repair via ${modelResult.provider}`);
+      const reRepaired = deterministicRepair(modelResult.output);
+      if (reRepaired.changes.length > 0) repairChanges.push(...reRepaired.changes);
+      result = await compile(reRepaired.source, outputDir, baseName);
+      if (result.ok) return { result, mmdSource: reRepaired.source, attempts: 3, repairChanges };
+    }
+  }
+
+  logger.error('compile.all_attempts_failed', { baseName, attempts: 3 });
+  return { result, mmdSource, attempts: 3, repairChanges };
+}
+
+// ---- Provider-backed render-prepare for text/md inputs --------------------
+
+/**
+ * Use the inference provider to convert text or markdown into valid Mermaid.
+ * Falls back to localTextToMmd if provider returns unusable output.
+ *
+ * @param {string} source - Raw user text
+ * @param {object} profile - InputProfile from input-analyzer
+ * @returns {Promise<{mmdSource: string, enhanced: boolean, provider: string, stagesExecuted: string[]}>}
+ */
+async function renderPrepare(source, profile, useMax = false) {
+  const stagesExecuted = [];
+  const userPrompt = buildRenderPrepareUserPrompt(source, profile);
+
+  const inferFn = useMax ? provider.inferMax : provider.infer;
+  const result = await inferFn('render_prepare', { userPrompt });
+  stagesExecuted.push(useMax ? 'render_prepare_max' : 'render_prepare');
+
+  if (result.output) {
+    const firstLine = result.output.split('\n').find(l => l.trim() && !l.trim().startsWith('%%'));
+    if (firstLine && VALID_DIRECTIVE_RE.test(firstLine.trim())) {
+      logger.info('render_prepare.success', { provider: result.provider, outputLen: result.output.length });
+      return {
+        mmdSource: result.output,
+        enhanced: true,
+        provider: result.provider,
+        stagesExecuted,
+      };
+    }
+    logger.warn('render_prepare.invalid_output', { provider: result.provider, firstLine: firstLine?.slice(0, 80) });
+  }
+
+  // Fallback: local conversion
+  const shadow = profile?.shadow || extractShadow(source);
+  const mmdSource = localTextToMmd(source, shadow);
+  stagesExecuted.push('local_fallback');
+  return { mmdSource, enhanced: false, provider: 'local', stagesExecuted };
 }
 
 const FENCED_MERMAID_RE = /```mermaid\s*\n([\s\S]*?)```/g;
@@ -215,20 +391,39 @@ async function route(source, options = {}) {
     if (enhance && enhancerUp) {
       const result = await enhancerBridge.enhance(source, null, 'md_to_mmd', state);
       stagesExecuted.push('md_to_mmd');
-      enhanced = result.enhanced;
-      enhanceMeta = result.meta;
-      mmdSource = result.source;
+
+      // Postcondition: output must start with a valid Mermaid directive
+      const mdMmdOutput = result.source;
+      const mdFirstLine = mdMmdOutput.split('\n').find(l => l.trim() && !l.trim().startsWith('%%'));
+      const mdHasDirective = mdFirstLine && /^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|gitgraph|mindmap|timeline|journey)\b/i.test(mdFirstLine.trim());
+
+      if (mdHasDirective && mdMmdOutput.trim() !== source.trim()) {
+        enhanced = result.enhanced;
+        enhanceMeta = result.meta;
+        mmdSource = mdMmdOutput;
+      } else {
+        logger.warn('stage.postcondition_failed', { stage: 'md_to_mmd', path: 'md' });
+        // Fallback: try fenced extraction, then local conversion
+        const extracted = extractFencedMermaid(source);
+        if (extracted) {
+          mmdSource = extracted;
+          stagesExecuted.push('extract_fenced_fallback');
+        } else {
+          const shadow = extractShadow(source);
+          mmdSource = localTextToMmd(source, shadow);
+          stagesExecuted.push('local_md_to_mmd_fallback');
+        }
+      }
     } else {
       const extracted = extractFencedMermaid(source);
       if (extracted) {
         mmdSource = extracted;
         stagesExecuted.push('extract_fenced');
       } else {
-        throw new RouterError(
-          'enhancer_required',
-          'Markdown input without fenced mermaid blocks requires the GPT enhancer. ' +
-          'Start the enhancer service or include a ```mermaid code block.',
-        );
+        // Instead of throwing, try local conversion as last resort
+        const shadow = extractShadow(source);
+        mmdSource = localTextToMmd(source, shadow);
+        stagesExecuted.push('local_md_to_mmd_fallback');
       }
     }
     return buildResult(mmdSource, state, enhanced, enhanceMeta, stagesExecuted, startMs, source);
@@ -237,9 +432,9 @@ async function route(source, options = {}) {
   // ---- PATH A: text input ----
   if (state === CONTENT_STATES.TEXT) {
     if (!enhance || !enhancerUp) {
-      // Local fallback: convert plain text to a basic diagram without the enhancer
       logger.info('input.local_fallback', { reason: enhance ? 'enhancer_unavailable' : 'enhance_off' });
-      const mmdSource = localTextToMmd(source);
+      const shadow = extractShadow(source);
+      const mmdSource = localTextToMmd(source, shadow);
       stagesExecuted.push('local_text_to_mmd');
       return buildResult(mmdSource, state, false, null, stagesExecuted, startMs, source);
     }
@@ -252,12 +447,35 @@ async function route(source, options = {}) {
     stagesExecuted.push('text_to_md');
     let mdOutput = mdResult.source;
 
+    // Postcondition: if text_to_md returned the input unchanged, fall back locally
+    if (mdOutput.trim() === source.trim()) {
+      logger.warn('stage.no_op', { stage: 'text_to_md' });
+      const shadow = extractShadow(source);
+      mmdSource = localTextToMmd(source, shadow);
+      stagesExecuted.push('local_text_to_mmd_fallback');
+      return buildResult(mmdSource, state, false, null, stagesExecuted, startMs, source);
+    }
+
     // Stage 2: md -> mmd
     const mmdResult = await enhancerBridge.enhance(mdOutput, diagramHint.type, 'md_to_mmd', 'md');
     stagesExecuted.push('md_to_mmd');
+
+    // Postcondition: md_to_mmd output must start with a valid Mermaid directive
+    const mmdOutput = mmdResult.source;
+    const firstMmdLine = mmdOutput.split('\n').find(l => l.trim() && !l.trim().startsWith('%%'));
+    const hasValidDirective = firstMmdLine && /^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|gitgraph|mindmap|timeline|journey|C4Context|C4Container|C4Component|C4Dynamic|quadrantChart|requirementDiagram|sankey-beta|xychart-beta|block-beta)\b/i.test(firstMmdLine.trim());
+
+    if (!hasValidDirective) {
+      logger.warn('stage.postcondition_failed', { stage: 'md_to_mmd', reason: 'output is not valid Mermaid' });
+      const shadow = extractShadow(source);
+      mmdSource = localTextToMmd(source, shadow);
+      stagesExecuted.push('local_text_to_mmd_fallback');
+      return buildResult(mmdSource, state, false, null, stagesExecuted, startMs, source);
+    }
+
     enhanced = true;
     enhanceMeta = mmdResult.meta;
-    mmdSource = mmdResult.source;
+    mmdSource = mmdOutput;
 
     return buildResult(mmdSource, state, enhanced, enhanceMeta, stagesExecuted, startMs, source);
   }
@@ -300,6 +518,14 @@ async function route(source, options = {}) {
 }
 
 function buildResult(mmdSource, contentState, enhanced, enhanceMeta, stagesExecuted, startMs, originalSource) {
+  // Run deterministic repairer before validation/classification
+  const repairResult = deterministicRepair(mmdSource);
+  if (repairResult.changes.length > 0) {
+    mmdSource = repairResult.source;
+    stagesExecuted.push('deterministic_repair');
+    logger.info('deterministic.repair', { changes: repairResult.changes });
+  }
+
   const diagramType = classify(mmdSource);
   const validation = validate(mmdSource);
 
@@ -338,4 +564,12 @@ class RouterError extends Error {
   }
 }
 
-module.exports = { route, detect, extractFencedMermaid, bestEffortExtract, RouterError };
+module.exports = {
+  route,
+  renderPrepare,
+  compileWithRetry,
+  detect,
+  extractFencedMermaid,
+  bestEffortExtract,
+  RouterError,
+};

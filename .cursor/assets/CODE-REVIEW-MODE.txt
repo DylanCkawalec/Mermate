@@ -1,0 +1,94 @@
+Run in **CODE-REVIEW MODE** for Mermate.
+
+Use the Agent Architect skill and references as the governing procedure.
+Operate like a senior software architect performing architecture recovery from a live codebase.
+
+## Model policy
+Use [MODEL] as the primary reasoning model for repo analysis, architecture reconstruction, and Mermate drafting.
+Use local/default render mode for repeated architecture validation.
+Use Max mode only for final architect-grade output if justified.
+
+## Mission
+Inspect the target repository and reconstruct its real architecture from:
+- repo structure
+- source code
+- dependencies
+- configuration
+- runtime entrypoints
+- APIs
+- data flow
+- frontend/backend boundaries
+- protocol/state logic
+- libraries and framework choices
+- infrastructure or deployment hints
+
+Then use Mermate iteratively to produce a serious architecture that reflects the system as it actually exists.
+
+## Target
+Repository / path:
+[REPO_PATH]
+
+Primary entry docs:
+[PRIMARY_DOCS]
+
+Optional extra sources:
+[SUPPORTING_DOCS]
+
+## Required operating behavior
+1. Inspect the repo deeply before drafting.
+2. Prefer implementation truth over documentation claims.
+3. Extract:
+   - actors
+   - services
+   - stores
+   - APIs
+   - state machines
+   - orchestration paths
+   - failure/retry paths
+   - external dependencies
+   - trust boundaries
+4. Infer missing architecture only where strongly implied by the codebase.
+5. Draft the first architecture in Mermate terms.
+6. Use repeated cheap/default renders to test whether the structure is actually readable and correct.
+7. Critique each returned diagram using the architecture rubric.
+8. Split the architecture into multiple views if one diagram becomes overloaded.
+9. Only run Max mode after the design is mature enough to justify it.
+10. Name the final master architecture:
+   [FINAL_ARCH_NAME]
+
+## Required Mermate loop
+- Build the architecture draft progressively.
+- Use copilot suggestions deliberately.
+- Wait for the 3+ second suggestion cycle where appropriate.
+- Accept suggestions only if they improve architecture quality.
+- Use active enhancement only on weak or under-specified fragments.
+- Perform repeated cheap/default renders first.
+- Evaluate returned diagrams critically.
+- Strengthen the text before final Max render.
+
+## Required outputs
+Return:
+1. Executive summary
+2. System understanding
+3. Repo/code architecture findings
+4. Frontend findings
+5. Backend/API/protocol findings
+6. Dependency and library implications
+7. Inferred missing architecture
+8. Proposed architecture views
+9. Iterative Mermate refinement log
+10. Cheap/default render comparison summary
+11. Final architecture rationale
+12. Final Mermate master text
+13. Final render mode used
+14. Final artifact summary
+15. Final verdict on whether the architecture faithfully matches the real system
+
+## Judgment standard
+Do not settle for a generic box-and-arrow view.
+The final architecture must be:
+- implementation-grounded
+- structurally correct
+- readable
+- decomposed properly
+- useful to a serious engineering team

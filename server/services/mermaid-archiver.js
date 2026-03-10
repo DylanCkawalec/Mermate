@@ -25,7 +25,6 @@ async function archive(mermaidSource, diagramName, diagramType) {
   const mdPath = path.join(ARCHS_DIR, mdFileName);
   const mmdPath = path.join(ARCHS_DIR, mmdFileName);
 
-  // Write dated markdown archive
   const mdContent = [
     `# ${diagramName}`,
     '',
@@ -41,8 +40,6 @@ async function archive(mermaidSource, diagramName, diagramType) {
   ].join('\n');
 
   await fsp.writeFile(mdPath, mdContent, 'utf-8');
-
-  // Write .mmd source
   await fsp.writeFile(mmdPath, mermaidSource, 'utf-8');
 
   logger.info('diagram.archived', { diagramName, mdPath: mdFileName, mmdPath: mmdFileName });
@@ -53,4 +50,34 @@ async function archive(mermaidSource, diagramName, diagramType) {
   };
 }
 
-module.exports = { archive };
+/**
+ * Archive the final compiled Mermaid source that was actually rendered.
+ * This preserves an accurate record of what the system produced, separate
+ * from the original user input (which may be natural language or markdown).
+ *
+ * @param {string} compiledMmd - The Mermaid source that was compiled to SVG/PNG
+ * @param {string} diagramName - Slugified diagram name
+ * @param {object} renderMeta  - Metadata about the render (provider, attempts, etc.)
+ */
+async function archiveCompiled(compiledMmd, diagramName, renderMeta = {}) {
+  if (!compiledMmd || !diagramName) return null;
+  await fsp.mkdir(ARCHS_DIR, { recursive: true });
+
+  const compiledFileName = `${diagramName}.compiled.mmd`;
+  const compiledPath = path.join(ARCHS_DIR, compiledFileName);
+
+  const header = [
+    `%% Compiled Mermaid source for: ${diagramName}`,
+    `%% Generated: ${new Date().toISOString()}`,
+    renderMeta.provider ? `%% Provider: ${renderMeta.provider}` : null,
+    renderMeta.attempts ? `%% Compile attempts: ${renderMeta.attempts}` : null,
+    renderMeta.maxMode ? `%% Max mode: true` : null,
+  ].filter(Boolean).join('\n');
+
+  const content = header + '\n\n' + compiledMmd;
+  await fsp.writeFile(compiledPath, content, 'utf-8');
+
+  return `/archs/${compiledFileName}`;
+}
+
+module.exports = { archive, archiveCompiled };

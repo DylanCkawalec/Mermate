@@ -63,10 +63,18 @@ Or more structured:
    - on success: return confirmation to browser
    - on failure: show error, retry up to 3 times → dead letter queue&quot;
 
-Useful signals: actors, services, arrows (→), steps, decisions, states, failures"
+Useful signals: actors, services, arrows (→), steps, decisions, states, failures
+
+Type /talk to speak your idea"
           spellcheck="false"
           aria-describedby="input-hint"
         ></textarea>
+        <!-- Talk-to-text mic button -->
+        <button id="btn-mic" class="btn-mic" aria-label="Speak your mind — speech-to-text" title="Speak your mind">
+          <svg class="mic-icon mic-icon-idle" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5a2 2 0 0 0-2 2v4a2 2 0 0 0 4 0v-4a2 2 0 0 0-2-2z"/><path d="M4 7a4 4 0 0 0 8 0"/><line x1="8" y1="13" x2="8" y2="11"/><line x1="6" y1="13" x2="10" y2="13"/></svg>
+          <svg class="mic-icon mic-icon-rec" viewBox="0 0 16 16" fill="currentColor" stroke="none" hidden><circle cx="8" cy="8" r="5"/></svg>
+          <span class="mic-label">Speak your mind</span>
+        </button>
         <div class="copilot-ghost-layer" aria-hidden="true" style="display:none">
           <span class="copilot-mirror-text"></span><span class="copilot-ghost-text"></span>
         </div>
@@ -81,15 +89,76 @@ Useful signals: actors, services, arrows (→), steps, decisions, states, failur
         <span id="input-hint" class="input-hint">Type an idea and the system will generate a diagram</span>
         <span id="content-state-badge" class="state-badge" aria-live="polite"></span>
         <span id="diagram-type-badge" class="type-badge" aria-live="polite"></span>
+
+        <!-- Agent mode selector -->
+        <div class="agent-selector-wrap">
+          <button id="btn-agent-toggle" class="btn-agent-toggle" aria-label="Select Agent mode" title="Agent: automated architecture refinement">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.5"/><path d="M8 4v4l2.5 2.5"/></svg>
+            Agent
+          </button>
+          <div id="agent-dropdown" class="agent-dropdown" hidden>
+            <button class="agent-mode-option" data-agent-mode="thinking">
+              <span class="agent-mode-icon">💡</span>
+              <span class="agent-mode-info">
+                <span class="agent-mode-name">Thinking</span>
+                <span class="agent-mode-desc">Build architecture from ideas or notes</span>
+              </span>
+            </button>
+            <button class="agent-mode-option" data-agent-mode="code-review">
+              <span class="agent-mode-icon">🔍</span>
+              <span class="agent-mode-info">
+                <span class="agent-mode-name">Code Review</span>
+                <span class="agent-mode-desc">Recover architecture from a codebase</span>
+              </span>
+            </button>
+            <button class="agent-mode-option" data-agent-mode="optimize-mmd">
+              <span class="agent-mode-icon">⚡</span>
+              <span class="agent-mode-info">
+                <span class="agent-mode-name">Optimize</span>
+                <span class="agent-mode-desc">Improve existing Mermaid or markdown</span>
+              </span>
+            </button>
+          </div>
+        </div>
+
         <label class="enhance-toggle" title="Use GPT-OSS to refine and optimize input before compiling">
           <input type="checkbox" id="chk-enhance" />
           <span class="enhance-label">Enhance</span>
           <span class="enhance-hint">— AI refine (or local fallback)</span>
         </label>
+        <button id="btn-max" class="btn-max" aria-label="Toggle Max mode for strongest architecture output" title="Max: use strongest premium model for architect-grade output">Max</button>
         <button id="btn-render" class="btn btn-render" aria-label="Render diagram">
           Render
           <span class="kbd">&#8984;&#9166;</span>
         </button>
+        <button id="btn-agent-run" class="btn btn-agent-run" hidden aria-label="Run Agent">
+          Run Agent
+        </button>
+      </div>
+
+      <!-- Agent planning panel -->
+      <div id="agent-panel" class="agent-panel" hidden>
+        <div class="agent-panel-header">
+          <span class="agent-panel-title">Agent</span>
+          <span id="agent-panel-mode" class="agent-panel-mode"></span>
+          <button id="btn-agent-stop" class="agent-panel-stop" aria-label="Stop agent" title="Stop">&times;</button>
+        </div>
+        <div id="agent-panel-log" class="agent-panel-log"></div>
+        <!-- Pre-Max notes input -->
+        <div id="agent-notes-wrap" class="agent-notes-wrap" hidden>
+          <textarea
+            id="agent-notes-input"
+            class="agent-notes-input"
+            rows="2"
+            placeholder="Add notes before Max render… e.g. 'Focus on failure paths' or 'Make frontend/backend split clearer'"
+          ></textarea>
+          <button id="btn-agent-finalize" class="btn btn-agent-finalize">
+            Finalize Max Render
+          </button>
+          <button id="btn-agent-skip-notes" class="btn btn-secondary btn-agent-skip">
+            Skip &rarr; Max
+          </button>
+        </div>
       </div>
     </section>
 
@@ -159,6 +228,8 @@ Useful signals: actors, services, arrows (→), steps, decisions, states, failur
   <script src="/js/mermaid-gpt-flip-card.js"></script>
   <script src="/js/mermaid-gpt-sidebar.js"></script>
   <script src="/js/mermaid-gpt-copilot.js"></script>
+  <script src="/js/mermaid-gpt-agent.js"></script>
+  <script src="/js/mermaid-gpt-speech.js"></script>
   <script src="/js/mermaid-gpt-app.js"></script>
 </body>
 </html>

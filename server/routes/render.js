@@ -3,16 +3,221 @@
 const { Router } = require('express');
 const path = require('node:path');
 const fsp = require('node:fs/promises');
-const { compile } = require('../services/mermaid-compiler');
-const { archive } = require('../services/mermaid-archiver');
-const { route, RouterError } = require('../services/input-router');
+const { archive, archiveCompiled } = require('../services/mermaid-archiver');
+const { validate: validateMmd } = require('../services/mermaid-validator');
+const { route, renderPrepare, compileWithRetry, RouterError } = require('../services/input-router');
+const enhancerBridge = require('../services/gpt-enhancer-bridge');
+const provider = require('../services/inference-provider');
+const { buildPrompt } = require('../services/axiom-prompts');
+const { analyze } = require('../services/input-analyzer');
 const { deriveDiagramName } = require('../utils/naming');
 const logger = require('../utils/logger');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const FLOWS_DIR = path.join(PROJECT_ROOT, 'flows');
+const ENHANCER_URL = process.env.MERMAID_ENHANCER_URL || 'http://localhost:8100';
+const ENHANCER_TIMEOUT_MS = parseInt(process.env.MERMAID_ENHANCER_TIMEOUT || '15000', 10);
 
 const router = Router();
+const COPILOT_STAGES = new Set(['copilot_suggest', 'copilot_enhance']);
+
+async function callEnhancer(body) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ENHANCER_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${ENHANCER_URL}/mermaid/enhance`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    return res;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * GET /api/copilot/health
+ * Frontend-safe health probe: reports available if ANY provider in the chain
+ * can serve copilot requests (Ollama, premium API, or Python enhancer).
+ */
+router.get('/copilot/health', async (_req, res) => {
+  try {
+    const providers = await provider.checkProviders();
+    const available = providers.ollama || providers.premium || providers.enhancer;
+    const maxAvailable = provider.isMaxAvailable();
+    return res.status(available ? 200 : 503).json({
+      success: available,
+      available,
+      providers,
+      maxAvailable,
+    });
+  } catch (err) {
+    logger.warn('copilot.health.error', { error: err.message });
+    return res.status(503).json({
+      success: false,
+      available: false,
+    });
+  }
+});
+
+/**
+ * POST /api/analyze
+ * Returns an InputProfile for the given text — maturity, quality, completeness,
+ * intent, shadow model, recommendation, and hint. Called by the frontend on
+ * debounced input changes to power intelligent suggestion gating and hints.
+ */
+router.post('/analyze', (req, res) => {
+  const text = req.body?.text;
+  const mode = req.body?.mode || 'idea';
+  if (!text || typeof text !== 'string') {
+    return res.json({ success: true, profile: analyze('', mode) });
+  }
+  const profile = analyze(text.trim(), mode);
+  return res.json({ success: true, profile });
+});
+
+/**
+ * POST /api/copilot/enhance
+ * Proxies copilot suggest/enhance requests to enhancer service.
+ */
+router.post('/copilot/enhance', async (req, res) => {
+  const stage = req.body?.stage;
+  if (!COPILOT_STAGES.has(stage)) {
+    return res.status(400).json({
+      success: false,
+      error: 'invalid_stage',
+      details: 'stage must be copilot_suggest or copilot_enhance',
+    });
+  }
+
+  const prompt = buildPrompt(stage);
+
+  // Compute shadow model for context injection into copilot enhance calls
+  const sourceText = req.body?.full_text || req.body?.raw_source || '';
+  let shadowContext = null;
+  if (stage === 'copilot_enhance' && sourceText) {
+    const profile = analyze(sourceText, 'idea');
+    shadowContext = {
+      entities: (profile.shadow?.entities || []).slice(0, 20).map(e => e.name),
+      relationships: (profile.shadow?.relationships || []).slice(0, 15).map(r => `${r.from} ${r.verb} ${r.to}`),
+      gaps: profile.shadow?.gaps || [],
+      maturity: profile.maturity,
+      qualityScore: profile.qualityScore,
+    };
+  }
+
+  // Try the Python enhancer first, then fall through to the provider chain
+  const enhancerAvailable = await enhancerBridge.isAvailable();
+  if (enhancerAvailable) {
+    const payload = {
+      ...req.body,
+      stage,
+      content_state: req.body?.content_state || 'text',
+      mode: req.body?.mode || 'idea',
+      raw_source: req.body?.raw_source || req.body?.full_text || '',
+      system_prompt: prompt.system,
+      temperature: prompt.temperature,
+      ...(shadowContext ? { shadow_context: shadowContext } : {}),
+    };
+
+    try {
+      const upstream = await callEnhancer(payload);
+      const responseText = await upstream.text();
+      let data = null;
+      try {
+        data = responseText ? JSON.parse(responseText) : {};
+      } catch {
+        data = null;
+      }
+
+      if (upstream.ok && data) {
+        // No-op detection for copilot_enhance
+        if (stage === 'copilot_enhance') {
+          const inputText = (req.body?.selected_text || req.body?.full_text || req.body?.raw_source || '').trim();
+          const outputText = (data.enhanced_source || '').trim();
+          if (!inputText || !outputText || inputText !== outputText) {
+            return res.json({ success: true, ...data });
+          }
+          logger.warn('copilot.enhance.no_op_enhancer', { stage });
+          // Fall through to provider chain below
+        } else if (stage === 'copilot_suggest') {
+          const suggestion = (data.suggestion || '').trim();
+          const confidence = data.confidence || 'low';
+          if (suggestion || confidence === 'low') {
+            return res.json({ success: true, ...data });
+          }
+          logger.warn('copilot.suggest.empty_enhancer', { stage });
+          // Fall through to provider chain below
+        } else {
+          return res.json({ success: true, ...data });
+        }
+      }
+    } catch (err) {
+      logger.warn('copilot.enhancer_failed', { stage, error: err.message });
+    }
+  }
+
+  // ---- Provider chain fallback (Ollama / premium API) ----
+  // Build a user prompt that includes shadow context
+  let userPrompt = sourceText;
+  if (shadowContext) {
+    const contextLines = [];
+    if (shadowContext.entities.length > 0) contextLines.push(`[ENTITIES] ${shadowContext.entities.join(', ')}`);
+    if (shadowContext.relationships.length > 0) contextLines.push(`[RELATIONSHIPS] ${shadowContext.relationships.join('; ')}`);
+    if (shadowContext.gaps.length > 0) contextLines.push(`[GAPS] ${shadowContext.gaps.join('; ')}`);
+    if (contextLines.length > 0) userPrompt = contextLines.join('\n') + '\n\n' + sourceText;
+  }
+
+  if (stage === 'copilot_suggest') {
+    const activeLine = req.body?.active_line || '';
+    const suggestUserPrompt = `Stage: copilot_suggest\n\nFull text: ${sourceText}\n\nActive line: ${activeLine}\n\nReturn valid JSON only.`;
+    const result = await provider.infer('copilot_suggest', {
+      systemPrompt: prompt.system,
+      userPrompt: suggestUserPrompt,
+    });
+
+    if (result.output) {
+      try {
+        const parsed = JSON.parse(result.output);
+        if (parsed.suggestion) return res.json({ success: true, ...parsed, provider: result.provider });
+      } catch {
+        // Not valid JSON — treat as raw suggestion text
+        if (result.output.length <= 120) {
+          return res.json({ success: true, suggestion: result.output.trim(), confidence: 'medium', provider: result.provider });
+        }
+      }
+    }
+    return res.status(503).json({ success: false, error: 'copilot_unavailable', details: 'No provider could generate a suggestion.' });
+  }
+
+  if (stage === 'copilot_enhance') {
+    const enhanceUserPrompt = `Stage: copilot_enhance\nEnhance mode: ${req.body?.enhance_mode || 'full'}\n\nFull text: ${sourceText}\n\nSelected text: ${req.body?.selected_text || ''}\n\nReturn valid JSON only.`;
+    const result = await provider.infer('copilot_enhance', {
+      systemPrompt: prompt.system,
+      userPrompt: enhanceUserPrompt,
+    });
+
+    if (result.output && !result.noOp) {
+      try {
+        const parsed = JSON.parse(result.output);
+        if (parsed.enhanced_source) return res.json({ success: true, ...parsed, provider: result.provider });
+      } catch {
+        // Not JSON — use raw text as enhanced source
+        return res.json({
+          success: true,
+          enhanced_source: result.output.trim(),
+          intent_preserved: true,
+          provider: result.provider,
+        });
+      }
+    }
+    return res.status(503).json({ success: false, error: 'copilot_unavailable', details: 'No provider could enhance the text.' });
+  }
+
+  return res.status(503).json({ success: false, error: 'copilot_unavailable', details: 'No copilot provider available.' });
+});
 
 /**
  * POST /api/render
@@ -22,7 +227,7 @@ const router = Router();
  * The input-router detects the content type and selects the correct pipeline.
  */
 router.post('/render', async (req, res) => {
-  const { mermaid_source, diagram_name, enhance } = req.body || {};
+  const { mermaid_source, diagram_name, enhance, max_mode } = req.body || {};
 
   if (!mermaid_source || typeof mermaid_source !== 'string' || !mermaid_source.trim()) {
     return res.status(400).json({
@@ -44,25 +249,62 @@ router.post('/render', async (req, res) => {
 
   try {
     const classifiedAt = new Date().toISOString();
+    const startMs = Date.now();
 
-    // 1. Route through intelligent pipeline (detect -> enhance -> produce .mmd)
+    // 1. Analyze input holistically (maturity, quality, shadow model, intent)
+    const profile = analyze(source, 'idea');
+
+    const useMax = !!(max_mode && provider.isMaxAvailable());
+
+    logger.info('render.analyzed', {
+      maturity: profile.maturity,
+      quality: profile.qualityScore,
+      completeness: profile.completenessScore,
+      recommendation: profile.recommendation,
+      contentState: profile.contentState,
+      maxMode: useMax,
+    });
+
+    // 2. Choose pipeline based on content state and profile recommendation
     let routeResult;
-    try {
-      routeResult = await route(source, { enhance: !!enhance });
-    } catch (err) {
-      if (err instanceof RouterError) {
-        return res.status(422).json({
-          success: false,
-          error: err.code,
-          details: err.message,
-        });
+    const isTextOrMd = profile.contentState === 'text' || profile.contentState === 'md';
+    const shouldUseProvider = isTextOrMd && enhance;
+
+    if (shouldUseProvider) {
+      // ---- Provider-backed render_prepare (replaces text_to_md + md_to_mmd) ----
+      const prepResult = await renderPrepare(source, profile, useMax);
+      routeResult = {
+        mmdSource: prepResult.mmdSource,
+        diagramType: '',
+        contentState: profile.contentState,
+        enhanced: prepResult.enhanced,
+        enhanceMeta: prepResult.enhanced ? {
+          transformation: 'render_prepare',
+          provider: prepResult.provider,
+        } : null,
+        stagesExecuted: prepResult.stagesExecuted,
+        totalEnhanceMs: Date.now() - startMs,
+        validation: null,
+        diagramSelection: profile.diagramSelection,
+      };
+    } else {
+      // ---- Existing route() for mmd, hybrid, and non-enhance paths ----
+      try {
+        routeResult = await route(source, { enhance: !!enhance });
+      } catch (err) {
+        if (err instanceof RouterError) {
+          return res.status(422).json({
+            success: false,
+            error: err.code,
+            details: err.message,
+          });
+        }
+        throw err;
       }
-      throw err;
     }
 
     const {
       mmdSource,
-      diagramType,
       contentState,
       enhanced: wasEnhanced,
       enhanceMeta,
@@ -72,6 +314,9 @@ router.post('/render', async (req, res) => {
       diagramSelection,
     } = routeResult;
 
+    // Re-classify after potential transformation
+    const diagramType = routeResult.diagramType || require('../services/mermaid-classifier').classify(mmdSource);
+
     logger.info('input.routed', {
       content_state: contentState,
       diagram_type: diagramType,
@@ -80,23 +325,25 @@ router.post('/render', async (req, res) => {
       enhance_ms: totalEnhanceMs,
     });
 
-    // 2. Derive name
+    // 3. Derive name
     const diagramName = deriveDiagramName(mmdSource, diagram_name);
 
-    // 3. Archive original source
+    // 4. Archive original source
     const archivePaths = await archive(source, diagramName, diagramType);
 
-    // 4. Compile the .mmd output (SVG + PNG)
+    // 5. Compile with retry loop (deterministic repair -> model-assisted repair)
     const outputDir = path.join(FLOWS_DIR, diagramName);
-    const compileResult = await compile(mmdSource, outputDir, diagramName);
+    const compileOutcome = await compileWithRetry(mmdSource, outputDir, diagramName);
 
-    if (!compileResult.ok) {
+    if (!compileOutcome.result.ok) {
       return res.status(422).json({
         success: false,
         error: 'compilation_failed',
-        details: compileResult.error,
+        details: _sanitizeError(compileOutcome.result.error),
         diagram_type: diagramType,
         content_state: contentState,
+        attempts: compileOutcome.attempts,
+        repair_changes: compileOutcome.repairChanges,
         enhance_meta: wasEnhanced ? {
           transformation: enhanceMeta?.transformation,
           content_state: contentState,
@@ -106,22 +353,42 @@ router.post('/render', async (req, res) => {
       });
     }
 
-    // 5. Respond
+    // 6. Post-render: archive compiled Mermaid and compute quality metrics
     const compiledAt = new Date().toISOString();
+    const finalMmd = compileOutcome.mmdSource;
+    const finalDiagramType = require('../services/mermaid-classifier').classify(finalMmd);
+
+    const compiledArchivePath = await archiveCompiled(finalMmd, diagramName, {
+      provider: enhanceMeta?.provider || null,
+      attempts: compileOutcome.attempts,
+      maxMode: useMax,
+    });
+
+    const postRenderValidation = validateMmd(finalMmd);
+    const mmdMetrics = {
+      nodeCount: postRenderValidation.stats?.nodeCount || 0,
+      edgeCount: postRenderValidation.stats?.edgeCount || 0,
+      subgraphCount: postRenderValidation.stats?.subgraphCount || 0,
+      charCount: finalMmd.length,
+      structurallyValid: postRenderValidation.valid,
+    };
+
+    // 7. Respond with final artifacts + compiled source + quality metrics
     return res.json({
       success: true,
       diagram_name: diagramName,
-      diagram_type: diagramType,
+      diagram_type: finalDiagramType || diagramType,
       classified_at: classifiedAt,
       compiled_at: compiledAt,
       enhanced: wasEnhanced,
       enhance_meta: wasEnhanced ? {
         transformation: enhanceMeta?.transformation,
         content_state: contentState,
-        maturity: enhanceMeta?.maturity || null,
+        maturity: enhanceMeta?.maturity || profile.maturity,
         stages_executed: stagesExecuted,
         total_enhance_ms: totalEnhanceMs,
         warnings: enhanceMeta?.warnings || [],
+        provider: enhanceMeta?.provider || null,
       } : null,
       content_state: contentState,
       paths: {
@@ -129,13 +396,21 @@ router.post('/render', async (req, res) => {
         svg: `/flows/${diagramName}/${diagramName}.svg`,
         mmd: archivePaths.mmdPath,
         md: archivePaths.mdPath,
+        compiled_mmd: compiledArchivePath,
       },
+      compiled_source: finalMmd,
       validation: {
-        svg_valid: compileResult.svg.valid,
-        png_valid: compileResult.png.valid,
-        svg_bytes: compileResult.svg.bytes,
-        png_bytes: compileResult.png.bytes,
+        svg_valid: compileOutcome.result.svg.valid,
+        png_valid: compileOutcome.result.png.valid,
+        svg_bytes: compileOutcome.result.svg.bytes,
+        png_bytes: compileOutcome.result.png.bytes,
       },
+      render_meta: {
+        attempts: compileOutcome.attempts,
+        repair_changes: compileOutcome.repairChanges,
+        max_mode: useMax,
+      },
+      mmd_metrics: mmdMetrics,
       axiom_analysis: {
         pre_compile: {
           valid: preCompileValidation?.valid ?? true,
@@ -143,7 +418,7 @@ router.post('/render', async (req, res) => {
           warnings: (preCompileValidation?.warnings || []).length,
           stats: preCompileValidation?.stats || {},
         },
-        diagram_selection: diagramSelection || null,
+        diagram_selection: diagramSelection || profile.diagramSelection || null,
       },
     });
   } catch (err) {
@@ -228,5 +503,27 @@ router.delete('/diagrams/:name', async (req, res) => {
     return res.status(500).json({ success: false, error: err.message });
   }
 });
+
+/**
+ * Strip environment noise (security-monitor banners, ANSI codes, stack traces)
+ * from compiler error messages before returning them to the user.
+ */
+function _sanitizeError(raw) {
+  if (!raw || typeof raw !== 'string') return 'Compilation failed';
+  let cleaned = raw
+    .replace(/\u001b\[[0-9;]*m/g, '')                        // ANSI escape codes
+    .replace(/\[npm-security-monitor\][^\n]*/g, '')           // security-monitor lines
+    .replace(/═{3,}[^═]*═{3,}/gs, '')                        // banner blocks
+    .replace(/⚠️[^\n]*/g, '')                                // alert headers
+    .replace(/Explanation:[\s\S]*?Action Taken:[\s\S]*?\n/g, '') // full alert bodies
+    .replace(/•[^\n]*/g, '')                                  // bullet explanations
+    .replace(/at\s+\S+\s+\([^)]+\)/g, '')                    // stack trace frames
+    .replace(/\n{3,}/g, '\n\n')                               // collapse blank runs
+    .trim();
+  // Extract the meaningful Mermaid error line
+  const mermaidErr = cleaned.match(/((?:UnknownDiagramError|Error|Parse error)[^\n]+)/);
+  if (mermaidErr) return mermaidErr[1].trim();
+  return cleaned.slice(0, 300) || 'Compilation failed';
+}
 
 module.exports = router;

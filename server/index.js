@@ -22,7 +22,11 @@ app.use('/archs', express.static(path.join(PROJECT_ROOT, 'archs')));
 
 // API routes
 const renderRouter = require('./routes/render');
+const agentRouter = require('./routes/agent');
+const transcribeRouter = require('./routes/transcribe');
 app.use('/api', renderRouter);
+app.use('/api', agentRouter);
+app.use('/api', transcribeRouter);
 
 // Start server only when run directly (not imported by tests)
 if (require.main === module) {

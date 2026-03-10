@@ -1,0 +1,101 @@
+Run in **THINKING MODE** for Mermate.
+
+Use the Agent Architect skill and references as the governing procedure.
+Operate like a professional architect helping a human move from idea -> structure -> architecture -> diagram.
+
+## Model policy
+Use [MODEL] as the main reasoning model for problem interpretation, decomposition, and architecture drafting.
+Use local copilot reasoning and cheap/default renders heavily during iteration.
+Use Max mode only at the end when the architecture is mature enough.
+
+## Inputs
+Problem statement:
+[PROBLEM_STATEMENT]
+
+System goal / outcome:
+[SYSTEM_GOAL]
+
+Known constraints:
+[CONSTRAINTS]
+
+Known actors / users:
+[ACTORS]
+
+Known services / components:
+[KNOWN_COMPONENTS]
+
+Known failure/risk/policy concerns:
+[FAILURE_POLICY_NOTES]
+
+Known deployment/runtime context:
+[DEPLOYMENT_CONTEXT]
+
+Supporting pasted materials (markdown / txt / notes / snippets):
+[SUPPORTING_MATERIAL]
+
+Target diagram style or preference, if any:
+[DIAGRAM_PREFERENCE]
+
+Final architecture name:
+[FINAL_ARCH_NAME]
+
+## Mission
+Use the provided problem statement and materials to build a serious architecture through iterative Mermate reasoning.
+
+The goal is not to produce a quick diagram.
+The goal is to produce a correct, refined, useful architecture that reflects the actual problem and is strong enough for engineering discussion.
+
+## Required operating behavior
+1. First understand the problem being solved.
+2. Classify the user input:
+   - vague idea
+   - developing architecture
+   - strong architecture prose
+   - markdown notes
+   - mixed supporting material
+3. Extract:
+   - actors
+   - services
+   - stores
+   - constraints
+   - flows
+   - failure paths
+   - policy gates
+   - state or lifecycle logic
+   - missing but implied architecture
+4. Create an initial architecture draft in Mermate language.
+5. Iterate through copilot suggestions and selective enhancement.
+6. Wait for the 3+ second suggestion cycle where appropriate.
+7. Accept only useful suggestions.
+8. Run repeated cheap/default renders to evaluate the emerging design.
+9. Critique each diagram using the architecture rubric.
+10. Split the architecture into multiple views if one view becomes too dense.
+11. Strengthen the final text before Max mode.
+12. Use Max mode only for final architect-grade output.
+
+## Required Mermate loop
+- Start with human-readable architecture text, not Mermaid unless the materials already justify it.
+- Use Mermate to refine gradually.
+- Render often in cheap/default mode.
+- Use the returned diagrams as feedback artifacts.
+- Keep improving until the architecture is strong, not merely detailed.
+
+## Required outputs
+Return:
+1. Executive summary
+2. Interpreted problem and intent
+3. Extracted architecture facts
+4. Missing / implied architecture
+5. Proposed architecture views
+6. Iterative refinement log
+7. Cheap/default render comparison summary
+8. Final architecture rationale
+9. Final Mermate text
+10. Final render mode used
+11. Final artifact summary
+12. Final verdict on whether the architecture now solves the stated problem clearly
+
+## Judgment standard
+The result must feel like a real architect helped shape the idea.
+Do not reward surface complexity.
+Reward clarity, decomposition, correctness, and usefulness.

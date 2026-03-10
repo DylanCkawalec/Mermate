@@ -30,13 +30,69 @@ cd ~/developer/mermaid
 # 2. Install dependencies
 npm install
 
-# 3. Start the app
+# 3. Create your local env
+cp .env.example .env
+
+# 4. Start the app
 ./mermaid.sh start
 ```
 
 Open [http://localhost:3333](http://localhost:3333).
 
 That's it. The app runs completely without an AI model. You can paste Mermaid source directly and compile it to high-resolution PNG and SVG from day one.
+
+---
+
+## Local `.env` setup for agent use
+
+The agent workflow, premium render path, and Max mode are configured from your local `.env`.
+
+Start with:
+
+```bash
+cp .env.example .env
+```
+
+Recommended `.env` for the OpenAI API path:
+
+```env
+MERMATE_AI_API_KEY=your_openai_api_key
+MERMATE_AI_PROVIDER=openai
+MERMATE_AI_MODEL=gpt-4o-mini
+MERMATE_AI_MAX_MODEL=gpt-4o
+MERMATE_AI_MAX_ENABLED=true
+```
+
+What these do:
+
+- `MERMATE_AI_API_KEY`: enables the premium API provider
+- `MERMATE_AI_PROVIDER`: premium provider selector; `openai` is the default and recommended option
+- `MERMATE_AI_MODEL`: default premium model used for normal AI renders
+- `MERMATE_AI_MAX_MODEL`: stronger premium model used when Max mode is enabled
+- `MERMATE_AI_MAX_ENABLED`: turns Max mode on in the runtime provider layer
+
+Recommended starting setup:
+
+- Use `openai` for the premium provider
+- Keep `gpt-4o-mini` as the default model for cheaper iteration
+- Use `gpt-4o` as the Max model for final architect-grade renders
+- Leave local Ollama or the Python enhancer optional unless you specifically want a local-first workflow
+
+Optional local providers:
+
+```env
+MERMATE_OLLAMA_URL=http://localhost:11434
+MERMATE_OLLAMA_MODEL=gpt-oss:20b
+MERMAID_ENHANCER_URL=http://localhost:8100
+MERMAID_ENHANCER_TIMEOUT=15000
+```
+
+Provider behavior in the app today:
+
+- Copilot suggestions and text enhancement prefer local-first fallback: Ollama -> Python enhancer -> premium API
+- Render preparation prefers the strongest available provider path, with premium API first
+- Max mode uses `MERMATE_AI_MAX_MODEL` when `MERMATE_AI_MAX_ENABLED=true`
+- If no AI provider is available, the app still works as a Mermaid compiler with local suggestion fallbacks
 
 ---
 
@@ -55,11 +111,38 @@ That's it. The app runs completely without an AI model. You can paste Mermaid so
 
 ## Connecting an AI model
 
-The copilot and enhancement features (`Enhance` toggle, `Ctrl+Return` in Simple Idea mode) require an API-compatible language model running on `http://localhost:8100`.
+Mermate supports three AI paths:
 
-Mermate uses a simple HTTP contract. Any model server that accepts `POST /mermaid/enhance` works.
+- Premium API provider configured from `.env` (`openai` recommended)
+- Local Ollama provider for cheap local iteration
+- Python enhancer bridge on `http://localhost:8100`
 
-### What the enhancer endpoint expects
+The app automatically uses the best available provider chain for the current action. If one provider is offline, Mermate falls through to the next available option.
+
+### Recommended setup: OpenAI API
+
+If you want the simplest and highest-quality agent setup, use the premium API path:
+
+```env
+MERMATE_AI_API_KEY=your_openai_api_key
+MERMATE_AI_PROVIDER=openai
+MERMATE_AI_MODEL=gpt-4o-mini
+MERMATE_AI_MAX_MODEL=gpt-4o
+MERMATE_AI_MAX_ENABLED=true
+```
+
+This enables:
+
+- `Enhance` for architecture text refinement
+- stronger text-to-Mermaid conversion during render
+- Max mode for final higher-quality architecture output
+- the staged agent workflow that pauses on a preview render before the final Max pass
+
+### Optional setup: local enhancer contract
+
+Any model server that accepts `POST /mermaid/enhance` works.
+
+#### What the enhancer endpoint expects
 
 ```
 POST http://localhost:8100/mermaid/enhance
@@ -84,7 +167,7 @@ Response:
 }
 ```
 
-Mermate sends a full system prompt with each call (built from `archs/mermaid-axioms.md`). Your model only needs to follow the system prompt and return valid JSON.
+Mermate sends a full system prompt with each call (built from `archs/mermaid_axioms.md`). Your model only needs to follow the system prompt and return valid JSON.
 
 ---
 
@@ -185,13 +268,93 @@ Paste any of these into Simple Idea mode and press **Render**. Add `Enhance` for
 
 ---
 
+## Agent mode
+
+The app now includes an agent workflow for iterative architecture refinement.
+
+### What the agent does
+
+The frontend agent UI calls two SSE endpoints:
+
+- `POST /api/agent/run`: ingest -> planning -> refinement -> preview render -> pause for notes
+- `POST /api/agent/finalize`: optional note incorporation -> final Max render
+
+There is also:
+
+- `GET /api/agent/modes`: returns the available agent modes and labels
+
+### Available agent modes
+
+- `thinking`: build architecture from ideas, notes, or problem statements
+- `code-review`: recover architecture from an existing codebase
+- `optimize-mmd`: improve existing Mermaid or markdown without breaking intent
+
+### How prompting behavior is controlled
+
+The route layer loads mode instructions from `.cursor/assets`:
+
+- `.cursor/assets/THINKING-MODE.txt`
+- `.cursor/assets/CODE-REVIEW-MODE.txt`
+- `.cursor/assets/OPTIMIZE-MMD-MODE.txt`
+
+Those mode files are injected into the system prompt used by `server/routes/agent.js`, which tells the model to:
+
+- preserve what the user already specified
+- produce improved architecture text, not Mermaid
+- add structure, flows, boundaries, and failure handling
+- pause after a preview render so the user can steer the final Max render
+
+### Agent guidance inside `.cursor`
+
+The project also includes Cursor-facing guidance for architecture work:
+
+- `.cursor/agent-architect/SKILL.md`: the skill tree and operating philosophy for iterative architecture work
+- `.cursor/agent-architect/OPERATING_PROCEDURE.md`: runtime guidance, provider order, render rhythm, and evaluation rules
+- `.cursor/agents/openai.yaml`: the Cursor agent definition for the OpenAI-backed architecture agent
+
+Together, these files act as the project's prompt and behavior layer for the architecture agent experience.
+
+---
+
+## Route overview
+
+The route layer is split into two files mounted under `/api` in `server/index.js`.
+
+### `server/routes/render.js`
+
+Handles the main app workflow:
+
+- `GET /api/copilot/health`: provider availability and Max readiness
+- `POST /api/analyze`: input profile analysis without rendering
+- `POST /api/copilot/enhance`: copilot suggestion/enhancement proxy
+- `POST /api/render`: full analysis -> transform -> compile -> archive pipeline
+- `GET /api/diagrams`: list saved diagram outputs
+- `DELETE /api/diagrams/:name`: remove compiled artifacts and archived source
+
+This is the core production path for the app. It decides whether to route through premium API, Ollama, the enhancer bridge, or non-AI compile paths.
+
+### `server/routes/agent.js`
+
+Handles the staged architecture-agent workflow:
+
+- loads prompt skeletons from `.cursor/assets`
+- analyzes the current draft with `input-analyzer`
+- calls the inference provider for planning and refinement
+- performs a preview render through `/api/render`
+- pauses for user notes before triggering the final Max render
+
+This route makes Mermate more than a one-shot Mermaid compiler: it turns the app into a review-and-refine architecture copilot.
+
+---
+
 ## Project structure (brief)
 
 ```
 mermaid/
 ├── mermaid.sh              # Start, compile, validate
 ├── server/                 # Express API (port 3333)
-│   ├── routes/render.js    # POST /api/render, DELETE /api/diagrams/:name
+│   ├── routes/render.js    # Analyze, enhance, render, list, and delete diagrams
+│   ├── routes/agent.js     # Agent planning, preview, and finalize flows
 │   └── services/
 │       ├── mermaid-compiler.js    # mmdc wrapper, high-res PNG/SVG
 │       ├── mermaid-classifier.js  # Diagram type detection
@@ -200,22 +363,28 @@ mermaid/
 │       ├── diagram-selector.js    # Axiom-based diagram type selection
 │       ├── mermaid-validator.js   # Pre-compile structural validation
 │       ├── axiom-prompts.js       # System prompts for each pipeline stage
+│       ├── inference-provider.js  # Premium API, Ollama, enhancer provider chain
 │       └── gpt-enhancer-bridge.js # HTTP bridge to the enhancer service
 ├── public/                 # Frontend (served statically)
 │   ├── js/mermaid-gpt-copilot.js  # Ghost-text copilot for Simple Idea mode
+│   ├── js/mermaid-gpt-agent.js    # Frontend agent orchestration and SSE handling
 │   └── css/mermaid-gpt.css
+├── .cursor/
+│   ├── assets/             # Mode prompt skeletons used by /api/agent/*
+│   ├── agents/openai.yaml  # Cursor agent definition
+│   └── agent-architect/    # Skill + operating procedure for architecture work
 ├── archs/                  # Archived diagram sources (.mmd, .md)
 │   └── flows/              # Compiled output from ./mermaid.sh compile
 ├── flows/                  # Compiled output from the web app (served at /flows)
 ├── test/                   # Node test suite
-└── archs/mermaid-axioms.md # The intelligence model (read this)
+└── archs/mermaid_axioms.md # The intelligence model (read this)
 ```
 
 ---
 
 ## The intelligence model
 
-The axioms that govern how Mermate thinks about diagrams live in `archs/mermaid-axioms.md`. This is the most important file to read if you want to:
+The axioms that govern how Mermate thinks about diagrams live in `archs/mermaid_axioms.md`. This is the most important file to read if you want to:
 
 - Fine-tune your own model against Mermate's prompts
 - Extend the enhancer with custom stages
@@ -256,7 +425,15 @@ Environment variables:
 
 ```bash
 PORT=3333                                   # App server port (default 3333)
+MERMATE_AI_API_KEY=<key>                    # Premium provider API key
+MERMATE_AI_PROVIDER=openai                  # Premium provider (recommended)
+MERMATE_AI_MODEL=gpt-4o-mini                # Default premium model
+MERMATE_AI_MAX_MODEL=gpt-4o                 # Stronger model used by Max mode
+MERMATE_AI_MAX_ENABLED=true                 # Enable Max mode
+MERMATE_OLLAMA_URL=http://localhost:11434   # Optional Ollama base URL
+MERMATE_OLLAMA_MODEL=gpt-oss:20b            # Optional Ollama model
 MERMAID_ENHANCER_URL=http://localhost:8100  # Enhancer service URL
+MERMAID_ENHANCER_TIMEOUT=15000              # Enhancer request timeout in ms
 MERMAID_ENHANCER_START_CMD="<command>"      # Auto-start command for the enhancer
 ```
 

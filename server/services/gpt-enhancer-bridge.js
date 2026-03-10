@@ -20,14 +20,16 @@ const TIMEOUT_MS = parseInt(process.env.MERMAID_ENHANCER_TIMEOUT || '15000', 10)
  * @returns {Promise<boolean>}
  */
 async function isAvailable() {
+  let timer = null;
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2000);
+    timer = setTimeout(() => controller.abort(), 2000);
     const res = await fetch(`${ENHANCER_URL}/health`, { signal: controller.signal });
-    clearTimeout(timer);
     return res.ok;
   } catch {
     return false;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -43,9 +45,10 @@ async function isAvailable() {
  * @returns {Promise<{source: string, enhanced: boolean, meta: object}>}
  */
 async function enhance(rawSource, diagramType, stage, contentState) {
+  let timer = null;
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
     const promptConfig = buildPrompt(stage || 'validate_mmd');
 
@@ -62,16 +65,20 @@ async function enhance(rawSource, diagramType, stage, contentState) {
       }),
       signal: controller.signal,
     });
-    clearTimeout(timer);
 
     if (!res.ok) {
       return passthrough(rawSource, `Enhancer returned ${res.status}`);
     }
 
     const data = await res.json();
+    const nextSource = data.enhanced_source || rawSource;
+    const transformed = typeof data.transformation === 'string'
+      ? data.transformation !== 'passthrough'
+      : nextSource !== rawSource;
+
     return {
-      source: data.enhanced_source || rawSource,
-      enhanced: data.transformation !== 'passthrough',
+      source: nextSource,
+      enhanced: transformed,
       meta: {
         transformation: data.transformation,
         outputFormat: data.output_format || 'mmd',
@@ -84,6 +91,8 @@ async function enhance(rawSource, diagramType, stage, contentState) {
     };
   } catch (err) {
     return passthrough(rawSource, err.message);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

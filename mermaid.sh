@@ -118,7 +118,7 @@ check_enhancer() {
         fi
         echo "  Enhancer: start command ran but health check failed"
     fi
-    echo "  Enhancer: unavailable (app will use passthrough mode)"
+    echo "  Enhancer: unavailable (app will use local copilot fallback + passthrough mode)"
 }
 
 clear_port() {

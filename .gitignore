@@ -6,8 +6,9 @@ archs/flows/
 archs/*
 !archs/mermaid_axioms.md
 
-**/.DS_Store
 .DS_Store
 *.log
 .env
 .env.*
+
+prompt-example.md

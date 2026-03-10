@@ -7,8 +7,10 @@
 window.MermaidCopilot = class MermaidCopilot {
   constructor(inputEl, options) {
     this.input = inputEl;
-    this.enhancerUrl = options.enhancerUrl || '';
+    const rawBase = options.apiBase || options.enhancerUrl || '';
+    this.apiBase = String(rawBase).replace(/\/+$/, '');
     this.onAccept = options.onAccept || (() => {});
+    this.onProfileUpdate = options.onProfileUpdate || null;
 
     // Config
     this.IDLE_DELAY_MS      = Math.max(1200, options.idleDelay || 1800);
@@ -50,6 +52,25 @@ window.MermaidCopilot = class MermaidCopilot {
     this._suggestAC = null;
     this._enhanceAC = null;
 
+    // InputProfile from /api/analyze (updated on debounced input)
+    this._profile = null;
+    this._analyzeTimer = null;
+    this._lastAnalyzedHash = '';
+    this.ANALYZE_DELAY_MS = 800;
+
+    // Dismiss tracking: stop suggesting after N consecutive dismissals
+    this._consecutiveDismissals = 0;
+    this.MAX_DISMISSALS_BEFORE_SILENCE = 2;
+    this.CHARS_TO_RESET_DISMISSALS = 20;
+    this._charsSinceDismissal = 0;
+
+    // Adaptive health: track recent model outcomes
+    this._recentModelOutcomes = []; // ring buffer of booleans
+    this.MODEL_OUTCOME_WINDOW = 6;
+
+    // Rendered-hash: suppress suggestions for already-rendered text
+    this._lastRenderedHash = '';
+
     // DOM refs (set in init)
     this.ghostLayer = null;
     this.mirrorSpan = null;
@@ -61,6 +82,7 @@ window.MermaidCopilot = class MermaidCopilot {
     this._onInput = this._onInput.bind(this);
     this._onKeyDown = this._onKeyDown.bind(this);
     this._onBlur = this._onBlur.bind(this);
+    this._onScroll = this._onScroll.bind(this);
 
     this._init();
   }
@@ -77,6 +99,7 @@ window.MermaidCopilot = class MermaidCopilot {
     this.input.addEventListener('input', this._onInput);
     this.input.addEventListener('keydown', this._onKeyDown);
     this.input.addEventListener('blur', this._onBlur);
+    this.input.addEventListener('scroll', this._onScroll);
 
     this._checkHealth();
     this._healthTimer = setInterval(() => this._checkHealth(), this.HEALTH_INTERVAL);
@@ -86,36 +109,64 @@ window.MermaidCopilot = class MermaidCopilot {
 
   destroy() {
     clearTimeout(this._idleTimer);
+    clearTimeout(this._analyzeTimer);
     clearInterval(this._healthTimer);
     if (this._suggestAC) this._suggestAC.abort();
     if (this._enhanceAC) this._enhanceAC.abort();
     this.input.removeEventListener('input', this._onInput);
     this.input.removeEventListener('keydown', this._onKeyDown);
     this.input.removeEventListener('blur', this._onBlur);
+    this.input.removeEventListener('scroll', this._onScroll);
     this._dismissGhost();
     this._hideThinking();
     this._idleTimer = null;
+    this._analyzeTimer = null;
     this._healthTimer = null;
+    this._profile = null;
+  }
+
+  dismissGhost() {
+    this._dismissGhost();
   }
 
   // ---- Health check ---------------------------------------------------------
 
   async _checkHealth() {
+    if (!this.apiBase) {
+      this._enhancerHealthy = false;
+      this._lastHealthCheck = Date.now();
+      return;
+    }
+
+    let timer = null;
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 2000);
-      const res = await fetch(`${this.enhancerUrl}/health`, { signal: controller.signal });
-      clearTimeout(timer);
-      this._enhancerHealthy = res.ok;
+      timer = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(`${this.apiBase}/health`, { signal: controller.signal });
+      let healthy = res.ok;
+
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      if (contentType.includes('application/json')) {
+        const data = await res.json().catch(() => null);
+        if (data && typeof data.available === 'boolean') {
+          healthy = data.available;
+        }
+      }
+
+      this._enhancerHealthy = healthy;
     } catch {
       this._enhancerHealthy = false;
+    } finally {
+      if (timer) clearTimeout(timer);
+      this._lastHealthCheck = Date.now();
     }
-    this._lastHealthCheck = Date.now();
   }
 
   _isHealthy() {
+    if (!this.apiBase) return false;
     if (Date.now() - this._lastHealthCheck > this.HEALTH_INTERVAL) return false;
-    return this._enhancerHealthy;
+    if (!this._enhancerHealthy) return false;
+    return this._isModelReliable();
   }
 
   // ---- Event handlers -------------------------------------------------------
@@ -140,7 +191,20 @@ window.MermaidCopilot = class MermaidCopilot {
     }
 
     this._idleTimer = setTimeout(() => this._onIdle(), this.IDLE_DELAY_MS);
-  }
+
+    // Schedule profile analysis (separate from suggestion idle)
+    clearTimeout(this._analyzeTimer);
+    this._analyzeTimer = setTimeout(() => this._refreshProfile(), this.ANALYZE_DELAY_MS);
+
+    // Track chars since last dismissal for resetting dismissal counter
+    if (this._consecutiveDismissals > 0) {
+      this._charsSinceDismissal++;
+      if (this._charsSinceDismissal >= this.CHARS_TO_RESET_DISMISSALS) {
+        this._consecutiveDismissals = 0;
+        this._charsSinceDismissal = 0;
+      }
+    }
+  } 
 
   _onKeyDown(e) {
     // Tab or Enter (no modifier): accept ghost text if visible
@@ -156,6 +220,8 @@ window.MermaidCopilot = class MermaidCopilot {
       e.preventDefault();
       this._dismissGhost();
       this._enterCooldown();
+      this._consecutiveDismissals++;
+      this._charsSinceDismissal = 0;
       clearTimeout(this._idleTimer);
       return;
     }
@@ -174,10 +240,22 @@ window.MermaidCopilot = class MermaidCopilot {
     this._dismissGhost();
   }
 
+  _onScroll() {
+    if (!this.ghostVisible || !this.ghostLayer) return;
+    this.ghostLayer.scrollTop = this.input.scrollTop;
+    this.ghostLayer.scrollLeft = this.input.scrollLeft;
+  }
+
   // ---- Idle detection -------------------------------------------------------
 
   _onIdle() {
     const text = this.input.value;
+
+    // Stop conditions: don't suggest if profile says stop, or user dismissed too many times,
+    // or the text matches the last rendered hash
+    if (this._profile && this._profile.recommendation === 'stop') return;
+    if (this._consecutiveDismissals >= this.MAX_DISMISSALS_BEFORE_SILENCE) return;
+    if (this._lastRenderedHash && this._hash(text) === this._lastRenderedHash) return;
 
     if (this._isHealthy()) {
       // ---- AI suggestion path ----
@@ -197,6 +275,7 @@ window.MermaidCopilot = class MermaidCopilot {
           this.isSuggesting = false;
           this.lastSuggestAt = Date.now();
           this._suggestAC = null;
+          this._recordModelOutcome(!!data && !!data.suggestion);
 
           if (!data) return;
           if (this._hash(this.input.value) !== this._suggestTextHash) return;
@@ -210,18 +289,37 @@ window.MermaidCopilot = class MermaidCopilot {
           clearTimeout(timeoutId);
           this.isSuggesting = false;
           this._suggestAC = null;
+          this._recordModelOutcome(false);
         });
     } else {
-      // ---- Local suggestion path (no enhancer needed) ----
+      // ---- Local suggestion path — use profile-aware targeted suggestions ----
       if (!this._canSuggestLocal()) return;
       if (Date.now() - this.lastSuggestAt < this.LOCAL_SUGGEST_GAP) return;
 
-      const suggestion = this._localSuggest(text);
+      const suggestion = this._computeSuggestion(text);
       if (suggestion) {
         this.lastSuggestAt = Date.now();
         this._showGhost(suggestion);
       }
     }
+  }
+
+  _computeSuggestion(text) {
+    // Priority 1: gap-targeted suggestions from profile
+    if (this._profile && this._profile.shadow && this._profile.shadow.gaps) {
+      const gaps = this._profile.shadow.gaps;
+      if (gaps.length > 0) {
+        const gap = gaps[0];
+        if (/failure|error/.test(gap)) return '\nOn failure: retry → fallback → notify';
+        if (/end state|response/.test(gap)) return '\n→ return result to caller';
+        if (/trigger|entry/.test(gap)) return 'User initiates → ';
+        if (/constraint|limit/.test(gap)) return '\nConstraint: max 3 retries, 5s timeout';
+        if (/boundar|layer/.test(gap)) return '\n[Security layer]: ';
+      }
+    }
+
+    // Priority 2: fall back to pattern-based local suggestions
+    return this._localSuggest(text);
   }
 
   _canSuggestAI() {
@@ -317,6 +415,7 @@ window.MermaidCopilot = class MermaidCopilot {
 
     // Sync scroll position
     this.ghostLayer.scrollTop = this.input.scrollTop;
+    this.ghostLayer.scrollLeft = this.input.scrollLeft;
   }
 
   _dismissGhost() {
@@ -341,6 +440,7 @@ window.MermaidCopilot = class MermaidCopilot {
     clearTimeout(this._idleTimer);
     this._idleTimer = setTimeout(() => this._onIdle(), this.IDLE_DELAY_MS);
 
+    this._emitInput();
     this.onAccept();
   }
 
@@ -353,6 +453,7 @@ window.MermaidCopilot = class MermaidCopilot {
 
   async enhance() {
     if (this.isEnhancing) return;
+    if (this.input.readOnly) return;
     this._dismissGhost();
     clearTimeout(this._idleTimer);
 
@@ -364,11 +465,12 @@ window.MermaidCopilot = class MermaidCopilot {
     const hasSelection = selStart !== selEnd;
 
     this.isEnhancing = true;
-    this._enhanceAC = new AbortController();
+    const inputAtStart = this.input.value;
 
     let payload;
+    let selectedText = '';
     if (hasSelection) {
-      const selectedText = this.input.value.slice(selStart, selEnd);
+      selectedText = this.input.value.slice(selStart, selEnd);
       payload = {
         stage: 'copilot_enhance',
         content_state: 'text',
@@ -394,10 +496,18 @@ window.MermaidCopilot = class MermaidCopilot {
       this._showThinking('full');
     }
 
+    if (!this._isHealthy()) {
+      await new Promise(resolve => setTimeout(resolve, 140));
+      this._applyLocalEnhance(hasSelection, selStart, selEnd, selectedText);
+      this._finishEnhance();
+      return;
+    }
+
+    this._enhanceAC = new AbortController();
     const timeoutId = setTimeout(() => this._enhanceAC && this._enhanceAC.abort(), this.ENHANCE_TIMEOUT);
 
     try {
-      const res = await fetch(`${this.enhancerUrl}/mermaid/enhance`, {
+      const res = await fetch(`${this.apiBase}/enhance`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -405,11 +515,21 @@ window.MermaidCopilot = class MermaidCopilot {
       });
       clearTimeout(timeoutId);
 
-      if (!res.ok) { this._finishEnhance(); return; }
+      if (!res.ok) {
+        this._applyLocalEnhance(hasSelection, selStart, selEnd, selectedText);
+        return;
+      }
 
       const data = await res.json();
       const enhanced = data.enhanced_source || data.suggestion || '';
-      if (!enhanced) { this._finishEnhance(); return; }
+      if (!enhanced) {
+        this._applyLocalEnhance(hasSelection, selStart, selEnd, selectedText);
+        return;
+      }
+
+      // Avoid stale overwrites if input changed during async request.
+      if (!hasSelection && this.input.value !== inputAtStart) return;
+      if (hasSelection && this.input.value.slice(selStart, selEnd) !== selectedText) return;
 
       if (hasSelection) {
         const before = this.input.value.slice(0, selStart);
@@ -422,13 +542,75 @@ window.MermaidCopilot = class MermaidCopilot {
         this.input.setSelectionRange(this.input.value.length, this.input.value.length);
       }
 
+      this._emitInput();
       this.onAccept();
     } catch {
-      // Silently discard — timeout, abort, or network error
+      this._applyLocalEnhance(hasSelection, selStart, selEnd, selectedText);
     } finally {
       clearTimeout(timeoutId);
       this._finishEnhance();
     }
+  }
+
+  _applyLocalEnhance(hasSelection, selStart, selEnd, selectedText) {
+    const current = this.input.value;
+    if (!current.trim()) return;
+
+    if (hasSelection) {
+      const replacement = this._localEnhanceText(selectedText);
+      const before = current.slice(0, selStart);
+      const after = current.slice(selEnd);
+      this.input.value = before + replacement + after;
+      const caret = selStart + replacement.length;
+      this.input.setSelectionRange(caret, caret);
+    } else {
+      const replacement = this._localEnhanceText(current);
+      this.input.value = replacement;
+      this.input.setSelectionRange(this.input.value.length, this.input.value.length);
+    }
+
+    this._emitInput();
+    this.onAccept();
+  }
+
+  _localEnhanceText(text) {
+    const normalized = text.replace(/\s+/g, ' ').trim();
+    if (!normalized) return text;
+
+    // Preserve explicit Mermaid-like syntax and arrow-rich content.
+    if (/-->|->|==>|subgraph|classDef|flowchart|sequenceDiagram/i.test(normalized)) {
+      return text.trim();
+    }
+
+    let parts = normalized
+      .split(/\s*(?:[.;]|,\s+(?=\b(?:then|next|after|finally|if|when|on)\b)|\bthen\b|\bnext\b|\bafter\b|\bfinally\b)\s*/i)
+      .map(s => s.trim())
+      .filter(Boolean);
+
+    if (parts.length <= 1) {
+      parts = normalized
+        .split(/\s+\band\s+(?=\b(?:the|a|an|user|client|api|service|gateway|database|queue|cache)\b)/i)
+        .map(s => s.trim())
+        .filter(Boolean);
+    }
+
+    if (parts.length <= 1) {
+      return normalized;
+    }
+
+    return parts
+      .map((part, idx) => (idx === 0 ? this._capitalize(part) : `→ ${this._decapitalize(part)}`))
+      .join('\n');
+  }
+
+  _capitalize(str) {
+    if (!str) return str;
+    return str.charAt(0).toUpperCase() + str.slice(1);
+  }
+
+  _decapitalize(str) {
+    if (!str) return str;
+    return str.charAt(0).toLowerCase() + str.slice(1);
   }
 
   _finishEnhance() {
@@ -495,7 +677,7 @@ window.MermaidCopilot = class MermaidCopilot {
     const mirrorRect = mirror.getBoundingClientRect();
 
     const top = markerRect.top - mirrorRect.top - this.input.scrollTop;
-    const left = markerRect.left - mirrorRect.left;
+    const left = markerRect.left - mirrorRect.left - this.input.scrollLeft;
     document.body.removeChild(mirror);
 
     return { top, left };
@@ -504,6 +686,8 @@ window.MermaidCopilot = class MermaidCopilot {
   // ---- API calls ------------------------------------------------------------
 
   async _callSuggest(text, signal) {
+    if (!this.apiBase) return null;
+
     const lines = text.split('\n');
     let activeLine = '';
     for (let i = lines.length - 1; i >= 0; i--) {
@@ -514,7 +698,7 @@ window.MermaidCopilot = class MermaidCopilot {
     const cursorPos = this.input.selectionEnd || text.length;
     const cursorContext = text.slice(Math.max(0, cursorPos - 200), cursorPos);
 
-    const res = await fetch(`${this.enhancerUrl}/mermaid/enhance`, {
+    const res = await fetch(`${this.apiBase}/enhance`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -532,7 +716,59 @@ window.MermaidCopilot = class MermaidCopilot {
     return res.json();
   }
 
+  // ---- Profile analysis -----------------------------------------------------
+
+  async _refreshProfile() {
+    const text = this.input.value;
+    const hash = this._hash(text);
+    if (hash === this._lastAnalyzedHash) return;
+    this._lastAnalyzedHash = hash;
+
+    try {
+      const res = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, mode: 'idea' }),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.success && data.profile) {
+        this._profile = data.profile;
+        if (this.onProfileUpdate) this.onProfileUpdate(this._profile);
+      }
+    } catch {
+      // Non-critical: profile analysis failure doesn't block anything
+    }
+  }
+
+  getProfile() {
+    return this._profile;
+  }
+
+  setRenderedHash(text) {
+    this._lastRenderedHash = this._hash(text || '');
+  }
+
+  // ---- Adaptive health tracking -------------------------------------------
+
+  _recordModelOutcome(success) {
+    this._recentModelOutcomes.push(success);
+    if (this._recentModelOutcomes.length > this.MODEL_OUTCOME_WINDOW) {
+      this._recentModelOutcomes.shift();
+    }
+  }
+
+  _isModelReliable() {
+    if (this._recentModelOutcomes.length < 3) return true;
+    const successes = this._recentModelOutcomes.filter(Boolean).length;
+    return successes / this._recentModelOutcomes.length >= 0.5;
+  }
+
   // ---- Utilities ------------------------------------------------------------
+
+  _emitInput() {
+    this.input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
 
   _hash(str) {
     let h = 0;

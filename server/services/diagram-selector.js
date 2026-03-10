@@ -18,11 +18,15 @@ const PIE_RE = /\b(percent|proportion|distribution|share|pie\s+chart|breakdown\s
 const PIPELINE_RE = /\b(pipeline|workflow|process|step\s+\d|stage\s+\d|etl|ci\/?cd|ingest|transform|load)\b/i;
 const ARCH_RE = /\b(architect|infrastructure|layer|service|microservice|gateway|load\s+balancer|database|cache|queue|deploy|kubernetes|docker|aws|gcp|azure)\b/i;
 
+const DISTRIBUTED_SYSTEM_RE = /\b(cdn|cloudfront|cloudflare|api\s*gateway|gateway|auth\s*service|kafka|redis|memcached|postgres|postgresql|mongodb|dynamodb|elasticsearch|snowflake|s3|stripe|erp|crm|dead.?letter|dlq|observability|prometheus|grafana|datadog|sentry|load\s*balancer|nginx|envoy|istio|rabbitmq|sqs|sns|kinesis)\b/i;
+
 const EXPLICIT_TYPE_RE = /\b(sequence\s+diagram|state\s+diagram|class\s+diagram|er\s+diagram|gantt|pie\s+chart|mind\s*map|timeline|journey|flowchart)\b/i;
 
 /**
  * Select the best Mermaid diagram type from natural-language input.
- * Implements the priority-ordered decision tree from axiom section 7.
+ * Implements the priority-ordered decision tree from axiom section 7,
+ * with distributed-system awareness to prevent architecture prompts
+ * from being misclassified as sequence diagrams.
  *
  * @param {string} text - User's natural-language input
  * @returns {{ type: string, directive: string, confidence: string, reason: string }}
@@ -50,62 +54,75 @@ function selectDiagramType(text) {
     if (named.includes('flowchart')) return result('flowchart', 'flowchart TB', 'high', 'user requested flowchart');
   }
 
-  // Priority 2: ordered interactions between actors
-  if (ACTOR_INTERACTION_RE.test(text) || countMatches(s, SEQUENCE_RE) >= 2) {
-    return result('sequence', 'sequenceDiagram', 'medium', 'detected actor interactions / request-response pattern');
+  // Priority 2 (NEW): distributed system / architecture with many named components
+  // This must come BEFORE sequence detection to prevent architecture prompts
+  // with "calls/requests" language from being misclassified as sequence diagrams.
+  const archCount = countMatches(s, ARCH_RE);
+  const distCount = countMatches(s, DISTRIBUTED_SYSTEM_RE);
+  if (distCount >= 5 || (archCount >= 3 && distCount >= 2)) {
+    return result('flowchart', 'flowchart TB', 'high', 'detected distributed system / multi-service architecture');
   }
 
-  // Priority 3: state transitions / lifecycle
+  // Priority 3: state transitions / lifecycle (check before sequence — state keywords are more specific)
   if (countMatches(s, STATE_RE) >= 2) {
+    // If also has architecture signals, prefer flowchart for the state-like architecture
+    if (archCount >= 3) {
+      return result('flowchart', 'flowchart TB', 'medium', 'detected architecture with state-like language');
+    }
     return result('state', 'stateDiagram-v2', 'medium', 'detected state/transition/lifecycle language');
   }
 
-  // Priority 4: class hierarchy
-  if (CLASS_RE.test(text)) {
+  // Priority 4: ordered interactions between actors (only if not also a heavy architecture prompt)
+  if (archCount < 3 && (ACTOR_INTERACTION_RE.test(text) || countMatches(s, SEQUENCE_RE) >= 2)) {
+    return result('sequence', 'sequenceDiagram', 'medium', 'detected actor interactions / request-response pattern');
+  }
+
+  // Priority 5: architecture / infrastructure (moved up from priority 12)
+  if (archCount >= 3) {
+    return result('flowchart', 'flowchart TB', 'medium', 'detected architecture / infrastructure language');
+  }
+
+  // Priority 6: class hierarchy
+  if (countMatches(s, CLASS_RE) >= 2) {
     return result('class', 'classDiagram', 'medium', 'detected class/interface/inheritance language');
   }
 
-  // Priority 5: entity relationships with cardinality
+  // Priority 7: entity relationships with cardinality
   if (ER_RE.test(text)) {
     return result('er', 'erDiagram', 'medium', 'detected entity-relationship / cardinality language');
   }
 
-  // Priority 6: scheduled phases
+  // Priority 8: scheduled phases
   if (countMatches(s, GANTT_RE) >= 2) {
     return result('gantt', 'gantt', 'medium', 'detected scheduling / phase / milestone language');
   }
 
-  // Priority 7: user journey
+  // Priority 9: user journey
   if (JOURNEY_RE.test(text)) {
     return result('journey', 'journey', 'medium', 'detected user journey / experience language');
   }
 
-  // Priority 8: mind map / brainstorm
+  // Priority 10: mind map / brainstorm
   if (MINDMAP_RE.test(text)) {
     return result('mindmap', 'mindmap', 'medium', 'detected brainstorm / topic / category language');
   }
 
-  // Priority 9: timeline / history
+  // Priority 11: timeline / history
   if (TIMELINE_RE.test(text)) {
     return result('timeline', 'timeline', 'medium', 'detected chronological / historical language');
   }
 
-  // Priority 10: proportional distribution
+  // Priority 12: proportional distribution
   if (PIE_RE.test(text)) {
     return result('pie', 'pie', 'medium', 'detected percentage / distribution language');
   }
 
-  // Priority 11: pipeline / workflow
+  // Priority 13: pipeline / workflow
   if (countMatches(s, PIPELINE_RE) >= 2) {
     return result('flowchart', 'flowchart LR', 'medium', 'detected pipeline / workflow / process language');
   }
 
-  // Priority 12: architecture / infrastructure
-  if (countMatches(s, ARCH_RE) >= 3) {
-    return result('flowchart', 'flowchart TB', 'medium', 'detected architecture / infrastructure language');
-  }
-
-  // Priority 13: default
+  // Priority 14: default
   return result('flowchart', 'flowchart TB', 'low', 'default fallback');
 }
 

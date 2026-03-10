@@ -4,7 +4,7 @@
  * Axiom-aware prompt templates for the gpt-oss Mermaid enhancer.
  *
  * Each stage receives a tailored system prompt built from the axiom framework
- * (archs/mermaid-axioms.md). Temperature 0.0 for determinism.
+ * (`archs/mermaid_axioms.md`). Temperature 0.0 for determinism.
  */
 
 const ROLE = `You are a Mermaid diagram generation engine. You produce syntactically valid, architecturally correct, readable Mermaid source code. You follow strict axioms for interpretation, optimization, and output quality.`;
@@ -110,12 +110,51 @@ function buildPrompt(stage) {
   switch (stage) {
     case 'text_to_md':
       axioms = [AXIOMS_INTERPRETATION, AXIOMS_DIAGRAM_SELECTION, AXIOMS_MINDMAP].join('\n');
-      task = `TASK: Convert the user's natural-language description into a structured markdown specification. Include a title heading, brief description, and a fenced \`\`\`mermaid block containing valid Mermaid source. Choose the diagram type using the selection rules. Extract all entities and relationships from the text.`;
+      task = [
+        `TASK: Convert the user's natural-language description into a structured markdown specification.`,
+        `Include a title heading, brief description, and a fenced \`\`\`mermaid block containing valid Mermaid source.`,
+        `Choose the diagram type using the selection rules. Extract all entities and relationships from the text.`,
+        ``,
+        `If the request includes extracted_entities or extracted_relationships, use them to inform your output.`,
+        ``,
+        `CRITICAL: Your output MUST contain a fenced \`\`\`mermaid block with valid Mermaid syntax.`,
+        `The first line inside the mermaid block MUST be a valid Mermaid directive (flowchart, sequenceDiagram, etc.).`,
+        ``,
+        `EXAMPLE INPUT: "User logs in, API gateway validates JWT, routes to user service, reads from PostgreSQL. On failure return 401."`,
+        `EXAMPLE OUTPUT:`,
+        `# User Authentication Flow`,
+        ``,
+        `User authenticates via browser. API gateway validates JWT and routes to user service, which reads from PostgreSQL. On auth failure, returns 401.`,
+        ``,
+        '```mermaid',
+        `flowchart TB`,
+        `    Browser["Browser"] --> APIGW["API Gateway"]`,
+        `    APIGW -->|validate JWT| AuthSvc["Auth Service"]`,
+        `    AuthSvc --> DB[("PostgreSQL")]`,
+        `    AuthSvc -->|success| APIGW`,
+        `    APIGW -->|401| Browser`,
+        '```',
+      ].join('\n');
       break;
 
     case 'md_to_mmd':
       axioms = [AXIOMS_MERMAID_SYNTAX, AXIOMS_AAD, AXIOMS_TEMPORAL, AXIOMS_COMPLEXITY, AXIOMS_EXCELLENCE].join('\n');
-      task = `TASK: Convert the markdown specification into clean, compilable Mermaid source. Extract and consolidate all diagram content. Apply AAD-style architectural treatment when appropriate. Normalize node IDs, labels, edge syntax. Ensure subgraph structure, classDef styling, and layout direction are correct.`;
+      task = [
+        `TASK: Convert the markdown specification into clean, compilable Mermaid source.`,
+        `Extract and consolidate all diagram content. Apply AAD-style architectural treatment when appropriate.`,
+        `Normalize node IDs, labels, edge syntax. Ensure subgraph structure, classDef styling, and layout direction are correct.`,
+        ``,
+        `CRITICAL: The first line of your output MUST be a valid Mermaid directive (flowchart TD, sequenceDiagram, stateDiagram-v2, etc.).`,
+        `Do NOT output markdown, prose, or explanations. Output ONLY the Mermaid source.`,
+        ``,
+        `EXAMPLE INPUT: "# Checkout\nBrowser calls API gateway. Gateway routes to checkout-service. checkout-service calls payment-service. payment-service uses Stripe."`,
+        `EXAMPLE OUTPUT:`,
+        `flowchart TB`,
+        `    Browser["Browser"] --> APIGW["API Gateway"]`,
+        `    APIGW --> Checkout["Checkout Service"]`,
+        `    Checkout --> Payment["Payment Service"]`,
+        `    Payment --> Stripe{{"Stripe"}}`,
+      ].join('\n');
       break;
 
     case 'validate_mmd':
@@ -127,6 +166,12 @@ function buildPrompt(stage) {
       axioms = [AXIOMS_INTERPRETATION, AXIOMS_MERMAID_SYNTAX, AXIOMS_PRESERVATION].join('\n');
       task = `TASK: Repair the malformed or mixed input into valid Mermaid source. Separate prose from diagram syntax. Reconstruct the diagram from all available signals. Add a valid directive if missing. Fix structural defects. Preserve all user-mentioned entities and relationships.`;
       break;
+
+    case 'render_prepare':
+      return buildRenderPreparePrompt();
+
+    case 'model_repair':
+      return buildModelRepairPrompt();
 
     case 'copilot_suggest':
       return buildCopilotSuggestPrompt();
@@ -191,7 +236,8 @@ function buildCopilotSuggestPrompt() {
     `- Bias toward architectural terms: service, gateway, store, broker, pipeline, queue, cache, API.`,
     `- If the user is writing a list, suggest the next list item.`,
     `- If the user is mid-sentence, complete the sentence.`,
-    `- If confidence is low (ambiguous context, very short input), respond with exactly: {"suggestion":"","confidence":"low"}`,
+    `- STOP CONDITION: If the text already describes a clear beginning (actor/trigger), processing steps (services/flow), failure handling (retry/fallback/error), AND an end state (response/result/notify), the architecture is sufficient. Respond with: {"suggestion":"","confidence":"low"}`,
+    `- If confidence is low (ambiguous context, very short input, or architecture is already sufficient), respond with exactly: {"suggestion":"","confidence":"low"}`,
     `- Otherwise respond with: {"suggestion":"<your text>","confidence":"high"}`,
     `- Response must be valid JSON.`,
   ].join('\n');
@@ -231,4 +277,171 @@ function buildCopilotEnhancePrompt(enhanceMode) {
   return { system, outputFormat: 'json', temperature: 0.0 };
 }
 
-module.exports = { buildPrompt, getAxiomSection, buildCopilotSuggestPrompt, buildCopilotEnhancePrompt };
+/**
+ * Build system prompt for render_prepare stage.
+ * One-shot text/markdown -> valid Mermaid with mixture-of-thoughts reasoning.
+ * Accepts structured context (shadow model) injected by the caller as part of
+ * the user prompt, not the system prompt.
+ */
+function buildRenderPreparePrompt() {
+  const system = [
+    ROLE,
+    '',
+    AXIOMS_INTERPRETATION,
+    AXIOMS_MERMAID_SYNTAX,
+    AXIOMS_AAD,
+    AXIOMS_TEMPORAL,
+    AXIOMS_COMPLEXITY,
+    AXIOMS_PRESERVATION,
+    AXIOMS_EXCELLENCE,
+    AXIOMS_DIAGRAM_SELECTION,
+    '',
+    `TASK: Generate valid, compilable Mermaid source from the user's architecture description.`,
+    '',
+    `REASONING PROTOCOL (internal — complete each step before generating output):`,
+    `1. ARCHITECT: Identify actors, services, stores, boundaries, and external systems.`,
+    `2. FAILURE ANALYST: Identify failure paths, retries, fallbacks, and dead-letter flows.`,
+    `3. DIAGRAM SPECIALIST: Choose the Mermaid diagram type and layout direction using the selection rules.`,
+    `4. EDITOR: Determine what is already specified and what is the minimum useful addition.`,
+    '',
+    `OUTPUT CONTRACT:`,
+    `- First line MUST be a valid Mermaid directive (flowchart TD, sequenceDiagram, stateDiagram-v2, etc.)`,
+    `- Every entity from the input must appear as a node`,
+    `- Every relationship must appear as an edge`,
+    `- Include at least one failure/error path if 3+ entities are described`,
+    `- Use proper node shapes: services=["label"], data stores=[("label")], actors=(["label"]), decisions={"label"}, external={{hexagon}}`,
+    `- Solid arrows (-->) for runtime flow, dashed (-.->)  for async/governance, thick (==>) for critical path`,
+    `- No prose, no markdown fencing, no explanation outside %% comments`,
+    `- Node IDs: alphanumeric, no spaces, no reserved words (end, subgraph, graph, style, class, click, default)`,
+    '',
+    `EXAMPLE:`,
+    `Input: "User logs in, API gateway validates JWT, routes to auth service, reads from PostgreSQL. On failure return 401."`,
+    `Output:`,
+    `flowchart TB`,
+    `    Browser(["Browser"]) --> APIGW["API Gateway"]`,
+    `    APIGW -->|"validate JWT"| Auth["Auth Service"]`,
+    `    Auth --> DB[("PostgreSQL")]`,
+    `    Auth -->|"success"| APIGW`,
+    `    APIGW -->|"401 Unauthorized"| Browser`,
+    '',
+    `EXAMPLE:`,
+    `Input: "Payment service emits OrderCreated to Kafka. Inventory and notification services consume it. If inventory fails 3 times, dead letter queue."`,
+    `Output:`,
+    `flowchart TB`,
+    `    PaymentSvc["Payment Service"] -.->|"emit OrderCreated"| Kafka[("Kafka")]`,
+    `    Kafka -.-> InventorySvc["Inventory Service"]`,
+    `    Kafka -.-> NotifySvc["Notification Service"]`,
+    `    InventorySvc -.->|"retry 3x"| InventorySvc`,
+    `    InventorySvc -.->|"max retries exceeded"| DLQ[("Dead Letter Queue")]`,
+    '',
+    OUTPUT_FORMAT,
+  ].join('\n');
+
+  return { system, outputFormat: 'text', temperature: 0.0 };
+}
+
+/**
+ * Build the user prompt for render_prepare by injecting structured context
+ * from the InputProfile shadow model.
+ * @param {string} source - Raw user text
+ * @param {object} [profile] - InputProfile from input-analyzer
+ * @returns {string}
+ */
+function buildRenderPrepareUserPrompt(source, profile) {
+  const parts = [];
+
+  if (profile) {
+    const shadow = profile.shadow || {};
+    const intent = profile.intent || {};
+
+    if (intent.inferredProblem) {
+      parts.push(`[PROBLEM] ${intent.inferredProblem}`);
+    }
+    if (intent.problemDomain && intent.problemDomain !== 'general') {
+      parts.push(`[DOMAIN] ${intent.problemDomain}`);
+    }
+
+    const entities = (shadow.entities || []).slice(0, 25);
+    if (entities.length > 0) {
+      parts.push(`[ENTITIES] ${entities.map(e => `${e.name} (${e.type})`).join(', ')}`);
+    }
+
+    const rels = (shadow.relationships || []).slice(0, 20);
+    if (rels.length > 0) {
+      parts.push(`[RELATIONSHIPS] ${rels.map(r => `${r.from} ${r.verb} ${r.to}`).join('; ')}`);
+    }
+
+    const gaps = shadow.gaps || [];
+    if (gaps.length > 0) {
+      parts.push(`[GAPS] ${gaps.join('; ')}`);
+    }
+
+    if (profile.diagramSelection) {
+      parts.push(`[SUGGESTED TYPE] ${profile.diagramSelection.directive} (${profile.diagramSelection.reason})`);
+    }
+
+    if (parts.length > 0) {
+      parts.push('');
+    }
+  }
+
+  parts.push(`[USER INPUT]`);
+  parts.push(source);
+
+  return parts.join('\n');
+}
+
+/**
+ * Build system prompt for model_repair stage.
+ * Fixes compile errors in Mermaid source using the actual error message.
+ */
+function buildModelRepairPrompt() {
+  const system = [
+    `You are a Mermaid syntax repair engine. You fix compilation errors in Mermaid diagrams.`,
+    '',
+    AXIOMS_MERMAID_SYNTAX,
+    AXIOMS_PRESERVATION,
+    '',
+    `TASK: Fix the syntax error in the Mermaid source while preserving all entities and relationships.`,
+    '',
+    `RULES:`,
+    `- First line of output MUST be a valid Mermaid directive`,
+    `- Preserve all node labels and edge connections from the original`,
+    `- Fix only what is broken — do not restructure working sections`,
+    `- Common fixes: reserved-word IDs, unbalanced brackets, invalid edge syntax, missing quotes on labels with special characters`,
+    `- If a node ID is a reserved word (end, subgraph, graph, style, class, click, default), rename it by appending "Node"`,
+    '',
+    OUTPUT_FORMAT,
+  ].join('\n');
+
+  return { system, outputFormat: 'text', temperature: 0.0 };
+}
+
+/**
+ * Build the user prompt for model_repair by including the failed source and error.
+ * @param {string} mmdSource - The Mermaid source that failed
+ * @param {string} compileError - The sanitized compile error
+ * @returns {string}
+ */
+function buildModelRepairUserPrompt(mmdSource, compileError) {
+  return [
+    `[FAILED MERMAID SOURCE]`,
+    mmdSource,
+    '',
+    `[COMPILE ERROR]`,
+    compileError,
+    '',
+    `Fix the source so it compiles. Return only the corrected Mermaid source.`,
+  ].join('\n');
+}
+
+module.exports = {
+  buildPrompt,
+  getAxiomSection,
+  buildCopilotSuggestPrompt,
+  buildCopilotEnhancePrompt,
+  buildRenderPreparePrompt,
+  buildRenderPrepareUserPrompt,
+  buildModelRepairPrompt,
+  buildModelRepairUserPrompt,
+};

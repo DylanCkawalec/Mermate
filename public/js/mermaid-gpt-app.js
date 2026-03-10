@@ -41,6 +41,22 @@
     showResult(item.paths, item.name);
   });
 
+  // ---- Max mode ----
+  const btnMax = document.getElementById('btn-max');
+  let maxMode = false;
+
+  // ---- Agent mode ----
+  const btnAgentToggle = document.getElementById('btn-agent-toggle');
+  const agentDropdown = document.getElementById('agent-dropdown');
+  const btnAgentRun = document.getElementById('btn-agent-run');
+  const agentPanel = document.getElementById('agent-panel');
+  const agentPanelLog = document.getElementById('agent-panel-log');
+  const agentPanelMode = document.getElementById('agent-panel-mode');
+  const btnAgentStop = document.getElementById('btn-agent-stop');
+  let agentModeActive = false;
+  let selectedAgentMode = null;
+  let agent = null;
+
   // ---- State ----
   let isLoading = false;
   let currentMode = 'idea';
@@ -48,14 +64,15 @@
   let currentPaths = null;
   let isFullscreen = false;
   let copilot = null;
+  let speech = null;
 
-  const ENHANCER_URL = window.location.origin.replace(/:\d+$/, ':8100');
+  const COPILOT_API_BASE = '/api/copilot';
 
   // ---- Mode config ----
   const MODES = {
     idea: {
       placeholder: 'Describe your system, workflow, or diagram idea...\n\nStart simply:\n  "A user logs in, the server checks credentials, then redirects to dashboard"\n\nOr more structured:\n  "Payment flow: Browser \u2192 API Gateway \u2192 Payment Service \u2192 Stripe \u2192 Bank\n   - on success: return confirmation to browser\n   - on failure: show error, retry up to 3 times \u2192 dead letter queue"\n\nUseful signals: actors, services, arrows (\u2192), steps, decisions, states, failures',
-      hint: 'Type an idea and press Render \u00b7 \u2318\u23ce / Ctrl+Return to generate \u00b7 Tab to accept suggestion',
+      hint: 'Type an idea \u00b7 \u2318\u23ce / Ctrl+Return to enhance text \u00b7 Tab to accept suggestion',
       enhanceDefault: true,
       showUpload: false,
     },
@@ -114,8 +131,9 @@
     if (mode === 'idea' && window.MermaidCopilot) {
       if (copilot) copilot.destroy();
       copilot = new window.MermaidCopilot(input, {
-        enhancerUrl: ENHANCER_URL,
+        apiBase: COPILOT_API_BASE,
         onAccept: updateBadges,
+        onProfileUpdate: _onProfileUpdate,
       });
     } else if (copilot) {
       copilot.destroy();
@@ -217,6 +235,14 @@
     }
   }
 
+  // ---- Profile-driven hints ----
+  function _onProfileUpdate(profile) {
+    if (!profile) return;
+    if (currentMode === 'idea' && profile.hint) {
+      inputHint.textContent = profile.hint;
+    }
+  }
+
   // ---- Fullscreen ----
   function toggleFullscreen() {
     isFullscreen = !isFullscreen;
@@ -278,6 +304,7 @@
 
   // ---- Render ----
   async function render() {
+    if (isLoading) return;
     const source = input.value.trim();
     if (!source) {
       showError('Please enter a diagram description or paste Mermaid source.');
@@ -298,6 +325,7 @@
           mermaid_source: source,
           enhance: chkEnhance.checked,
           input_mode: currentMode,
+          max_mode: maxMode,
         }),
       });
 
@@ -309,6 +337,9 @@
       }
 
       showResult(data.paths, data.diagram_name);
+
+      // Tell copilot to suppress suggestions for this exact text
+      if (copilot) copilot.setRenderedHash(source);
 
       sidebar.add({
         name: data.diagram_name,
@@ -337,7 +368,11 @@
   input.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
       e.preventDefault();
-      render();
+      if (currentMode === 'idea' && copilot) {
+        copilot.enhance();
+      } else {
+        render();
+      }
     }
   });
 
@@ -352,7 +387,7 @@
     stateBadge.classList.remove('visible');
     currentPaths = null;
     currentDiagramName = '';
-    if (copilot) copilot._dismissGhost();
+    if (copilot) copilot.dismissGhost();
     input.focus();
   });
 
@@ -365,8 +400,205 @@
 
   btnDismissError.addEventListener('click', hideError);
 
+  // ---- Max mode toggle ----
+  if (btnMax) {
+    btnMax.addEventListener('click', () => {
+      maxMode = !maxMode;
+      btnMax.classList.toggle('active', maxMode);
+      btnMax.title = maxMode
+        ? 'Max mode ON: strongest premium model will be used for render'
+        : 'Max: use strongest premium model for architect-grade output';
+    });
+  }
+
+  // ---- Agent mode logic ----
+
+  function setAgentMode(modeId) {
+    selectedAgentMode = modeId;
+    agentModeActive = !!modeId;
+
+    // Update toggle button
+    btnAgentToggle.classList.toggle('active', agentModeActive);
+
+    // Update dropdown selection
+    agentDropdown.querySelectorAll('.agent-mode-option').forEach(opt => {
+      opt.classList.toggle('selected', opt.dataset.agentMode === modeId);
+    });
+
+    // Show/hide agent run button vs render button
+    if (agentModeActive) {
+      btnRender.hidden = true;
+      btnAgentRun.hidden = false;
+      inputHint.textContent = `Agent: ${modeId} mode · type your prompt, then press Run Agent`;
+    } else {
+      btnRender.hidden = false;
+      btnAgentRun.hidden = true;
+      agentPanel.hidden = true;
+      if (currentMode === 'idea') {
+        inputHint.textContent = MODES.idea.hint;
+      }
+    }
+
+    // Close dropdown
+    agentDropdown.hidden = true;
+  }
+
+  if (btnAgentToggle) {
+    btnAgentToggle.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (agentModeActive) {
+        setAgentMode(null);
+      } else {
+        agentDropdown.hidden = !agentDropdown.hidden;
+      }
+    });
+  }
+
+  agentDropdown?.querySelectorAll('.agent-mode-option').forEach(opt => {
+    opt.addEventListener('click', (e) => {
+      e.stopPropagation();
+      setAgentMode(opt.dataset.agentMode);
+    });
+  });
+
+  document.addEventListener('click', () => {
+    if (agentDropdown && !agentDropdown.hidden) {
+      agentDropdown.hidden = true;
+    }
+  });
+
+  const agentNotesWrap = document.getElementById('agent-notes-wrap');
+  const agentNotesInput = document.getElementById('agent-notes-input');
+  const btnAgentFinalize = document.getElementById('btn-agent-finalize');
+  const btnAgentSkip = document.getElementById('btn-agent-skip-notes');
+
+  function _createAgent() {
+    if (agent) return;
+    agent = new window.MermaidAgent({
+      input,
+      panel: agentPanel,
+      panelLog: agentPanelLog,
+      panelMode: agentPanelMode,
+      notesWrap: agentNotesWrap,
+      notesInput: agentNotesInput,
+      btnFinalize: btnAgentFinalize,
+      onPreviewRender: (event) => {
+        if (event.paths) {
+          showResult(event.paths, event.diagram_name);
+          sidebar.add({
+            name: event.diagram_name,
+            type: event.diagram_type || 'flowchart',
+            paths: event.paths,
+            timestamp: new Date().toLocaleString(),
+            source: input.value,
+          });
+        }
+      },
+      onRenderResult: (event) => {
+        if (event.paths) {
+          showResult(event.paths, event.diagram_name);
+          sidebar.add({
+            name: event.diagram_name,
+            type: event.diagram_type || 'flowchart',
+            paths: event.paths,
+            timestamp: new Date().toLocaleString(),
+            source: input.value,
+          });
+        }
+      },
+      onComplete: () => {
+        btnAgentRun.disabled = false;
+        input.readOnly = false;
+      },
+      onError: (msg) => {
+        showError(msg);
+        btnAgentRun.disabled = false;
+        input.readOnly = false;
+      },
+      onStateChange: (state) => {
+        if (state === 'awaiting_notes') {
+          input.readOnly = false;
+          btnAgentRun.disabled = true;
+        } else if (state === 'finalizing') {
+          input.readOnly = true;
+          btnAgentRun.disabled = true;
+        } else if (state === 'idle') {
+          btnAgentRun.disabled = false;
+          input.readOnly = false;
+        }
+      },
+    });
+  }
+
+  if (btnAgentRun) {
+    btnAgentRun.addEventListener('click', () => {
+      if (!selectedAgentMode || isLoading) return;
+      _createAgent();
+      btnAgentRun.disabled = true;
+      input.readOnly = true;
+      hideError();
+      agent.run(selectedAgentMode);
+    });
+  }
+
+  if (btnAgentFinalize) {
+    btnAgentFinalize.addEventListener('click', () => {
+      _createAgent();
+      agent.finalize();
+    });
+  }
+
+  if (btnAgentSkip) {
+    btnAgentSkip.addEventListener('click', () => {
+      _createAgent();
+      if (agentNotesInput) agentNotesInput.value = '';
+      agent.finalize();
+    });
+  }
+
+  if (btnAgentStop) {
+    btnAgentStop.addEventListener('click', () => {
+      if (agent) {
+        agent.stop();
+        btnAgentRun.disabled = false;
+        input.readOnly = false;
+      }
+    });
+  }
+
+  // ---- Talk-to-Text ----
+  const btnMic = document.getElementById('btn-mic');
+  if (window.MermaidSpeech && btnMic) {
+    speech = new window.MermaidSpeech(input, btnMic, {
+      onInsert: () => updateBadges(),
+      onError: (msg) => showError(msg),
+    });
+  }
+
+  // /talk command: detect when user types /talk and trigger recording
+  input.addEventListener('input', () => {
+    const val = input.value;
+    if (val.trimEnd().endsWith('/talk')) {
+      input.value = val.slice(0, val.lastIndexOf('/talk')).trimEnd();
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      if (speech && !speech.recording && !speech.processing) {
+        speech.start();
+      }
+    }
+  });
+
   // ---- Init ----
   setMode('idea');
+
+  // Check if Max mode is available from the provider chain
+  fetch('/api/copilot/health')
+    .then(r => r.json())
+    .then(data => {
+      if (data.maxAvailable && btnMax) {
+        btnMax.classList.add('visible');
+      }
+    })
+    .catch(() => {});
 
   fetch('/api/diagrams')
     .then(r => r.json())
@@ -382,6 +614,6 @@
         });
       }
     })
-    .catch(() => { /* server may not be running */ });
+    .catch(() => {});
 
 })();

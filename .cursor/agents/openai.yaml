@@ -1,0 +1,7 @@
+interface:
+  display_name: "Agent Architect"
+  short_description: "Iterative architecture design and refinement with Mermate"
+  icon:
+    type: "emoji"
+    value: "🧭"
+  theme_color: "#0F172A"

@@ -384,6 +384,308 @@ body {
   margin-left: 2px;
 }
 
+.btn-max {
+  display: none;
+  align-items: center;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  font-family: var(--font-sans);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all var(--transition);
+  text-transform: uppercase;
+}
+
+.btn-max.visible {
+  display: inline-flex;
+}
+
+.btn-max:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn-max.active {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.btn-max.active:hover {
+  opacity: 0.9;
+}
+
+/* ==========================================================================
+   Agent Mode
+   ========================================================================== */
+
+.agent-selector-wrap {
+  position: relative;
+}
+
+.btn-agent-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.btn-agent-toggle:hover {
+  border-color: #e8820c;
+  color: #e8820c;
+}
+
+.btn-agent-toggle.active {
+  background: #e8820c;
+  color: white;
+  border-color: #e8820c;
+}
+
+.btn-agent-toggle svg {
+  width: 13px;
+  height: 13px;
+}
+
+.agent-dropdown {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 50;
+  min-width: 260px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.10);
+  backdrop-filter: blur(12px);
+}
+
+.agent-mode-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--transition);
+  text-align: left;
+}
+
+.agent-mode-option:hover {
+  background: rgba(232, 130, 12, 0.08);
+}
+
+.agent-mode-option.selected {
+  background: rgba(232, 130, 12, 0.12);
+}
+
+.agent-mode-icon {
+  font-size: 1.1rem;
+  flex-shrink: 0;
+  width: 24px;
+  text-align: center;
+}
+
+.agent-mode-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.agent-mode-name {
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.agent-mode-desc {
+  font-family: var(--font-sans);
+  font-size: 0.65rem;
+  color: var(--text-muted);
+}
+
+.btn-agent-run {
+  background: #e8820c;
+  color: white;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.btn-agent-run:hover {
+  background: #d1740a;
+}
+
+.btn-agent-run:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Planning panel */
+.agent-panel {
+  margin-top: 8px;
+  padding: 10px 14px;
+  border: 1px solid rgba(232, 130, 12, 0.2);
+  border-radius: var(--radius);
+  background: rgba(232, 130, 12, 0.04);
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+}
+
+.agent-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.agent-panel-title {
+  font-weight: 700;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #e8820c;
+}
+
+.agent-panel-mode {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(232, 130, 12, 0.1);
+}
+
+.agent-panel-stop {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.agent-panel-stop:hover {
+  color: var(--text);
+}
+
+.agent-panel-log {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.agent-log-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.agent-log-entry.active {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.agent-log-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
+.agent-log-entry.active .agent-log-dot {
+  background: #e8820c;
+  animation: agent-pulse 1.2s ease-in-out infinite;
+}
+
+.agent-log-entry.done .agent-log-dot {
+  background: #22c55e;
+}
+
+@keyframes agent-pulse {
+  0%, 100% { opacity: 0.4; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+
+/* Pre-Max notes */
+.agent-notes-wrap {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(232, 130, 12, 0.15);
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.agent-notes-input {
+  flex: 1;
+  min-width: 200px;
+  padding: 6px 10px;
+  border: 1px solid rgba(232, 130, 12, 0.25);
+  border-radius: var(--radius-xs);
+  background: var(--surface);
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--text);
+  resize: vertical;
+}
+
+.agent-notes-input:focus {
+  outline: none;
+  border-color: #e8820c;
+  box-shadow: 0 0 0 2px rgba(232, 130, 12, 0.1);
+}
+
+.agent-notes-input::placeholder {
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.btn-agent-finalize {
+  background: #e8820c;
+  color: white;
+  font-weight: 600;
+  font-size: 0.72rem;
+  padding: 6px 14px;
+  white-space: nowrap;
+}
+
+.btn-agent-finalize:hover {
+  background: #d1740a;
+}
+
+.btn-agent-skip {
+  font-size: 0.68rem;
+  padding: 6px 10px;
+  white-space: nowrap;
+}
+
 /* ==========================================================================
    Buttons
    ========================================================================== */
@@ -771,6 +1073,83 @@ body {
    ========================================================================== */
 
 /* ==========================================================================
+   Talk-to-Text mic button
+   ========================================================================== */
+
+.btn-mic {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: rgba(255,255,255,0.85);
+  backdrop-filter: blur(4px);
+  font-family: var(--font-sans);
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  opacity: 0.7;
+}
+
+.btn-mic:hover {
+  opacity: 1;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn-mic svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.btn-mic.recording {
+  border-color: #ef4444;
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.06);
+  opacity: 1;
+  animation: mic-pulse 1.5s ease-in-out infinite;
+}
+
+.btn-mic.recording .mic-icon-idle { display: none; }
+.btn-mic.recording .mic-icon-rec { display: inline; }
+.btn-mic:not(.recording) .mic-icon-rec { display: none; }
+
+.btn-mic.processing {
+  border-color: #e8820c;
+  color: #e8820c;
+  opacity: 1;
+  pointer-events: none;
+}
+
+.btn-mic.processing .mic-label::after {
+  content: '...';
+  animation: mic-dots 1s steps(3) infinite;
+}
+
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.2); }
+  50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
+}
+
+@keyframes mic-dots {
+  0% { content: '.'; }
+  33% { content: '..'; }
+  66% { content: '...'; }
+}
+
+.mic-label {
+  pointer-events: none;
+}
+
+/* ==========================================================================
    Copilot — Ghost text, thinking indicator
    ========================================================================== */
 
@@ -799,9 +1178,9 @@ body {
 }
 
 .copilot-ghost-text {
-  color: #a0a8c0;
-  font-style: italic;
-  opacity: 0.75;
+  color: #7f89a8;
+  font-style: normal;
+  opacity: 0.9;
 }
 
 .copilot-thinking {
