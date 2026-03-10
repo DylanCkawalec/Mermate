@@ -147,6 +147,7 @@ body {
   display: flex;
 }
 
+.btn-rename,
 .btn-trash {
   background: none;
   border: none;
@@ -160,10 +161,29 @@ body {
   align-items: center;
 }
 
+.btn-rename:hover {
+  opacity: 1;
+  color: var(--accent);
+  background: var(--accent-subtle);
+}
+
 .btn-trash:hover {
   opacity: 1;
   color: var(--danger);
   background: var(--danger-bg);
+}
+
+.sidebar-rename-input {
+  width: 100%;
+  padding: 2px 4px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--surface);
+  outline: none;
 }
 
 /* ==========================================================================
@@ -310,6 +330,33 @@ body {
 .input-textarea::placeholder {
   color: var(--text-muted);
   opacity: 0.6;
+}
+
+.name-strip {
+  display: flex;
+}
+
+.diagram-name-input {
+  width: 100%;
+  padding: 5px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  outline: none;
+  transition: background var(--transition), box-shadow var(--transition);
+}
+
+.diagram-name-input:focus {
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.diagram-name-input::placeholder {
+  color: var(--text-muted);
+  opacity: 0.5;
 }
 
 .input-controls {
@@ -596,9 +643,10 @@ body {
 }
 
 .agent-log-entry {
-  display: flex;
+  display: grid;
+  grid-template-columns: 25px 1fr;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 0.7rem;
   color: var(--text-muted);
   line-height: 1.4;
@@ -610,20 +658,56 @@ body {
 }
 
 .agent-log-dot {
+  position: relative;
+  width: 25px;
+  height: 25px;
+  flex-shrink: 0;
+}
+
+.agent-log-dot::before {
+  content: '';
+  position: absolute;
+  inset: 50% auto auto 50%;
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: var(--border);
-  flex-shrink: 0;
+  transform: translate(-50%, -50%);
+  transition: opacity var(--transition-slow), transform var(--transition-slow), background var(--transition);
 }
 
-.agent-log-entry.active .agent-log-dot {
+.agent-log-text {
+  min-width: 0;
+}
+
+.agent-log-dot-visual {
+  position: absolute;
+  inset: -2px;
+  display: block;
+  background: transparent;
+}
+
+.agent-log-dot-visual canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: transparent !important;
+}
+
+.agent-log-entry.active .agent-log-dot::before {
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.4);
+}
+
+.agent-log-entry.active .agent-log-dot.is-thinking-fallback::before {
   background: #e8820c;
+  opacity: 1;
   animation: agent-pulse 1.2s ease-in-out infinite;
 }
 
-.agent-log-entry.done .agent-log-dot {
+.agent-log-entry.done .agent-log-dot::before {
   background: #22c55e;
+  opacity: 1;
 }
 
 @keyframes agent-pulse {
@@ -967,6 +1051,15 @@ body {
   gap: 6px;
 }
 
+.result-section.is-revealing {
+  animation: result-fade-in 0.22s ease;
+}
+
+@keyframes result-fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 /* ==========================================================================
    Delete Dialog
    ========================================================================== */
@@ -1017,6 +1110,14 @@ body {
   justify-content: center;
   z-index: 100;
   backdrop-filter: blur(6px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.22s ease, backdrop-filter 0.22s ease;
+}
+
+.loading-overlay.is-visible {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .loading-overlay[hidden],
@@ -1030,26 +1131,80 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
+  padding: 20px 22px 16px;
+  min-width: min(84vw, 320px);
+  border-radius: 18px;
+  background: rgba(255,255,255,0.78);
+  box-shadow:
+    0 18px 50px rgba(79, 70, 229, 0.08),
+    0 6px 20px rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(79, 70, 229, 0.08);
+  backdrop-filter: blur(10px);
 }
 
-.spinner {
-  width: 32px;
-  height: 32px;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+.loading-visual {
+  width: min(260px, 72vw);
+  height: min(150px, 38vw);
+  min-height: 110px;
+  border-radius: 16px;
+  overflow: hidden;
+  position: relative;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(79, 70, 229, 0.1), rgba(79, 70, 229, 0) 62%),
+    linear-gradient(180deg, rgba(255,255,255,0.92), rgba(245,245,255,0.92));
+  box-shadow:
+    inset 0 0 0 1px rgba(79, 70, 229, 0.08),
+    0 10px 30px rgba(79, 70, 229, 0.06);
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
+.loading-visual canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: transparent !important;
+}
+
+.loading-visual.is-fallback::before,
+.loading-visual.is-fallback::after {
+  content: '';
+  position: absolute;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+}
+
+.loading-visual.is-fallback::before {
+  width: 66%;
+  height: 2px;
+  background: linear-gradient(90deg, rgba(79,70,229,0), rgba(79,70,229,0.9), rgba(232,130,12,0.85), rgba(79,70,229,0));
+  animation: loading-bar-sweep 1.6s ease-in-out infinite;
+}
+
+.loading-visual.is-fallback::after {
+  width: 18px;
+  height: 18px;
+  background: radial-gradient(circle, rgba(232,130,12,0.9), rgba(79,70,229,0.85));
+  filter: blur(0.2px);
+  animation: loading-bar-orbit 1.6s ease-in-out infinite;
+}
+
+@keyframes loading-bar-sweep {
+  0%, 100% { opacity: 0.35; transform: translate(-50%, -50%) scaleX(0.82); }
+  50% { opacity: 1; transform: translate(-50%, -50%) scaleX(1); }
+}
+
+@keyframes loading-bar-orbit {
+  0% { transform: translate(calc(-50% - 70px), -50%) scale(0.8); }
+  50% { transform: translate(calc(-50% + 70px), -50%) scale(1); }
+  100% { transform: translate(calc(-50% - 70px), -50%) scale(0.8); }
 }
 
 .loading-text {
   font-size: 0.82rem;
   color: var(--text-muted);
   font-weight: 400;
+  letter-spacing: 0.01em;
 }
 
 /* ==========================================================================

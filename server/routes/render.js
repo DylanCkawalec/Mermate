@@ -5,7 +5,7 @@ const path = require('node:path');
 const fsp = require('node:fs/promises');
 const { archive, archiveCompiled } = require('../services/mermaid-archiver');
 const { validate: validateMmd } = require('../services/mermaid-validator');
-const { route, renderPrepare, compileWithRetry, RouterError } = require('../services/input-router');
+const { route, renderPrepare, decomposeAndRender, compileWithRetry, RouterError } = require('../services/input-router');
 const enhancerBridge = require('../services/gpt-enhancer-bridge');
 const provider = require('../services/inference-provider');
 const { buildPrompt } = require('../services/axiom-prompts');
@@ -271,8 +271,10 @@ router.post('/render', async (req, res) => {
     const shouldUseProvider = isTextOrMd && enhance;
 
     if (shouldUseProvider) {
-      // ---- Provider-backed render_prepare (replaces text_to_md + md_to_mmd) ----
-      const prepResult = await renderPrepare(source, profile, useMax);
+      // ---- Provider-backed render (decompose for complex, single-shot otherwise) ----
+      const prepResult = profile.shouldDecompose
+        ? await decomposeAndRender(source, profile, useMax)
+        : await renderPrepare(source, profile, useMax);
       routeResult = {
         mmdSource: prepResult.mmdSource,
         diagramType: '',
@@ -500,6 +502,73 @@ router.delete('/diagrams/:name', async (req, res) => {
     return res.json({ success: true });
   } catch (err) {
     logger.error('diagram.delete.error', { name, error: err.message });
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * PATCH /api/diagrams/:name
+ * Rename a diagram's folder, compiled outputs, and archived sources.
+ */
+router.patch('/diagrams/:name', async (req, res) => {
+  const oldName = req.params.name;
+  const newNameRaw = req.body?.new_name;
+  if (!oldName || /[\/\\]/.test(oldName)) {
+    return res.status(400).json({ success: false, error: 'invalid_name' });
+  }
+  if (!newNameRaw || typeof newNameRaw !== 'string' || !newNameRaw.trim()) {
+    return res.status(400).json({ success: false, error: 'new_name is required' });
+  }
+
+  const { slugify } = require('../utils/naming');
+  const newName = slugify(newNameRaw.trim());
+  if (!newName || newName.length < 2) {
+    return res.status(400).json({ success: false, error: 'new_name too short' });
+  }
+  if (newName === oldName) {
+    return res.json({ success: true, new_name: oldName, paths: { png: `/flows/${oldName}/${oldName}.png`, svg: `/flows/${oldName}/${oldName}.svg` } });
+  }
+
+  try {
+    const oldFlowDir = path.join(FLOWS_DIR, oldName);
+    const newFlowDir = path.join(FLOWS_DIR, newName);
+
+    const oldExists = await fsp.stat(oldFlowDir).then(() => true).catch(() => false);
+    if (oldExists) {
+      await fsp.rename(oldFlowDir, newFlowDir);
+      const files = await fsp.readdir(newFlowDir);
+      for (const f of files) {
+        if (f.startsWith(oldName)) {
+          const suffix = f.slice(oldName.length);
+          await fsp.rename(path.join(newFlowDir, f), path.join(newFlowDir, newName + suffix));
+        }
+      }
+    }
+
+    const ARCHS_DIR = path.join(PROJECT_ROOT, 'archs');
+    const oldMmd = path.join(ARCHS_DIR, `${oldName}.mmd`);
+    const newMmd = path.join(ARCHS_DIR, `${newName}.mmd`);
+    await fsp.rename(oldMmd, newMmd).catch(() => {});
+
+    const archFiles = await fsp.readdir(ARCHS_DIR).catch(() => []);
+    for (const f of archFiles) {
+      if (f.endsWith(`-${oldName}.md`)) {
+        const newF = f.replace(`-${oldName}.md`, `-${newName}.md`);
+        await fsp.rename(path.join(ARCHS_DIR, f), path.join(ARCHS_DIR, newF)).catch(() => {});
+      }
+    }
+
+    logger.info('diagram.renamed', { oldName, newName });
+    return res.json({
+      success: true,
+      new_name: newName,
+      paths: {
+        png: `/flows/${newName}/${newName}.png`,
+        svg: `/flows/${newName}/${newName}.svg`,
+      },
+    });
+  } catch (err) {
+    logger.error('diagram.rename.error', { oldName, newName, error: err.message });
     return res.status(500).json({ success: false, error: err.message });
   }
 });

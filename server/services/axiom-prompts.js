@@ -170,6 +170,12 @@ function buildPrompt(stage) {
     case 'render_prepare':
       return buildRenderPreparePrompt();
 
+    case 'decompose':
+      return buildDecomposePrompt();
+
+    case 'repair_from_trace':
+      return buildRepairFromTracePrompt();
+
     case 'model_repair':
       return buildModelRepairPrompt();
 
@@ -435,6 +441,113 @@ function buildModelRepairUserPrompt(mmdSource, compileError) {
   ].join('\n');
 }
 
+function buildDecomposePrompt() {
+  const system = [
+    `You are a senior enterprise architect performing bounded hierarchical decomposition.`,
+    `Given a complex architecture description, split it into 2-4 focused sub-views that can each be rendered as an independent Mermaid diagram.`,
+    '',
+    `SUB-VIEW CATEGORIES (choose the most appropriate):`,
+    `- system_context: actors, entry points, external systems, trust boundaries`,
+    `- data_flow: services, data stores, message brokers, primary read/write paths`,
+    `- failure_retry: error paths, retries, dead-letter queues, circuit breakers, fallbacks`,
+    `- security_boundary: authentication, authorization, trust zones, encryption boundaries`,
+    `- state_lifecycle: state transitions, lifecycle events, status changes`,
+    `- observability: monitoring, tracing, logging, alerting, health checks`,
+    '',
+    `RULES:`,
+    `- Output ONLY a valid JSON array.`,
+    `- Each element: { "viewName": string, "viewDescription": string, "suggestedType": "flowchart TB"|"sequenceDiagram"|"stateDiagram-v2", "entities": [string], "relationships": [string] }`,
+    `- Each viewDescription must be a self-contained architecture description that can be rendered independently.`,
+    `- Do not create more than 4 sub-views.`,
+    `- Do not create fewer than 2 sub-views.`,
+    `- Preserve ALL entities and relationships from the original — distribute them, do not drop any.`,
+    `- The primary sub-view should be the one with the most entities and relationships.`,
+  ].join('\n');
+
+  return { system, outputFormat: 'json', temperature: 0.0 };
+}
+
+function buildDecomposeUserPrompt(source, profile) {
+  const parts = [];
+  const shadow = profile?.shadow || {};
+
+  if (shadow.entities?.length > 0) {
+    parts.push(`[ENTITIES] ${shadow.entities.slice(0, 30).map(e => `${e.name} (${e.type})`).join(', ')}`);
+  }
+  if (shadow.relationships?.length > 0) {
+    parts.push(`[RELATIONSHIPS] ${shadow.relationships.slice(0, 25).map(r => `${r.from} ${r.verb} ${r.to}`).join('; ')}`);
+  }
+  if (shadow.gaps?.length > 0) {
+    parts.push(`[GAPS] ${shadow.gaps.join('; ')}`);
+  }
+  if (shadow.boundaryTerms?.length > 0) {
+    parts.push(`[BOUNDARIES] ${shadow.boundaryTerms.join(', ')}`);
+  }
+  if (parts.length > 0) parts.push('');
+
+  parts.push(`[ARCHITECTURE DESCRIPTION]`);
+  parts.push(source);
+
+  return parts.join('\n');
+}
+
+function buildRepairFromTracePrompt() {
+  const system = [
+    `You are a Mermaid syntax repair engine with architecture awareness.`,
+    '',
+    AXIOMS_MERMAID_SYNTAX,
+    AXIOMS_PRESERVATION,
+    '',
+    `TASK: Fix the compilation error in the Mermaid source. You receive:`,
+    `- The failed Mermaid source`,
+    `- The specific compile error`,
+    `- The shadow model of expected entities and relationships`,
+    `- The original architecture description`,
+    '',
+    `RULES:`,
+    `- First line of output MUST be a valid Mermaid directive`,
+    `- Preserve ALL entities from the shadow model as nodes`,
+    `- Preserve ALL relationships from the shadow model as edges`,
+    `- Fix only what is broken — do not restructure working sections`,
+    `- Common fixes: reserved-word IDs, unbalanced brackets, invalid edge syntax, missing quotes on special-char labels`,
+    `- If a node ID is a reserved word (end, subgraph, graph, style, class, click, default), rename it by appending "Node"`,
+    '',
+    OUTPUT_FORMAT,
+  ].join('\n');
+
+  return { system, outputFormat: 'text', temperature: 0.0 };
+}
+
+function buildRepairFromTraceUserPrompt(mmdSource, compileError, shadow, originalDescription) {
+  const parts = [];
+
+  if (shadow) {
+    if (shadow.entities?.length > 0) {
+      parts.push(`[EXPECTED ENTITIES] ${shadow.entities.slice(0, 25).map(e => e.name).join(', ')}`);
+    }
+    if (shadow.relationships?.length > 0) {
+      parts.push(`[EXPECTED RELATIONSHIPS] ${shadow.relationships.slice(0, 20).map(r => `${r.from} ${r.verb} ${r.to}`).join('; ')}`);
+    }
+    if (shadow.gaps?.length > 0) {
+      parts.push(`[ARCHITECTURE GAPS] ${shadow.gaps.join('; ')}`);
+    }
+  }
+
+  parts.push('');
+  parts.push(`[ORIGINAL DESCRIPTION]`);
+  parts.push(originalDescription || '');
+  parts.push('');
+  parts.push(`[FAILED MERMAID SOURCE]`);
+  parts.push(mmdSource);
+  parts.push('');
+  parts.push(`[COMPILE ERROR]`);
+  parts.push(compileError);
+  parts.push('');
+  parts.push(`Fix the source so it compiles. Ensure all expected entities appear as nodes. Return only the corrected Mermaid source.`);
+
+  return parts.join('\n');
+}
+
 module.exports = {
   buildPrompt,
   getAxiomSection,
@@ -444,4 +557,8 @@ module.exports = {
   buildRenderPrepareUserPrompt,
   buildModelRepairPrompt,
   buildModelRepairUserPrompt,
+  buildDecomposePrompt,
+  buildDecomposeUserPrompt,
+  buildRepairFromTracePrompt,
+  buildRepairFromTraceUserPrompt,
 };

@@ -84,6 +84,11 @@ window.MermaidSidebar = class MermaidSidebar {
         <span class="sidebar-item-name">${this._esc(item.name)}</span>
         <span class="sidebar-item-meta">${item.type ? item.type + ' · ' : ''}${item.timestamp || ''}</span>
         <span class="sidebar-item-actions">
+          <button class="btn-rename" aria-label="Rename ${this._esc(item.name)}" title="Rename">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M11.5 2.5l2 2-8 8H3.5v-2l8-8z"/>
+            </svg>
+          </button>
           <button class="btn-trash" aria-label="Delete ${this._esc(item.name)}" title="Delete">
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
               <path d="M3 4.5h10M6.5 4.5V3a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v1.5"/>
@@ -92,6 +97,12 @@ window.MermaidSidebar = class MermaidSidebar {
           </button>
         </span>
       `;
+
+      const renameBtn = btn.querySelector('.btn-rename');
+      renameBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._startRename(btn, item, idx);
+      });
 
       const trashBtn = btn.querySelector('.btn-trash');
       trashBtn.addEventListener('click', (e) => {
@@ -118,6 +129,47 @@ window.MermaidSidebar = class MermaidSidebar {
   setActive(name) {
     this.activeIndex = this.items.findIndex(i => i.name === name);
     this.render();
+  }
+
+  async _startRename(btnEl, item, idx) {
+    const nameSpan = btnEl.querySelector('.sidebar-item-name');
+    if (!nameSpan) return;
+
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.className = 'sidebar-rename-input';
+    inp.value = item.name;
+    nameSpan.replaceWith(inp);
+    inp.focus();
+    inp.select();
+
+    const commit = async () => {
+      const newName = inp.value.trim();
+      if (!newName || newName === item.name) {
+        this.render();
+        return;
+      }
+      try {
+        const res = await fetch(`/api/diagrams/${encodeURIComponent(item.name)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ new_name: newName }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          item.name = data.new_name;
+          if (item.paths) item.paths = data.paths;
+          this._save();
+        }
+      } catch { /* best effort */ }
+      this.render();
+    };
+
+    inp.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); commit(); }
+      if (e.key === 'Escape') { this.render(); }
+    });
+    inp.addEventListener('blur', () => commit());
   }
 
   _esc(s) {

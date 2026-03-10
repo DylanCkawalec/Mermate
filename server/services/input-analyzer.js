@@ -415,6 +415,29 @@ function generateHint(recommendation, maturity, gaps, contentState) {
   }
 }
 
+// ---- Complexity scoring (decomposition trigger) ---------------------------
+
+const DOMAIN_BREADTH_RE = /\b(security|observability|event.?driven|infrastructure|deployment|auth|monitoring|tracing|resilience|compliance|governance|scaling|caching|load.?balancing)\b/gi;
+
+function scoreComplexity(shadow, intent) {
+  const entityScore = Math.min(1.0, shadow.entities.length / 12);
+  const relScore = Math.min(1.0, shadow.relationships.length / 10);
+  const domainTerms = new Set();
+  for (const e of shadow.entities) {
+    const m = e.name.match(DOMAIN_BREADTH_RE);
+    if (m) m.forEach(d => domainTerms.add(d.toLowerCase()));
+  }
+  const boundaryScore = Math.min(1.0, shadow.boundaryTerms.length / 3);
+  const domainScore = Math.min(1.0, domainTerms.size / 3);
+
+  const score = +(0.35 * entityScore + 0.25 * relScore + 0.2 * boundaryScore + 0.2 * domainScore).toFixed(3);
+  const shouldDecompose = score > 0.7
+    || (shadow.entities.length >= 8 && shadow.relationships.length >= 6)
+    || (shadow.entities.length >= 10);
+
+  return { score, shouldDecompose };
+}
+
 // ---- Main entry point -----------------------------------------------------
 
 /**
@@ -458,6 +481,8 @@ function analyze(text, mode = 'idea') {
   const intent = inferIntent(source);
   const diagramSelection = contentState === 'text' ? selectDiagramType(source) : null;
 
+  const complexity = scoreComplexity(shadow, intent);
+
   const recommendation = decideAction(
     contentState, maturity, quality.score, completeness.score, validationResult,
   );
@@ -478,6 +503,8 @@ function analyze(text, mode = 'idea') {
     hint,
     diagramSelection,
     validation: validationResult,
+    complexity: complexity.score,
+    shouldDecompose: complexity.shouldDecompose,
   };
 }
 

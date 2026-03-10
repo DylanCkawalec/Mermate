@@ -20,6 +20,9 @@ app.use('/flows', express.static(path.join(PROJECT_ROOT, 'flows')));
 // Static files: archived sources (read-only serving)
 app.use('/archs', express.static(path.join(PROJECT_ROOT, 'archs')));
 
+// Frontend vendor modules
+app.use('/vendor/three', express.static(path.join(PROJECT_ROOT, 'node_modules', 'three')));
+
 // API routes
 const renderRouter = require('./routes/render');
 const agentRouter = require('./routes/agent');

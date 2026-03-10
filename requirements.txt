@@ -1,3 +1,4 @@
 # Mermaid diagram tooling
+# Frontend runtime dependencies such as three.js are managed in package.json.
 mermaid-py>=0.8.3
 mmdc>=0.4.0

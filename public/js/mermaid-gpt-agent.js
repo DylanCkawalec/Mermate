@@ -27,6 +27,10 @@ window.MermaidAgent = class MermaidAgent {
     this._mode = null;
     this._draftText = '';
     this._animating = false;
+    this._thinkingEffect = null;
+    this._thinkingEffectDot = null;
+    this._thinkingEffectToken = 0;
+    this._thinkingEffectLoader = null;
   }
 
   get running() { return this._running; }
@@ -98,6 +102,7 @@ window.MermaidAgent = class MermaidAgent {
 
   stop() {
     if (this._abortController) this._abortController.abort();
+    this._teardownThinkingEffect();
     this._running = false;
     this.notesWrap.hidden = true;
     this.onStateChange('idle');
@@ -159,7 +164,7 @@ window.MermaidAgent = class MermaidAgent {
           this._addLog(`Preview: ${event.metrics?.nodeCount || '?'} nodes, ${event.metrics?.edgeCount || '?'} edges`, 'done');
           this.onPreviewRender(event);
         } else {
-          this._addLog(`Preview failed: ${event.error || 'unknown'}`, 'done');
+          this._addLog(`Preview compile issue — you can still finalize`, 'done');
         }
         break;
 
@@ -176,7 +181,8 @@ window.MermaidAgent = class MermaidAgent {
           this._addLog(`Max render: ${event.metrics?.nodeCount || '?'} nodes, ${event.metrics?.subgraphCount || 0} subgraphs`, 'done');
           this.onRenderResult(event);
         } else {
-          this._addLog(`Final render failed: ${event.error || 'unknown'}`, 'done');
+          this._addLog(`Render failed: ${event.error || 'unknown'}`, 'done');
+          this.onError(event.error || 'Render failed — try a simpler description or check your model connection');
         }
         break;
 
@@ -189,6 +195,7 @@ window.MermaidAgent = class MermaidAgent {
         break;
 
       case 'error':
+        this._markPreviousLogDone();
         this._addLog(`Error: ${event.message}`, 'done');
         this.onError(event.message);
         break;
@@ -304,17 +311,73 @@ window.MermaidAgent = class MermaidAgent {
   _addLog(text, state = '') {
     const entry = document.createElement('div');
     entry.className = 'agent-log-entry' + (state ? ' ' + state : '');
-    const d = document.createElement('div');
-    d.textContent = text;
-    entry.innerHTML = `<span class="agent-log-dot"></span><span>${d.innerHTML}</span>`;
+    const dot = document.createElement('span');
+    dot.className = 'agent-log-dot';
+
+    const label = document.createElement('span');
+    label.className = 'agent-log-text';
+    label.textContent = text;
+
+    entry.append(dot, label);
     this.panelLog.appendChild(entry);
     this.panelLog.scrollTop = this.panelLog.scrollHeight;
+
+    if (state === 'active') {
+      void this._attachThinkingEffect(dot);
+    }
   }
 
   _markPreviousLogDone() {
+    this._teardownThinkingEffect();
     this.panelLog.querySelectorAll('.agent-log-entry.active').forEach(e => {
       e.classList.remove('active');
       e.classList.add('done');
     });
+  }
+
+  async _attachThinkingEffect(dot) {
+    if (!dot) return;
+
+    this._teardownThinkingEffect(false);
+    const token = ++this._thinkingEffectToken;
+    this._thinkingEffectDot = dot;
+
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      dot.classList.add('is-thinking-fallback');
+      return;
+    }
+
+    try {
+      this._thinkingEffectLoader ||= import('/js/thinking-effect.js');
+      const { AgentThinkingEffect } = await this._thinkingEffectLoader;
+
+      if (token !== this._thinkingEffectToken || !dot.isConnected) return;
+
+      const host = document.createElement('span');
+      host.className = 'agent-log-dot-visual';
+      dot.appendChild(host);
+      this._thinkingEffect = new AgentThinkingEffect(host, { size: 25 });
+      this._thinkingEffectDot = dot;
+    } catch {
+      if (token !== this._thinkingEffectToken || !dot.isConnected) return;
+      dot.classList.add('is-thinking-fallback');
+    }
+  }
+
+  _teardownThinkingEffect(invalidateToken = true) {
+    if (invalidateToken) {
+      this._thinkingEffectToken += 1;
+    }
+
+    if (this._thinkingEffect) {
+      this._thinkingEffect.dispose();
+      this._thinkingEffect = null;
+    }
+
+    if (this._thinkingEffectDot) {
+      this._thinkingEffectDot.classList.remove('is-thinking-fallback');
+      this._thinkingEffectDot.querySelector('.agent-log-dot-visual')?.remove();
+      this._thinkingEffectDot = null;
+    }
   }
 };

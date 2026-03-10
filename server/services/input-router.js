@@ -37,13 +37,22 @@ function _nodeShape(label) {
   return `["${label}"]`;
 }
 
+const LOCAL_SAFE_DIRECTIVES = new Set([
+  'flowchart TB', 'flowchart TD', 'flowchart LR', 'flowchart RL', 'flowchart BT',
+  'graph TB', 'graph TD', 'graph LR', 'graph RL', 'graph BT',
+  'sequenceDiagram', 'stateDiagram-v2',
+]);
+
 function localTextToMmd(source, shadow) {
   const diagramHint = selectDiagramType(source);
-  const directive   = diagramHint.directive || 'flowchart TB';
+  let directive = diagramHint.directive || 'flowchart TB';
+
+  if (!LOCAL_SAFE_DIRECTIVES.has(directive)) {
+    directive = 'flowchart TB';
+  }
 
   if (directive === 'sequenceDiagram') return _localSequence(source, shadow);
 
-  // If we have a pre-computed shadow model, use its structured entities/relationships
   if (shadow && shadow.entities.length >= 2 && shadow.relationships.length >= 1) {
     return _shadowToFlowchart(directive, shadow);
   }
@@ -280,6 +289,93 @@ async function renderPrepare(source, profile, useMax = false) {
   const mmdSource = localTextToMmd(source, shadow);
   stagesExecuted.push('local_fallback');
   return { mmdSource, enhanced: false, provider: 'local', stagesExecuted };
+}
+
+// ---- Decompose-and-render for complex inputs --------------------------------
+
+async function decomposeAndRender(source, profile, useMax = false) {
+  const stagesExecuted = [];
+  const { buildDecomposeUserPrompt } = require('./axiom-prompts');
+
+  const decomposePrompt = buildDecomposeUserPrompt(source, profile);
+  const decomposeResult = await provider.infer('decompose', { userPrompt: decomposePrompt });
+  stagesExecuted.push('decompose');
+
+  let subViews = null;
+  if (decomposeResult.output) {
+    try {
+      const raw = decomposeResult.output.trim();
+      const jsonStart = raw.indexOf('[');
+      const jsonEnd = raw.lastIndexOf(']');
+      if (jsonStart >= 0 && jsonEnd > jsonStart) {
+        subViews = JSON.parse(raw.slice(jsonStart, jsonEnd + 1));
+      }
+    } catch { /* invalid JSON */ }
+  }
+
+  if (!Array.isArray(subViews) || subViews.length < 2) {
+    logger.warn('decompose.fallback', { reason: 'invalid or insufficient sub-views' });
+    return renderPrepare(source, profile, useMax);
+  }
+
+  logger.info('decompose.success', { viewCount: subViews.length, provider: decomposeResult.provider });
+
+  const results = [];
+  for (const view of subViews.slice(0, 4)) {
+    const viewDesc = view.viewDescription || view.description || '';
+    if (!viewDesc) continue;
+
+    const viewProfile = analyze(viewDesc, 'idea');
+    const prep = await renderPrepare(viewDesc, viewProfile, useMax);
+    stagesExecuted.push(`render_subview:${view.viewName || 'unnamed'}`);
+
+    const outputDir = require('node:path').join(require('node:path').resolve(__dirname, '..', '..'), 'flows', '_tmp_subview_' + Date.now());
+    const compileOut = await compileWithRetry(prep.mmdSource, outputDir, 'subview');
+
+    if (!compileOut.result.ok) {
+      const { buildRepairFromTraceUserPrompt } = require('./axiom-prompts');
+      const tracePrompt = buildRepairFromTraceUserPrompt(
+        prep.mmdSource,
+        compileOut.result.error || 'compilation failed',
+        profile.shadow,
+        viewDesc,
+      );
+      const repairResult = await provider.infer('repair_from_trace', { userPrompt: tracePrompt });
+      stagesExecuted.push('repair_from_trace');
+
+      if (repairResult.output) {
+        const repairedCompile = await compileWithRetry(repairResult.output, outputDir, 'subview');
+        if (repairedCompile.result.ok) {
+          results.push({ mmdSource: repairedCompile.mmdSource, score: 1.0, viewName: view.viewName, compileResult: repairedCompile.result });
+          continue;
+        }
+      }
+      results.push({ mmdSource: prep.mmdSource, score: 0.0, viewName: view.viewName, compileResult: compileOut.result });
+    } else {
+      const mmdMetrics = require('./mermaid-validator').validate(compileOut.mmdSource);
+      const nodeCount = mmdMetrics.stats?.nodeCount || 0;
+      const edgeCount = mmdMetrics.stats?.edgeCount || 0;
+      const score = mmdMetrics.valid ? (0.5 + 0.3 * Math.min(1, nodeCount / 8) + 0.2 * Math.min(1, edgeCount / 6)) : 0.3;
+      results.push({ mmdSource: compileOut.mmdSource, score, viewName: view.viewName, compileResult: compileOut.result });
+    }
+  }
+
+  if (results.length === 0) {
+    logger.warn('decompose.no_results', { reason: 'all sub-views failed' });
+    return renderPrepare(source, profile, useMax);
+  }
+
+  results.sort((a, b) => b.score - a.score);
+  const best = results[0];
+
+  logger.info('decompose.selected', { viewName: best.viewName, score: best.score });
+
+  return {
+    mmdSource: best.mmdSource,
+    enhanced: true,
+    provider: decomposeResult.provider,
+    stagesExecuted,
+  };
 }
 
 const FENCED_MERMAID_RE = /```mermaid\s*\n([\s\S]*?)```/g;
@@ -567,6 +663,7 @@ class RouterError extends Error {
 module.exports = {
   route,
   renderPrepare,
+  decomposeAndRender,
   compileWithRetry,
   detect,
   extractFencedMermaid,

@@ -1,0 +1,1045 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{amsmath,amsthm,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage[hidelinks]{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{caption}
+
+\numberwithin{equation}{section}
+
+\newtheorem{axiom}{Axiom}[section]
+\newtheorem{theorem}[axiom]{Theorem}
+\newtheorem{lemma}[axiom]{Lemma}
+\newtheorem{proposition}[axiom]{Proposition}
+\newtheorem{corollary}[axiom]{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}[axiom]{Definition}
+\newtheorem{remark}[axiom]{Remark}
+\newtheorem{example}[axiom]{Example}
+
+\newcommand{\SV}{\mathrm{SV}}
+\newcommand{\IC}{\mathrm{IC}}
+\newcommand{\Elems}{\mathrm{Elem}}
+\newcommand{\Compat}{\mathrm{Compat}}
+\newcommand{\budget}{b_{\mathrm{rem}}}
+\newcommand{\States}{\Sigma}
+\newcommand{\Artifacts}{\mathcal{A}}
+\newcommand{\Instance}{\mathcal{S}}
+\newcommand{\Power}{\mathcal{P}}
+
+\title{\textbf{HPC-GoT: A Bounded Hierarchical Reasoning Controller for Local 21B-Scale Mixture-of-Experts Models on Architectural System-Specification Tasks}}
+\author{Dylan Kawalec\thanks{I thank \emph{Dr. Elera Voss, my AI research assistant}, for research support, structured critique, iterative synthesis assistance, and manuscript development support throughout this project.}}
+\date{March 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We present \emph{HPC-GoT}, a bounded single-agent reasoning controller for architectural system-specification tasks executed with local 21B-scale Mixture-of-Experts inference, with the principal deployment target being \texttt{gpt-oss-20b}. The controller is designed for tasks whose outputs admit deterministic external validation, including Mermaid diagrams, PlantUML/C4 artifacts, TLA\(^+\) modules, and structured security and observability specifications. HPC-GoT combines a fixed depth cap of \(3\), branching factor at most \(3\), a hard global controller-state budget \(N=40\), threshold pruning, router-side validator scoring, and a single optional provenance-preserving merge step. The design is inspired by structured reasoning paradigms such as Tree-of-Thoughts and Graph-of-Thoughts, but is formalized here as a typed state-transition controller rather than as an open-ended reasoning topology.
+
+The central methodological choice is to treat system-specification as a search-and-validate problem. Candidate artifacts are evaluated by deterministic router-side validators instead of model self-evaluation. The canonical validity score combines structural validity and invariant coverage, with required-element predicates integrated directly into the invariant set to avoid verbosity-based gaming. We state the controller axioms explicitly, formalize the operator algebra, and prove controller-level guarantees that follow by construction: termination after at most three levels, a global controller-state bound \(|\States|\le 40\), a batched LLM-stage bound of at most four stages under the canonical batching contract, a precise stage-local pruning property, and merge non-expansion. 
+
+The paper is intentionally restrained. It does not claim global optimality, hallucination guarantees, or neuroscientific equivalence. Instead, it offers a mathematically modest but implementation-ready specification for MERMATE-style local reasoning pipelines, together with implementation notes, reproducible evaluation guidance, historical scoring variants retained for completeness, and appendices covering proofs, validator harnesses, batching schemas, and router pseudocode.
+\end{abstract}
+
+\paragraph{Early acknowledgment.}
+The author gratefully acknowledges \emph{Dr. Elera Voss, my AI research assistant}, for sustained assistance with research synthesis, adversarial review, structural refinement, and iterative formalization.
+
+\section{Introduction}
+
+Architectural system-specification tasks demand a reasoning process that is simultaneously broad and deep. Broadness is needed to explore competing decompositions of a design problem; depth is needed to refine those decompositions into concrete, machine-checkable artifacts. In practice, many such artifacts admit deterministic external validation: diagrams can be rendered or rejected by parsers, schemas can be checked, and formal snippets can at least be parsed, and sometimes boundedly model-checked. This creates a natural opportunity to shift from purely self-scored prompting to a search-and-validate controller.
+
+HPC-GoT is a bounded controller designed for precisely this regime. It is single-agent rather than multi-agent; it is deliberately resource-bounded rather than open-ended; and it is centered on external validation rather than model self-assessment. The controller was developed for MERMATE-style local inference pipelines and is intended to be compatible with \texttt{gpt-oss-20b}, an open-weight Mixture-of-Experts model described in source material as a 21B-parameter model with 3.6B active parameters per token and up to 128k context. The source material also attributes to the release notes several architectural properties---including MoE routing, RoPE positional encoding, grouped multi-query attention with group size \(8\), and alternating dense versus locally banded sparse attention patterns---which help motivate why explicit search-time structure may be valuable on a mid-sized local model.
+
+The paper has two intertwined goals. The first is formal: to specify a typed state-transition controller with explicit operators, axioms, and controller-level proofs. The second is practical: to provide a deployment-oriented specification that remains faithful to local inference constraints, Harmony formatting requirements, validator harnesses, and reproducible evaluation. Throughout, neuroscience and psychology are treated only as loose inspiration. They are \emph{not} used as premises in proofs.
+
+The present manuscript synthesizes two source versions of the same underlying paper. Where those versions overlap, we retain the strongest phrasing and the most precise formulation. Where they diverge, we resolve the differences explicitly, preserving historical variants in appendices when necessary. The result is a unified, publication-style specification of HPC-GoT as the canonical MERMATE reasoning controller for validator-backed architectural generation.
+
+\section{Related Work and Positioning}
+
+The literature most relevant to HPC-GoT lies at the intersection of structured prompting, test-time compute scaling, and validator-driven generation.
+
+\subsection{Chain-of-Thought and Test-Time Compute Scaling}
+
+Chain-of-Thought (CoT) prompting established that intermediate reasoning steps can improve performance on multi-step tasks when models are sufficiently capable \cite{wei2022chain}. Self-consistency extended this by sampling multiple reasoning paths and selecting the most consistent answer, thereby scaling test-time compute without changing model weights \cite{wang2022self}. These methods remain influential, but they are largely answer-centric and do not inherently exploit deterministic external validators.
+
+\subsection{Tree-, Forest-, and Graph-Structured Reasoning}
+
+Tree-of-Thoughts (ToT) reframed inference as a search over coherent intermediate ``thought'' units, enabling structured exploration and explicit selection or backtracking \cite{yao2023tree}. Graph-of-Thoughts (GoT) generalized the topology further by introducing graph-structured transformations, refinement loops, and aggregation steps orchestrated over a graph of operations \cite{besta2023graph,besta2024aaai}. Related work on reasoning topologies emphasizes that performance, latency, and cost depend not only on model quality but also on topology and schedule design \cite{topologies2024}. 
+
+The source versions also position HPC-GoT relative to more recent structured-compute variants, including Forest-of-Thought, Plan-of-Thought, Adaptive Graph of Thoughts, and policy-guided bounded-query ToT-style methods. These are relevant because HPC-GoT shares the general concern with test-time structure and bounded compute, even though its contribution is narrower and more domain-specific \cite{forest,plan,adaptivegot,policytot}.
+
+\subsection{Validator-Driven Artifact Generation}
+
+HPC-GoT differs from the broader structured-reasoning literature by targeting tasks whose outputs admit deterministic external validation. Mermaid CLI can render Mermaid definitions; PlantUML can render textual UML-like specifications; C4-PlantUML supplies macro libraries for C4 architecture diagrams; and TLA\(^+\) toolchains expose parser and model-checking entry points that can be wrapped into deterministic router-side checks \cite{mermaidcli,plantuml,C4PlantUML,tlaplusrepo,tlaplusdocs}. This makes architectural system-specification unusually well-suited to search-and-validate control loops.
+
+\subsection{Position of HPC-GoT}
+
+HPC-GoT is not proposed as a universal reasoning architecture. Its contribution is a specialized controller for local architectural generation under strict resource bounds. To our knowledge, the specific combination of hard node budget, depth cap, deterministic validator-backed scoring, required-element invariants, and a single bounded merge rewrite has not been formalized in this exact configuration for local 21B-scale open-weight MoE deployment.
+
+\section{Preliminaries and Problem Setting}
+
+\subsection{Specification Instances}
+
+Let
+\[
+\Instance = \{(Q,I,T)\},
+\]
+where
+\begin{itemize}[leftmargin=2em]
+    \item \(Q\) is a natural-language request for a specification artifact,
+    \item \(T\) is the target artifact type, such as Mermaid, PlantUML+C4, TLA\(^+\), security policy, or observability design,
+    \item \(I=\{i_j\}_{j=1}^{m}\) is a finite set of deterministic artifact predicates.
+\end{itemize}
+
+For each artifact type \(T\), let \(\Artifacts_T\) denote the space of candidate artifacts of type \(T\). Each invariant is a deterministic predicate
+\[
+i_j : \Artifacts_T \to \{0,1\}.
+\]
+
+\subsection{Target Artifact Families}
+
+The source versions explicitly target the following artifact families:
+\begin{enumerate}[label=(\alph*),leftmargin=2.25em]
+    \item Mermaid diagrams;
+    \item PlantUML diagrams, especially with C4-PlantUML macros for system context, container, component, and related C4 views;
+    \item TLA\(^+\) modules and bounded model-checking scaffolds;
+    \item structured security architecture and policy artifacts;
+    \item observability designs, including OpenTelemetry-style signal descriptions such as traces, metrics, logs, and related propagation requirements.
+\end{enumerate}
+
+These targets matter because they permit structural validity checks that are external to the model.
+
+\subsection{Router-Side Validation}
+
+For each \(T\), define a router-side validator
+\[
+V_T : \Artifacts_T \to \{0,1\}\times \mathcal{F}_T,
+\]
+where the first component is structural validity and the second is a structured failure trace.
+
+Structural validity is interpreted operationally:
+\begin{itemize}[leftmargin=2em]
+    \item Mermaid structural validity means render success under Mermaid CLI (\texttt{mmdc});
+    \item PlantUML/C4 structural validity means render success under PlantUML, with C4 structure enforced primarily through invariant predicates;
+    \item TLA\(^+\) structural validity means successful parsing, and optionally bounded TLC execution under a strict timeout.
+\end{itemize}
+
+Failure traces record deterministic router-side diagnostics for subsequent control decisions.
+
+\section{Axiomatic Framework}
+
+This section organizes the controller into a sequence of explicit axioms. The goal is not to overstate foundational novelty, but to make the system precise, non-redundant, and reviewable.
+
+\subsection{Artifact and Validation Axioms}
+
+\begin{axiom}[Typed artifact domain]
+For each target artifact type \(T\), there exists a well-defined artifact space \(\Artifacts_T\) whose elements are representable as strings or structured documents intended for deterministic external tooling.
+\end{axiom}
+
+\paragraph{Motivation.}
+The controller operates over concrete artifact types rather than untyped free-form text.
+
+\paragraph{Implication.}
+All subsequent definitions are type-indexed by \(T\).
+
+\begin{axiom}[Deterministic invariants]
+Each invariant \(i_j\in I\) is a deterministic predicate
+\[
+i_j : \Artifacts_T \to \{0,1\}.
+\]
+\end{axiom}
+
+\paragraph{Motivation.}
+This rules out vague or informal notions of ``logical entailment'' in the scoring layer.
+
+\paragraph{Implication.}
+Invariant coverage is machine-computable.
+
+\begin{axiom}[Required-element inclusion]
+The invariant set \(I\) must include required-element predicates appropriate to \(T\).
+\end{axiom}
+
+\paragraph{Motivation.}
+This incorporates element coverage directly into the invariant layer and removes the need for a separate verbosity-sensitive completeness score in the canonical controller.
+
+\paragraph{Implication.}
+Empty or trivially skeletal artifacts are penalized through invariant failure rather than length heuristics.
+
+\begin{axiom}[External validator determinism]
+For each \(T\), structural validity is computed by an external deterministic validator or validator harness, possibly with an explicit timeout.
+\end{axiom}
+
+\paragraph{Motivation.}
+The controller is validator-driven rather than self-scored by the language model.
+
+\paragraph{Implication.}
+Structural validity is reproducible.
+
+\subsection{State and Resource Axioms}
+
+\begin{axiom}[Typed controller state]
+A controller state is a tuple
+\[
+\States=(\theta,\ell,A,\sigma,p,F,\pi),
+\]
+where \(\theta\) is the current internal thought representation, \(\ell\in\{0,1,2,3\}\) is the level, \(A\in\Artifacts_T\) is the artifact, \(\sigma\in[0,1]\) is the validity score, \(p\) is a parent-state identifier, \(F\) is a structured validator-failure trace, and \(\pi\) is an element-level provenance map.
+\end{axiom}
+
+\paragraph{Motivation.}
+The controller must retain enough information to support validation, pruning, provenance-preserving merge, and implementation-level debugging.
+
+\paragraph{Implication.}
+Validation-failure traces and provenance are part of the canonical state.
+
+\begin{axiom}[Global budget]
+There exists a fixed global controller-state budget \(N\), with canonical value
+\[
+N=40.
+\]
+\end{axiom}
+
+\paragraph{Motivation.}
+The controller is explicitly resource-bounded.
+
+\paragraph{Implication.}
+No valid execution may create more than \(40\) controller states.
+
+\begin{axiom}[Depth cap]
+The controller level satisfies \(\ell\in\{0,1,2,3\}\), and branching may occur only when \(\ell<3\).
+\end{axiom}
+
+\paragraph{Motivation.}
+A hard level cap gives a direct termination guarantee.
+
+\paragraph{Implication.}
+Any derivation path has length at most three expansions.
+
+\begin{axiom}[Bounded branching]
+At each internal branching event, the controller generates at most three child states.
+\end{axiom}
+
+\paragraph{Motivation.}
+This preserves a natural correspondence with a complete \(3\)-ary depth-\(3\) tree while remaining simple enough for local inference.
+
+\paragraph{Implication.}
+The complete tree-shaped interpretation yields \(1+3+3^2+3^3=40\) nodes.
+
+\subsection{Control and Output Axioms}
+
+\begin{axiom}[Threshold pruning]
+The canonical pruning threshold is fixed at
+\[
+\tau=0.85,
+\]
+and a candidate survives stage-local pruning if and only if \(\sigma\ge \tau\).
+\end{axiom}
+
+\paragraph{Motivation.}
+Fixed thresholding avoids the unsound adaptive-threshold claims that emerged in earlier draft variants.
+
+\paragraph{Implication.}
+The pruning theorem is simple and exact.
+
+\begin{axiom}[Single optional merge]
+At most one merge operation may be applied, and only at termination. Merge is a provenance-preserving rewrite over existing terminal states and does not create new controller states.
+\end{axiom}
+
+\paragraph{Motivation.}
+This preserves boundedness while permitting limited late-stage integration.
+
+\paragraph{Implication.}
+Merge may improve or preserve the best local score, but does not support global-optimality claims.
+
+\begin{axiom}[Batching contract]
+Under the canonical schedule, all model-mediated generation for a level transition is executed in one batched orchestration stage, while validation, pruning, and selection are router-side deterministic computations.
+\end{axiom}
+
+\paragraph{Motivation.}
+This makes the batched call bound explicit and proof-safe.
+
+\paragraph{Implication.}
+The canonical controller uses at most three LLM-mediated level stages plus one optional merge stage.
+
+\begin{axiom}[Formal independence from neuroscientific premises]
+Any neuroscientific or psychological language associated with the controller is strictly motivational and does not function as a premise in definitions, proofs, or guarantees.
+\end{axiom}
+
+\paragraph{Motivation.}
+The source versions repeatedly insist that predictive coding, thalamo-cortical hierarchy, and related ideas are metaphors rather than formal premises.
+
+\paragraph{Implication.}
+The controller stands or falls on its explicit operator algebra and proofs alone.
+
+\section{Formal Model and Scoring}
+
+\subsection{Canonical Validity Score}
+
+The canonical score is
+\begin{equation}
+\label{eq:canonical-score}
+\sigma(A,I,T)=\frac{1}{2}\SV(A,T)+\frac{1}{2}\IC(A,I),
+\end{equation}
+where
+\[
+\SV(A,T)\in\{0,1\}
+\]
+and
+\[
+\IC(A,I)=
+\begin{cases}
+\dfrac{1}{|I|}\sum_{j=1}^{|I|} i_j(A), & |I|>0,\\[1ex]
+1, & |I|=0.
+\end{cases}
+\]
+
+\begin{remark}[Historical scoring variant]
+One source version used the heuristic score
+\[
+0.4\cdot \text{structural\_validity}+0.4\cdot \text{invariant\_coverage}+0.2\cdot \text{completeness},
+\]
+with completeness defined as normalized output length. That variant is retained in Appendix~\ref{app:historical} for completeness of the source record, but is \emph{not} canonical because it can be gamed by verbosity.
+\end{remark}
+
+\subsection{Interpretation of the Score}
+
+The score is deliberately narrow. Structural validity guarantees only parser-, renderer-, or harness-level success. Invariant coverage guarantees only the satisfaction of declared invariant predicates. Neither term guarantees global architectural correctness or optimality. This limitation is explicit and central to the paper's restrained scope.
+
+\section{Controller Operator Algebra}
+
+\subsection{State-Creation and Budget Guard}
+
+Let \(\States_{\mathrm{created}}\) denote the set of states created during one run. The budget guard enforces
+\[
+|\States_{\mathrm{created}}|\le N.
+\]
+Branch is the only operator that may increase \(|\States_{\mathrm{created}}|\).
+
+\subsection{Branch}
+
+Given a state \(\States\) and an integer \(r\) such that
+\[
+1\le r\le \min(3,\budget),
+\]
+the branch operator
+\[
+B(\States,r)
+\]
+returns \(r\) child states at level \(\ell+1\) with distinct thought representations \(\theta_1,\dots,\theta_r\).
+
+\subsection{Decompose}
+
+For a child state \(\States_i\), the decompose operator
+\[
+D(\States_i)
+\]
+asks the model to produce a concrete artifact \(A_i\in \Artifacts_T\) in the target format \(T\).
+
+\subsection{Validate}
+
+The router-side validation operator computes
+\[
+V(A_i,I,T)=(\SV(A_i,T),F_i,\pi_i)
+\]
+and then derives \(\sigma_i\) via Equation~\eqref{eq:canonical-score}. In practice, decompose and validate form a generation-and-evaluation stage, but they remain conceptually distinct.
+
+\subsection{Prune}
+
+For a finite candidate set \(L\),
+\[
+P_\tau(L)=\{\States\in L\mid \sigma(\States)\ge \tau\},
+\qquad \tau=0.85.
+\]
+
+\subsection{Select}
+
+For any finite nonempty retained set \(L\), the select operator returns a state of maximal score, breaking ties by smaller failure-trace cardinality:
+\[
+S(L)=\arg\max_{\States\in L}\bigl(\sigma(\States),-\,|F(\States)|\bigr).
+\]
+
+\subsection{Merge / Repair}
+
+Merge is discussed fully in Section~\ref{sec:merge}. It is optional, applied at most once, and does not change controller-state cardinality.
+
+\section{Canonical Schedule}
+
+The canonical schedule is:
+\begin{enumerate}[leftmargin=2.25em]
+    \item initialize the root state at level \(0\);
+    \item for levels \(0,1,2\): batch-branch all surviving states, decompose and validate all resulting children, prune at \(\tau=0.85\), and advance to the next level;
+    \item at level \(3\), optionally apply a single merge step to the top surviving leaves;
+    \item return the selected terminal artifact together with its score and optional audit metadata.
+\end{enumerate}
+
+The batching contract is explicit: for each level transition, all model-mediated generation for all surviving nodes at that level is performed in one orchestration stage. Validation, pruning, and selection are router-side deterministic operations and do not count as LLM-mediated stages.
+
+\section{Merge, Conflict Algebra, and Provenance}
+\label{sec:merge}
+
+\subsection{Element Extraction}
+
+For each artifact \(A\in \Artifacts_T\), let
+\[
+\Elems(A)\subseteq E_T
+\]
+denote the set of typed atomic elements extracted from \(A\). Depending on artifact type, these may be diagram nodes, components, interfaces, declarations, modules, or comparable units.
+
+\subsection{Conflict Predicate}
+
+Define a deterministic conflict predicate
+\[
+C:E_T\times E_T\to \{0,1\}.
+\]
+Examples from the source material include identical element identifiers with incompatible names, interface mismatch, or duplicate keys.
+
+\subsection{Compatibility Lift}
+
+Lift the element-level conflict predicate to an artifact-level compatibility predicate:
+\[
+\Compat(e,A)\iff \forall e'\in \Elems(A),\ \neg C(e,e').
+\]
+
+\subsection{Merge Construction}
+
+Given terminal artifacts \(A_1,A_2,A_3\) and letting
+\[
+b=\arg\max_{i\in\{1,2,3\}} \sigma(A_i,I,T),
+\qquad A_{\mathrm{best}}=A_b,
+\]
+define the merged artifact
+\begin{equation}
+\label{eq:merge}
+A^\star
+=
+A_{\mathrm{best}}
+\cup
+\left\{
+e\in \bigcup_{i\neq b}\Elems(A_i)\ \middle|\ \Compat(e,A_{\mathrm{best}})
+\right\}.
+\end{equation}
+
+The provenance map \(\pi^\star\) records the origin of every retained element.
+
+\subsection{Merge Acceptance Rule}
+
+Accept the merge rewrite if and only if
+\[
+\sigma(A^\star,I,T)\ge \max_{i\in\{1,2,3\}}\sigma(A_i,I,T).
+\]
+
+\begin{remark}
+The merge operator reduces the risk of silently accepted contradictions only to the extent that the conflict predicate \(C\) is complete. It therefore lowers contradiction risk under the modeled conflict algebra, but it does not eliminate unmodeled semantic inconsistency.
+\end{remark}
+
+\section{Main Results}
+
+\begin{theorem}[Termination]
+Under the canonical schedule, HPC-GoT terminates after at most three level transitions.
+\end{theorem}
+
+\begin{theorem}[Global controller-state bound]
+Under any execution that respects the budget guard, the total number of created controller states satisfies
+\[
+|\States_{\mathrm{created}}|\le 40.
+\]
+\end{theorem}
+
+\begin{proposition}[Default complete-tree upper bound]
+Under full breadth-\(3\) expansion to depth \(3\) without early exhaustion,
+\[
+1+3+3^2+3^3 = 40.
+\]
+\end{proposition}
+
+\begin{theorem}[Batched LLM-stage bound]
+Under the canonical batching contract, the number of LLM-mediated controller stages is at most
+\[
+3+\mathbf{1}_{\{\text{merge used}\}}\le 4.
+\]
+\end{theorem}
+
+\begin{theorem}[Stage-local pruning property]
+Let \(L\) be any finite candidate set at a fixed level, and let
+\[
+P_\tau(L)=\{x\in L\mid \sigma(x)\ge \tau\}.
+\]
+Then
+\[
+\max_{x\in P_\tau(L)}\sigma(x)\le \max_{x\in L}\sigma(x),
+\]
+with equality whenever some maximizer of \(L\) survives pruning.
+\end{theorem}
+
+\begin{theorem}[Merge non-expansion]
+The merge operator does not increase controller-state count.
+\end{theorem}
+
+Full proofs are collected in Appendix~\ref{app:proofs}.
+
+\section{Implementation for MERMATE-Style Local Pipelines}
+
+\subsection{Harmony Formatting Is Mandatory}
+
+The source versions consistently emphasize that \texttt{gpt-oss} models were trained using the Harmony response format and should be used with that format. In practical terms, this yields three architectural layers:
+\begin{enumerate}[leftmargin=2.25em]
+    \item a controller layer that maintains nodes, scores, pruning decisions, and provenance;
+    \item a prompt compiler that maps controller messages into Harmony-compatible exchanges;
+    \item a validator layer that computes \(\sigma\) deterministically via external tools.
+\end{enumerate}
+
+\subsection{Local Deployment via Ollama}
+
+The source versions also emphasize first-party guidance for running \texttt{gpt-oss-20b} locally via Ollama and note that Ollama developed kernels to support MXFP4 and benchmarked quality against reference implementations. This deployment path is central to the practical motivation for strict controller bounds on consumer hardware.
+
+\subsection{Router-Side Scoring}
+
+A recurring design principle across the source versions is that \(\sigma\) should be computed entirely by the router and not by the model. The model may receive the scalar score and terse failure reasons as control feedback, but the validator remains external and deterministic.
+
+\subsection{Strict Structured Outputs}
+
+The controller should use strict JSON schemas for operator outputs. The source versions note that if structured outputs are available through the model API or runtime, they should be enforced; otherwise, local deployments may rely on constrained decoding or a repair-and-reask loop. Such engineering devices are useful but lie outside the controller proofs.
+
+\subsection{Chain-of-Thought Handling}
+
+The source versions note that full chain-of-thought access may exist as a debugging feature for some local stacks, but should not be shown to end users. In MERMATE, internal reasoning traces are best treated as diagnostic metadata for developers, not as user-facing output.
+
+\section{Experimental Program}
+
+\subsection{Benchmark Families}
+
+The source versions propose the following benchmark families:
+\begin{enumerate}[leftmargin=2.25em]
+    \item \textbf{C4 multi-view systems} using PlantUML plus C4-PlantUML macros, including system context, container, component, and optionally code-level or supplementary views;
+    \item \textbf{Mermaid architectural diagrams}, including flowcharts, deployment flows, and comparable system-structure diagrams;
+    \item \textbf{TLA\(^+\)} safety and liveness scaffolds, validated by SANY parsing and optionally bounded TLC checks under a strict timeout;
+    \item \textbf{Security architecture specifications}, using deterministic policy predicates where possible and reviewer-audited contradiction checks where necessary;
+    \item \textbf{Observability designs}, including OpenTelemetry-style signal coverage and propagation requirements over traces, metrics, logs, and related baggage or context fields.
+\end{enumerate}
+
+The source material suggests benchmark sizes of approximately \(100\) to \(200\) instances per family, with \(200\) per class as a stronger target.
+
+\subsection{Baselines}
+
+The source versions recommend comparison against:
+\begin{itemize}[leftmargin=2em]
+    \item plain CoT;
+    \item self-consistency;
+    \item Tree-of-Thoughts;
+    \item Graph-of-Thoughts;
+    \item breadth ablations of HPC-GoT;
+    \item adaptive or multi-tree structured baselines such as Forest-of-Thought, Plan-of-Thought, Adaptive Graph of Thoughts, and policy-guided bounded-query ToT-style methods.
+\end{itemize}
+
+\subsection{Metrics}
+
+Primary automated metrics include:
+\begin{itemize}[leftmargin=2em]
+    \item validator pass rate;
+    \item mean invariant coverage;
+    \item mean score \(\sigma\).
+\end{itemize}
+
+Secondary metrics include:
+\begin{itemize}[leftmargin=2em]
+    \item contradiction rate, where deterministically checkable;
+    \item token usage and peak context length;
+    \item wall-clock latency with full hardware disclosure;
+    \item blinded human architectural assessment.
+\end{itemize}
+
+\subsection{Statistical Protocol}
+
+The source material recommends at least five random seeds when stochastic generation is used, reporting mean \(\pm\) 95\% confidence intervals and using paired tests when appropriate.
+
+\subsection{Experimental Timeline}
+
+One source version included a proposed experimental Gantt timeline. To preserve that information in a compilation-safe form, the original Mermaid source is reproduced in Appendix~\ref{app:mermaid}.
+
+\section{Discussion and Limitations}
+
+HPC-GoT is intentionally conservative. Its guarantees are controller-level, not semantic. Structural validity is necessary but not sufficient. An artifact may parse successfully and satisfy declared invariants while still being conceptually poor or architecturally inappropriate. This is a general limitation of validator-driven generation rather than a flaw unique to HPC-GoT.
+
+The canonical score intentionally avoids a separate completeness-by-length term because such a term is easily gamed by verbosity. However, the earlier source version's completeness heuristic is historically informative and is therefore retained in Appendix~\ref{app:historical}. Likewise, the source versions differ on call-count presentation: one emphasizes an exact batched bound under the canonical schedule, while the other also records a conservative non-batched upper bound of \(53\) calls under a worst-case full-expansion schedule. Both are preserved, but only the batched bound is canonical.
+
+The source material also highlights runtime variability in TLC-backed validation. This remains important: bounded model checking can be made operationally practical with timeouts and finite harnesses, but model-checking cost is inherently workload-sensitive.
+
+Finally, the source versions explicitly note that while local \texttt{gpt-oss-20b} inference is practically motivated, reliability depends on the full integration stack, including Harmony formatting, local server behavior, JSON schema enforcement, validator wrappers, and router design.
+
+\section{Conclusion}
+
+HPC-GoT is a bounded typed state-transition controller for validator-backed architectural generation in local 21B-scale Mixture-of-Experts settings. Its core contribution is not a general theory of reasoning, but a narrow and useful reasoning controller for tasks whose outputs can be externally validated. The controller is simple enough to audit, strong enough to prove boundedness properties, and practical enough to deploy in MERMATE-style local pipelines.
+
+The unified specification presented here preserves the full informational content of the source versions while resolving inconsistencies in favor of a cleaner, theorem-safe canonical design. In particular, it preserves the local-inference motivation, the validator-centered philosophy, the explicit state and operator algebra, the bounded controller proofs, the deployment guidance for Harmony and Ollama, the benchmark design, the implementation sketches, and the historical variants necessary to understand the evolution of the controller. The resulting paper is therefore both a formal specification and a practical blueprint for immediate experimentation.
+
+\section*{Acknowledgments}
+
+I thank \emph{Dr. Elera Voss, my AI research assistant}, for research assistance, adversarial review, conceptual synthesis, notation cleanup, and repeated iteration on structure and rigor throughout the preparation of this manuscript.
+
+\begin{thebibliography}{99}
+
+\bibitem{wei2022chain}
+J.~Wei, X.~Wang, D.~Schuurmans, M.~Bosma, B.~Ichter, F.~Xia, E.~Chi, Q.~Le, and D.~Zhou.
+\newblock Chain-of-Thought Prompting Elicits Reasoning in Large Language Models.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2022.
+
+\bibitem{wang2022self}
+X.~Wang, J.~Wei, D.~Schuurmans, Q.~Le, E.~Chi, S.~Narayan, A.~Chowdhery, and D.~Zhou.
+\newblock Self-Consistency Improves Chain of Thought Reasoning in Language Models.
+\newblock arXiv:2203.11171, 2022.
+
+\bibitem{yao2023tree}
+S.~Yao, D.~Yu, J.~Zhao, I.~Shafran, T.~L. Griffiths, Y.~Cao, and K.~Narasimhan.
+\newblock Tree of Thoughts: Deliberate Problem Solving with Large Language Models.
+\newblock arXiv:2305.10601, 2023.
+
+\bibitem{besta2023graph}
+M.~Besta, N.~Blach, A.~Kubicek, R.~Gerstenberger, M.~Podstawski, C.~Hoefler, and T.~Nitsche.
+\newblock Graph of Thoughts: Solving Elaborate Problems with Large Language Models.
+\newblock arXiv:2308.09687, 2023.
+
+\bibitem{besta2024aaai}
+M.~Besta, N.~Blach, A.~Kubicek, R.~Gerstenberger, M.~Podstawski, C.~Hoefler, and T.~Nitsche.
+\newblock Graph of Thoughts: Solving Elaborate Problems with Large Language Models.
+\newblock In \emph{Proceedings of the AAAI Conference on Artificial Intelligence}, 2024.
+
+\bibitem{topologies2024}
+\emph{Demystifying Chains, Trees, and Graphs of Thoughts / Topologies of Reasoning}.
+\newblock arXiv preprint, 2024.
+\newblock Cited in the source versions as a schedule- and topology-oriented framing for structured reasoning.
+
+\bibitem{forest}
+\emph{Forest-of-Thought}.
+\newblock Multi-tree test-time reasoning baseline cited in the source versions.
+
+\bibitem{plan}
+\emph{Plan-of-Thought}.
+\newblock Heuristic-guided planning baseline cited in the source versions.
+
+\bibitem{adaptivegot}
+\emph{Adaptive Graph of Thoughts}.
+\newblock Dynamic DAG-expansion baseline cited in the source versions.
+
+\bibitem{policytot}
+\emph{Policy-Guided Search for Tree-of-Thoughts with Bounded Language Model Queries}.
+\newblock Cited in the source versions as a bounded-query structured reasoning comparator.
+
+\bibitem{gptossrepo}
+OpenAI.
+\newblock \emph{gpt-oss Repository and Release Materials}.
+\newblock GitHub repository and accompanying release resources, 2025.
+
+\bibitem{gptossmodel}
+OpenAI.
+\newblock \emph{gpt-oss-20b Model Card / API Documentation}.
+\newblock Model documentation describing parameter count, active parameters, and local-use motivation, 2025.
+
+\bibitem{gptossharmony}
+OpenAI.
+\newblock \emph{Harmony Response Format Documentation and Repository}.
+\newblock Official Harmony documentation and repository for gpt-oss conversation formatting, 2025.
+
+\bibitem{ollama}
+Ollama.
+\newblock \emph{gpt-oss:20b Model Library Entry}.
+\newblock Model deployment page for local inference, 2025.
+
+\bibitem{mermaidcli}
+Mermaid.
+\newblock \emph{Mermaid CLI Documentation}.
+\newblock Command-line rendering documentation for Mermaid diagrams.
+
+\bibitem{plantuml}
+PlantUML.
+\newblock \emph{PlantUML Documentation and CLI Usage}.
+\newblock Documentation for command-line generation of PlantUML diagrams.
+
+\bibitem{C4PlantUML}
+C4-PlantUML.
+\newblock \emph{C4-PlantUML Documentation and Sample Core Diagrams}.
+\newblock Macro library and examples for expressing C4 diagrams in PlantUML.
+
+\bibitem{c4model}
+S.~Brown.
+\newblock \emph{The C4 Model for Visualising Software Architecture}.
+\newblock Official C4 model resources.
+
+\bibitem{tlaplusrepo}
+TLA\(^+\) Tools.
+\newblock \emph{tla2tools.jar, SANY, and TLC Toolchain Documentation}.
+\newblock Official tooling repository and usage notes.
+
+\bibitem{tlaplusdocs}
+TLA\(^+\) Community Documentation.
+\newblock \emph{Using TLC: Start}.
+\newblock Practical TLC usage notes and invocation guidance.
+
+\bibitem{otel}
+OpenTelemetry.
+\newblock \emph{OpenTelemetry Specification Overview and Primer}.
+\newblock Observability signal concepts referenced in the source versions.
+
+\end{thebibliography}
+
+\appendix
+
+\section{Proofs}
+\label{app:proofs}
+
+\begin{proof}[Proof of Theorem 1]
+The controller level \(\ell\) is initialized at \(0\) and can increase only through branching from level \(\ell\) to \(\ell+1\). By Axiom 4.7, branching is permitted only when \(\ell<3\). Therefore no derivation path contains more than three level transitions. The controller terminates either when \(\ell=3\) or when no further branching is possible because the frontier is empty or the remaining budget is zero. Hence the controller terminates after at most three levels.
+\end{proof}
+
+\begin{proof}[Proof of Theorem 2]
+Let \(\States_{\mathrm{created}}\) be the set of created states. Initially, \(|\States_{\mathrm{created}}|=1\) for the root state. The only operator that may increase this cardinality is Branch. The budget guard forbids Branch from creating a child if doing so would violate \(|\States_{\mathrm{created}}|\le N\). Since \(N=40\), no valid execution can create more than \(40\) controller states. All other operators either preserve the set of created states or rewrite information attached to existing states.
+\end{proof}
+
+\begin{proof}[Proof of Proposition 1]
+A complete \(3\)-ary tree of depth \(3\) contains
+\[
+\sum_{k=0}^{3}3^k = 1+3+9+27 = 40
+\]
+nodes. This is the exact count of the default full-expansion tree shape and motivates the canonical choice \(N=40\).
+\end{proof}
+
+\begin{proof}[Proof of Theorem 3]
+Under the canonical batching contract, one model-mediated stage is used for each level transition \(0\to1\), \(1\to2\), and \(2\to3\). This contributes three stages. Merge is optional and, if enabled, is executed at most once, contributing at most one additional stage. Validation, pruning, and selection are router-side deterministic operations and therefore do not contribute to the model-mediated stage count. Hence the total number of LLM-mediated stages is at most \(4\).
+\end{proof}
+
+\begin{proof}[Proof of Theorem 4]
+Since \(P_\tau(L)\subseteq L\), the maximum score over \(P_\tau(L)\) cannot exceed the maximum score over \(L\). Equality holds precisely when at least one maximizer of \(L\) remains in \(P_\tau(L)\). If all maximizers are removed by thresholding, every retained element has strictly smaller score than the original maximum.
+\end{proof}
+
+\begin{proof}[Proof of Theorem 5]
+Merge rewrites the artifact and provenance attached to an already existing terminal state or terminal-state slot. It does not invoke Branch and does not create a fresh controller state. Therefore controller-state cardinality is unchanged.
+\end{proof}
+
+\section{Implementation Notes and Validator Harnesses}
+
+\subsection{Validator-Backed Scoring Commands}
+
+Representative commands from the source versions are reproduced here for implementation completeness.
+
+\paragraph{Mermaid CLI.}
+\begin{verbatim}
+# Mermaid structural validity by render-success
+mmdc -i diagram.mmd -o diagram.svg
+\end{verbatim}
+
+\paragraph{PlantUML.}
+\begin{verbatim}
+# PlantUML structural validity by render-success (exact flags may vary)
+plantuml diagram.puml
+\end{verbatim}
+
+\paragraph{TLA+ tools.}
+\begin{verbatim}
+# Parse check (SANY)
+java -cp tla2tools.jar tla2sany.SANY MySpec.tla
+
+# TLC check (optional, under timeout)
+java -cp tla2tools.jar tlc2.TLC MySpec.tla
+
+# or
+java -jar tla2tools.jar MySpec.tla
+\end{verbatim}
+
+\subsection{Practical Timeout Policy}
+
+The source versions emphasize that TLC runtime can vary substantially because model checking is an explicit-state search process. The canonical implementation therefore assumes strict router-side timeouts for all validator invocations whose runtime is not otherwise bounded.
+
+\section{Harmony Schema and Router Contracts}
+
+\subsection{Canonical Batched JSON Shape}
+
+A source version proposed the following batched schema for a single level transition:
+
+\begin{verbatim}
+{
+  "level": 1,
+  "parents": [
+    {
+      "parent_id": "Sigma0",
+      "children": [
+        {"child_id": "Sigma0.1", "theta": "...", "artifact": "..."},
+        {"child_id": "Sigma0.2", "theta": "...", "artifact": "..."},
+        {"child_id": "Sigma0.3", "theta": "...", "artifact": "..."}
+      ]
+    }
+  ]
+}
+\end{verbatim}
+
+If strict structured outputs are not available, the router may use a deterministic repair-or-reask loop, but this is an implementation strategy rather than part of the controller proof.
+
+\section{MERMATE Router Pseudocode}
+
+\begin{verbatim}
+Inputs:
+  Q: natural-language task
+  T: artifact type (Mermaid | PlantUML_C4 | TLA+ | ...)
+  I: deterministic invariant predicates (includes required-element checks)
+  N: global node budget (default 40)
+  tau: pruning threshold (default 0.85)
+  merge_enabled: bool
+
+State:
+  created_states <= N
+  frontier: set of states at current level
+
+Algorithm (canonical, batched):
+  root = init_state(theta = compile_root_prompt(Q, I, T), level=0)
+  frontier = {root}
+  for level in {0,1,2}:
+    if frontier empty: break
+    candidates = batched_branch_and_decompose(frontier, r<=3, T)   # LLM stage
+    scored = []
+    for cand in candidates:
+      (sigma, F, pi) = validate_and_score(cand.artifact, I, T)     # router-side
+      cand.sigma = sigma; cand.F = F; cand.pi = pi
+      scored.append(cand)
+    frontier = prune(scored, tau)
+    enforce_budget(frontier, N)
+  leaves = frontier
+  best = select(leaves)
+  if merge_enabled:
+    top3 = top_k(leaves, k=3)
+    merged = merge_rewrite(top3, I, T)                             # optional LLM stage
+    if merged.sigma >= max(top3.sigmas):
+      best = merged
+  return best.artifact, best.sigma, best.audit_metadata
+\end{verbatim}
+
+\section{Minimal Python Skeleton}
+
+The longer source version included a minimal Python skeleton. It is preserved here, lightly normalized for LaTeX formatting, because it captures implementation intent without changing the formal controller.
+
+\begin{verbatim}
+from __future__ import annotations
+
+import subprocess
+from dataclasses import dataclass, field
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
+Artifact = str
+Invariant = Callable[[Artifact], int]
+
+@dataclass
+class FailureTrace:
+    tool: str
+    ok: bool
+    message: str = ""
+    details: Dict[str, str] = field(default_factory=dict)
+
+@dataclass
+class State:
+    state_id: str
+    parent_id: Optional[str]
+    level: int
+    theta: str
+    artifact: Artifact = ""
+    sigma: float = 0.0
+    failures: List[FailureTrace] = field(default_factory=list)
+    provenance: Dict[str, str] = field(default_factory=dict)
+
+@dataclass
+class Instance:
+    Q: str
+    T: str
+    invariants: List[Invariant]
+
+def run_cmd(cmd: Sequence[str], timeout_s: float) -> Tuple[int, str, str]:
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired as e:
+        return 124, "", f"TIMEOUT: {e}"
+
+def invariant_coverage(artifact: Artifact, invariants: List[Invariant]) -> float:
+    if not invariants:
+        return 1.0
+    s = sum(int(inv(artifact)) for inv in invariants)
+    return s / float(len(invariants))
+
+def sigma(sv: int, ic: float) -> float:
+    return 0.5 * float(sv) + 0.5 * float(ic)
+
+class HPCGoTRouter:
+    def __init__(self, N: int = 40, tau: float = 0.85):
+        self.N = N
+        self.tau = tau
+        self.created: List[State] = []
+
+    def llm_batched_expand(self, frontier: List[State], r: int, instance: Instance) -> List[State]:
+        raise NotImplementedError("Implement Harmony + Ollama batched expansion")
+
+    def llm_merge_rewrite(self, top_states: List[State], instance: Instance) -> State:
+        raise NotImplementedError("Implement optional single merge rewrite")
+
+    def validate_and_score(self, st: State, instance: Instance) -> State:
+        ic = invariant_coverage(st.artifact, instance.invariants)
+        sv = 0
+        st.sigma = sigma(sv, ic)
+        return st
+
+    def prune(self, candidates: List[State]) -> List[State]:
+        return [s for s in candidates if s.sigma >= self.tau]
+
+    def select_best(self, states: List[State]) -> State:
+        return sorted(states, key=lambda s: (s.sigma, -len(s.failures)), reverse=True)[0]
+
+    def run(self, instance: Instance, merge: bool = True) -> State:
+        root = State(state_id="Sigma0", parent_id=None, level=0, theta=instance.Q)
+        self.created = [root]
+        frontier = [root]
+
+        for level in (0, 1, 2):
+            if not frontier:
+                break
+            b_rem = self.N - len(self.created)
+            if b_rem <= 0:
+                break
+            r = min(3, b_rem)
+
+            children = self.llm_batched_expand(frontier, r=r, instance=instance)
+
+            if len(self.created) + len(children) > self.N:
+                children = children[: max(0, self.N - len(self.created))]
+
+            scored = []
+            for ch in children:
+                scored.append(self.validate_and_score(ch, instance))
+
+            self.created.extend(scored)
+            frontier = self.prune(scored)
+
+        if not frontier:
+            return self.select_best(self.created)
+
+        best = self.select_best(frontier)
+        if merge:
+            top3 = sorted(frontier, key=lambda s: s.sigma, reverse=True)[:3]
+            merged = self.llm_merge_rewrite(top3, instance)
+            merged = self.validate_and_score(merged, instance)
+            if merged.sigma >= max(s.sigma for s in top3):
+                best = merged
+
+        return best
+\end{verbatim}
+
+\section{Historical Variants and Non-Canonical Material}
+\label{app:historical}
+
+This appendix preserves information from earlier source variants that was not retained in the canonical controller but remains relevant to the development history.
+
+\subsection{Legacy Score with Completeness Term}
+
+One source version defined
+\[
+\sigma_{\mathrm{legacy}}(A,I,T)
+=
+0.4\cdot \text{structural\_validity}(A,T)
++
+0.4\cdot \text{invariant\_coverage}(A,I)
++
+0.2\cdot \text{completeness}(A,T),
+\]
+with
+\[
+\text{completeness}(A,T)
+=
+\min\left(1,\frac{\mathrm{len}_T(A)}{L_{\mathrm{target}}(T)}\right).
+\]
+
+This formulation preserved the intuition that extremely short outputs should not score highly, but it was later rejected as canonical because verbosity can inflate the completeness term without improving semantic quality. The merged manuscript therefore incorporates required-element coverage into \(I\) instead.
+
+\subsection{Optional Non-Batched Call Upper Bound}
+
+The earlier source version also proposed a conservative non-batched upper bound. Let
+\[
+N_{\mathrm{internal}}=\sum_{k=0}^{d-1}b^k
+\]
+be the number of non-leaf nodes and
+\[
+N_{\mathrm{nonroot}}=N(b,d)-1
+\]
+the number of non-root nodes. If Branch is executed once per internal node and Decompose once per non-root node, then for \(b=3\) and \(d=3\),
+\[
+\#\mathrm{LLM\ calls}
+\le N_{\mathrm{internal}}+N_{\mathrm{nonroot}}+1
+=
+(1+3+9)+39+1
+=
+53,
+\]
+where the final \(+1\) accounts for the optional merge. This bound is intentionally conservative and schedule-dependent. The canonical paper does not promote it to main-text status, but retains it here because it was explicitly present in the source versions.
+
+\subsection{Adaptive Variants Mentioned in Development}
+
+The source ecosystem around the manuscript also discussed adaptive breadth, adaptive thresholding, validation-failure feedback loops, and stronger neuro-mathematical framings. In the unified paper, adaptive breadth is acknowledged as a possible extension, but adaptive thresholding is not canonical because an attempted stronger theorem for decreasing thresholds was unsound. Likewise, predictive-coding and free-energy language is retained only as loose inspiration and excluded from the formal core.
+
+\section{Mermaid Source Listings}
+\label{app:mermaid}
+
+The source versions included Mermaid source for the controller flowchart and experimental timeline. These are preserved here as verbatim listings because they are part of the supplied material, but are not rendered as figures in order to keep the LaTeX file self-contained and pdf\LaTeX-compatible.
+
+\subsection{Canonical Schedule Flowchart}
+
+\begin{verbatim}
+flowchart TD
+  A[Input: (Q, I, T)] --> B[Init root Sigma0 (ell=0)]
+  B --> C{ell < 3 and budget remains?}
+  C -- yes --> D[Batch Branch: generate <=3 children per surviving node]
+  D --> E[Batch Decompose: render artifacts A_i]
+  E --> F[Router Validate: SV, IC, sigma, failure trace F, provenance pi]
+  F --> G[Prune at tau=0.85]
+  G --> H[Increment level ell := ell+1]
+  H --> C
+  C -- no --> I[Collect top leaves at ell=3]
+  I --> J{Merge enabled?}
+  J -- yes --> K[Merge/Repair (single rewrite) if sigma non-decreasing]
+  J -- no --> L[Select best leaf]
+  K --> L
+  L --> M[Render final artifact + score + optional audit metadata]
+\end{verbatim}
+
+\subsection{Experimental Timeline}
+
+\begin{verbatim}
+gantt
+  title HPC-GoT / MERMATE Experimental Timeline (Proposed)
+  dateFormat  YYYY-MM-DD
+  axisFormat  %b %d
+
+  section Build
+  Validator harness (Mermaid/PlantUML/TLA+)      :a1, 2026-03-11, 10d
+  MERMATE router skeleton + Harmony schema       :a2, 2026-03-11, 12d
+  Dataset generator + invariant templates        :a3, 2026-03-18, 14d
+
+  section Pilot
+  Pilot run (n=20 per suite)                     :b1, 2026-04-01, 7d
+  Fix failure modes + instrumentation            :b2, 2026-04-08, 7d
+
+  section Full experiments
+  Full run (n=200 per suite, 5 seeds)            :c1, 2026-04-15, 21d
+  Analysis + ablations + CI reports              :c2, 2026-05-06, 14d
+
+  section Write-up
+  Final arXiv draft + artifacts + code release   :d1, 2026-05-20, 14d
+\end{verbatim}
+
+\section{Complexity and Ethical Notes}
+
+\subsection{Controller-Level Complexity}
+
+Under the canonical budget \(N=40\), controller-state complexity is \(O(1)\) with respect to input size because the budget is a fixed constant. Under the batching contract, the number of LLM-mediated stages is at most \(4\), and the number of validator invocations is bounded by the number of generated candidates. This is a controller-level statement only; it does not imply semantic correctness or end-to-end constant-time execution in practice.
+
+\subsection{Ethical Considerations}
+
+The source versions explicitly note that the controller can generate security and threat-model artifacts. That capability is useful in defensive settings, but it should be deployed with safety review, misuse screening, and appropriate access controls. This paper does not provide offensive exploitation procedures.
+
+\end{document}

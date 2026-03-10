@@ -9,6 +9,13 @@
   <meta property="og:image" content="/mermate-icon.png">
   <meta name="twitter:image" content="/mermate-icon.png">
   <link rel="stylesheet" href="/css/mermaid-gpt.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/vendor/three/build/three.module.js"
+      }
+    }
+  </script>
 </head>
 <body>
   <!-- Sidebar -->
@@ -85,6 +92,10 @@ Type /talk to speak your idea"
         </span>
       </div>
 
+      <div class="name-strip">
+        <input type="text" id="diagram-name-input" class="diagram-name-input" placeholder="Name this diagram (optional)" spellcheck="false" autocomplete="off" />
+      </div>
+
       <div class="input-controls">
         <span id="input-hint" class="input-hint">Type an idea and the system will generate a diagram</span>
         <span id="content-state-badge" class="state-badge" aria-live="polite"></span>
@@ -152,11 +163,8 @@ Type /talk to speak your idea"
             rows="2"
             placeholder="Add notes before Max render… e.g. 'Focus on failure paths' or 'Make frontend/backend split clearer'"
           ></textarea>
-          <button id="btn-agent-finalize" class="btn btn-agent-finalize">
-            Finalize Max Render
-          </button>
-          <button id="btn-agent-skip-notes" class="btn btn-secondary btn-agent-skip">
-            Skip &rarr; Max
+          <button id="btn-agent-commit" class="btn btn-agent-finalize">
+            Render as is
           </button>
         </div>
       </div>
@@ -206,7 +214,7 @@ Type /talk to speak your idea"
     <!-- Loading overlay -->
     <div id="loading-overlay" class="loading-overlay" hidden aria-live="polite">
       <div class="loading-content">
-        <div class="spinner" aria-hidden="true"></div>
+        <div id="loading-visual" class="loading-visual" aria-hidden="true"></div>
         <p id="loading-text" class="loading-text">Compiling diagram...</p>
       </div>
     </div>

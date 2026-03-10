@@ -57,7 +57,32 @@ function deriveDiagramName(source, userProvidedName) {
     if (slug.length >= 3 && slug.length <= 80) return slug;
   }
 
+  const summary = summarize(source, 3);
+  if (summary) return summary;
+
   return `diagram-${Date.now()}`;
+}
+
+const STOP_WORDS = new Set([
+  'a','an','the','is','are','was','were','be','been','being',
+  'have','has','had','do','does','did','will','would','shall','should',
+  'may','might','can','could','and','but','or','nor','for','yet','so',
+  'in','on','at','to','from','by','with','of','as','if','then','than',
+  'it','its','that','this','these','those','my','your','our','their',
+  'i','we','you','he','she','they','me','us','him','her','them',
+  'not','no','all','each','every','both','few','more','most','other',
+  'some','such','only','own','same','very','just','also','about',
+]);
+
+function summarize(text, maxWords) {
+  const words = text
+    .replace(/[^\w\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 1 && !STOP_WORDS.has(w.toLowerCase()));
+  const picked = words.slice(0, maxWords);
+  if (picked.length === 0) return '';
+  const slug = slugify(picked.join(' '));
+  return slug.length >= 3 && slug.length <= 60 ? slug : '';
 }
 
 module.exports = { slugify, dateStamp, deriveDiagramName };

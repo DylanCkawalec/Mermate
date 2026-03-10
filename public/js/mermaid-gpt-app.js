@@ -16,6 +16,8 @@
   const btnUpload = document.getElementById('btn-upload');
   const fileUpload = document.getElementById('file-upload');
   const loadingOverlay = document.getElementById('loading-overlay');
+  const loadingVisual = document.getElementById('loading-visual');
+  const diagramNameInput = document.getElementById('diagram-name-input');
   const loadingText = document.getElementById('loading-text');
   const resultSection = document.getElementById('result-section');
   const errorBanner = document.getElementById('error-banner');
@@ -65,6 +67,9 @@
   let isFullscreen = false;
   let copilot = null;
   let speech = null;
+  let renderEffect = null;
+  let renderEffectLoader = null;
+  let loadingHideTimer = null;
 
   const COPILOT_API_BASE = '/api/copilot';
 
@@ -172,13 +177,29 @@
 
   function setLoading(on, contentState) {
     isLoading = on;
-    loadingOverlay.hidden = !on;
     btnRender.disabled = on;
     input.readOnly = on;
     if (on && contentState && LOADING_MESSAGES[contentState]) {
       loadingText.textContent = LOADING_MESSAGES[contentState];
     } else if (on) {
       loadingText.textContent = 'Compiling diagram...';
+    }
+
+    if (on) {
+      if (loadingHideTimer) {
+        clearTimeout(loadingHideTimer);
+        loadingHideTimer = null;
+      }
+      loadingOverlay.hidden = false;
+      loadingOverlay.classList.add('is-visible');
+      void ensureRenderEffect();
+    } else {
+      loadingOverlay.classList.remove('is-visible');
+      teardownRenderEffect();
+      loadingHideTimer = setTimeout(() => {
+        loadingOverlay.hidden = true;
+        loadingHideTimer = null;
+      }, 220);
     }
   }
 
@@ -212,6 +233,38 @@
     // SVG served with width="100%" — use a natural pixel size via a
     // direct URL so the browser knows the intrinsic SVG dimensions.
     resultSvg.src = paths.svg + '?t=' + ts;
+
+    resultSection.classList.add('is-revealing');
+    window.setTimeout(() => resultSection.classList.remove('is-revealing'), 220);
+  }
+
+  async function ensureRenderEffect() {
+    if (!loadingVisual || renderEffect) return;
+
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      loadingVisual.classList.add('is-fallback');
+      return;
+    }
+
+    try {
+      renderEffectLoader ||= import('/js/rendering-effect.js');
+      const { RenderWaitingEffect } = await renderEffectLoader;
+
+      if (!isLoading || !loadingVisual.isConnected) return;
+
+      loadingVisual.classList.remove('is-fallback');
+      renderEffect = new RenderWaitingEffect(loadingVisual);
+    } catch {
+      loadingVisual.classList.add('is-fallback');
+    }
+  }
+
+  function teardownRenderEffect() {
+    loadingVisual?.classList.remove('is-fallback');
+    if (renderEffect) {
+      renderEffect.dispose();
+      renderEffect = null;
+    }
   }
 
   function updateBadges() {
@@ -323,6 +376,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mermaid_source: source,
+          diagram_name: diagramNameInput?.value?.trim() || undefined,
           enhance: chkEnhance.checked,
           input_mode: currentMode,
           max_mode: maxMode,
@@ -380,6 +434,7 @@
 
   btnNewDiagram.addEventListener('click', () => {
     input.value = '';
+    if (diagramNameInput) diagramNameInput.value = '';
     resultSection.hidden = true;
     if (isFullscreen) toggleFullscreen();
     hideError();
@@ -469,8 +524,7 @@
 
   const agentNotesWrap = document.getElementById('agent-notes-wrap');
   const agentNotesInput = document.getElementById('agent-notes-input');
-  const btnAgentFinalize = document.getElementById('btn-agent-finalize');
-  const btnAgentSkip = document.getElementById('btn-agent-skip-notes');
+  const btnAgentCommit = document.getElementById('btn-agent-commit');
 
   function _createAgent() {
     if (agent) return;
@@ -481,7 +535,7 @@
       panelMode: agentPanelMode,
       notesWrap: agentNotesWrap,
       notesInput: agentNotesInput,
-      btnFinalize: btnAgentFinalize,
+      btnFinalize: btnAgentCommit,
       onPreviewRender: (event) => {
         if (event.paths) {
           showResult(event.paths, event.diagram_name);
@@ -522,9 +576,11 @@
         } else if (state === 'finalizing') {
           input.readOnly = true;
           btnAgentRun.disabled = true;
+          setLoading(true, 'text');
         } else if (state === 'idle') {
           btnAgentRun.disabled = false;
           input.readOnly = false;
+          setLoading(false);
         }
       },
     });
@@ -541,18 +597,17 @@
     });
   }
 
-  if (btnAgentFinalize) {
-    btnAgentFinalize.addEventListener('click', () => {
+  if (btnAgentCommit) {
+    btnAgentCommit.addEventListener('click', () => {
       _createAgent();
       agent.finalize();
     });
   }
 
-  if (btnAgentSkip) {
-    btnAgentSkip.addEventListener('click', () => {
-      _createAgent();
-      if (agentNotesInput) agentNotesInput.value = '';
-      agent.finalize();
+  if (agentNotesInput) {
+    agentNotesInput.addEventListener('input', () => {
+      if (!btnAgentCommit) return;
+      btnAgentCommit.textContent = agentNotesInput.value.trim() ? 'Enhance' : 'Render as is';
     });
   }
 
