@@ -170,6 +170,21 @@ function buildPrompt(stage) {
     case 'render_prepare':
       return buildRenderPreparePrompt();
 
+    case 'fact_extraction':
+      return buildFactExtractionPrompt();
+
+    case 'diagram_plan':
+      return buildDiagramPlanPrompt();
+
+    case 'composition':
+      return buildCompositionPrompt();
+
+    case 'semantic_repair':
+      return buildSemanticRepairPrompt();
+
+    case 'max_composition':
+      return buildMaxCompositionPrompt();
+
     case 'decompose':
       return buildDecomposePrompt();
 
@@ -518,6 +533,344 @@ function buildRepairFromTracePrompt() {
   return { system, outputFormat: 'text', temperature: 0.0 };
 }
 
+// ---- HPC-GoT Bounded Render Pipeline Prompts --------------------------------
+
+const ENTITY_TYPES = 'actor, service, store, gateway, broker, cache, queue, external, decision, boundary';
+const EDGE_TYPES = 'runtime, async, governance, critical';
+const NODE_SHAPES = {
+  actor: '(["..."])',
+  service: '["..."]',
+  store: '[("...")]',
+  gateway: '["..."]',
+  broker: '[("...")]',
+  cache: '[("...")]',
+  queue: '[("...")]',
+  external: '{{"..."}}',
+  decision: '{"..."}',
+  boundary: 'subgraph',
+};
+
+/**
+ * Stage 1: Typed Architecture Fact Extraction.
+ * Model outputs strict JSON with typed entities, relationships, boundaries, failure paths.
+ * No Mermaid. No prose. Only validated architectural facts.
+ */
+function buildFactExtractionPrompt() {
+  const system = [
+    `You are an architecture fact extractor. Given a natural-language system description, extract ONLY the architectural facts as strict JSON.`,
+    '',
+    AXIOMS_INTERPRETATION,
+    '',
+    `TASK: Extract every architectural entity, relationship, boundary, and failure path from the user's description into a typed JSON structure.`,
+    '',
+    `OUTPUT SCHEMA (strict — follow exactly):`,
+    `{`,
+    `  "entities": [`,
+    `    { "name": "<display name>", "type": "<one of: ${ENTITY_TYPES}>", "responsibility": "<1-5 words>" }`,
+    `  ],`,
+    `  "relationships": [`,
+    `    { "from": "<entity name>", "to": "<entity name>", "verb": "<action verb, 1-3 words>", "edgeType": "<one of: ${EDGE_TYPES}>" }`,
+    `  ],`,
+    `  "boundaries": [`,
+    `    { "name": "<boundary name>", "members": ["<entity name>", ...] }`,
+    `  ],`,
+    `  "failurePaths": [`,
+    `    { "trigger": "<entity name>", "condition": "<1-5 words>", "handler": "<entity name or action>", "recovery": "<1-5 words>" }`,
+    `  ],`,
+    `  "diagramType": "<flowchart|sequence|state|er|gantt|mindmap>"`,
+    `}`,
+    '',
+    `RULES:`,
+    `- Every noun-phrase the user mentions as a component, service, actor, store, or system MUST appear as an entity.`,
+    `- Every verb connecting two entities MUST appear as a relationship.`,
+    `- Entity names must be the user's EXACT words (proper nouns preserved).`,
+    `- Entity types must be from the allowed set. "service" is the default for ambiguous components.`,
+    `- Relationship verbs must be 1-3 words. No sentences.`,
+    `- If the user describes failure/error handling, extract it as a failurePath.`,
+    `- If the user describes layers, zones, or groups, extract them as boundaries.`,
+    `- Do NOT invent entities the user did not mention or imply.`,
+    `- Do NOT output any text outside the JSON object.`,
+    `- Response MUST be valid JSON. No markdown fencing.`,
+  ].join('\n');
+
+  return { system, outputFormat: 'json', temperature: 0.0 };
+}
+
+function buildFactExtractionUserPrompt(source, profile) {
+  const parts = [];
+
+  if (profile?.shadow) {
+    const shadow = profile.shadow;
+    if (shadow.entities?.length > 0) {
+      parts.push(`[DETECTED ENTITIES] ${shadow.entities.slice(0, 25).map(e => `${e.name} (${e.type})`).join(', ')}`);
+    }
+    if (shadow.relationships?.length > 0) {
+      parts.push(`[DETECTED RELATIONSHIPS] ${shadow.relationships.slice(0, 20).map(r => `${r.from} ${r.verb} ${r.to}`).join('; ')}`);
+    }
+  }
+
+  if (profile?.diagramSelection) {
+    parts.push(`[SUGGESTED DIAGRAM TYPE] ${profile.diagramSelection.type}`);
+  }
+
+  if (parts.length > 0) parts.push('');
+  parts.push(`[USER DESCRIPTION]`);
+  parts.push(source);
+
+  return parts.join('\n');
+}
+
+/**
+ * Stage 2: View Selection & Diagram Plan.
+ * Model outputs strict JSON plan: directive, layout, subgraphs, node IDs, edges, classDefs.
+ * Every node must map to a Stage 1 entity. Every edge must map to a Stage 1 relationship.
+ */
+function buildDiagramPlanPrompt() {
+  const system = [
+    `You are a Mermaid diagram planner. Given validated architecture facts (entities, relationships, boundaries, failure paths), produce a strict JSON diagram plan.`,
+    '',
+    AXIOMS_MERMAID_SYNTAX,
+    AXIOMS_AAD,
+    AXIOMS_COMPLEXITY,
+    '',
+    `TASK: Plan the Mermaid diagram structure as JSON. Do NOT generate Mermaid source yet.`,
+    '',
+    `OUTPUT SCHEMA (strict — follow exactly):`,
+    `{`,
+    `  "directive": "<e.g. flowchart TB, sequenceDiagram, stateDiagram-v2>",`,
+    `  "nodes": [`,
+    `    { "id": "<alphanumeric, no spaces, no reserved words>", "label": "<1-3 lines, \\\\n separated>", "shape": "<rectangle|stadium|cylinder|diamond|hexagon|rounded>", "entityRef": "<exact entity name from facts>" }`,
+    `  ],`,
+    `  "edges": [`,
+    `    { "from": "<node id>", "to": "<node id>", "label": "<max 6 words>", "style": "<solid|dashed|thick>", "relationRef": "<from→to from facts>" }`,
+    `  ],`,
+    `  "subgraphs": [`,
+    `    { "id": "<PascalCase>", "title": "<display name>", "nodeIds": ["<node id>", ...] }`,
+    `  ],`,
+    `  "classDefs": [`,
+    `    { "name": "<class name>", "style": "<CSS-like>" }`,
+    `  ]`,
+    `}`,
+    '',
+    `RULES:`,
+    `- Every entity from the facts MUST appear as exactly one node. No extras.`,
+    `- Every relationship from the facts MUST appear as exactly one edge. No extras.`,
+    `- Node IDs: alphanumeric CamelCase. NEVER use reserved words (end, subgraph, graph, flowchart, style, class, click, default).`,
+    `- Node labels: max 3 lines. First line = name, second = responsibility, third = tech.`,
+    `- Edge labels: max 6 words. No sentences. No prose fragments.`,
+    `- Edge style: solid for runtime, dashed for async/governance, thick for critical path.`,
+    `- Subgraphs: map to boundaries from facts. 3-10 nodes each. Max 3 nesting levels.`,
+    `- Shape mapping: actor=stadium, service=rectangle, store=cylinder, gateway=rectangle, broker=cylinder, cache=cylinder, queue=cylinder, external=hexagon, decision=diamond.`,
+    `- Layout: TB for architecture overviews, LR for pipelines/workflows.`,
+    `- Do NOT output any text outside the JSON object.`,
+    `- Response MUST be valid JSON. No markdown fencing.`,
+  ].join('\n');
+
+  return { system, outputFormat: 'json', temperature: 0.0 };
+}
+
+function buildDiagramPlanUserPrompt(facts, profile) {
+  const parts = [];
+  parts.push(`[VALIDATED ARCHITECTURE FACTS]`);
+  parts.push(JSON.stringify(facts, null, 2));
+
+  if (profile?.intent?.problemDomain && profile.intent.problemDomain !== 'general') {
+    parts.push('');
+    parts.push(`[DOMAIN] ${profile.intent.problemDomain}`);
+  }
+
+  return parts.join('\n');
+}
+
+/**
+ * Stage 3: Mermaid Composition.
+ * Model outputs ONLY valid Mermaid source, following the plan exactly.
+ * No new nodes. No new edges. No prose fragments.
+ */
+function buildCompositionPrompt() {
+  const system = [
+    ROLE,
+    '',
+    AXIOMS_MERMAID_SYNTAX,
+    AXIOMS_PRESERVATION,
+    AXIOMS_EXCELLENCE,
+    '',
+    `TASK: Generate valid, compilable Mermaid source that implements the diagram plan EXACTLY.`,
+    '',
+    `STRICT CONTRACT:`,
+    `- First line MUST be the directive from the plan.`,
+    `- Every node in the plan MUST appear with its specified ID, label, and shape.`,
+    `- Every edge in the plan MUST appear with its specified from, to, label, and style.`,
+    `- Every subgraph in the plan MUST appear with its specified ID, title, and members.`,
+    `- Do NOT add any nodes, edges, or subgraphs not in the plan.`,
+    `- Do NOT use prose sentences as node labels or edge labels.`,
+    `- Do NOT use reserved words (end, subgraph, graph, flowchart, style, class, click, default) as node IDs.`,
+    `- Node labels MUST be quoted: ["label"] for rectangles, (["label"]) for stadiums, [("label")] for cylinders, {"label"} for diamonds, {{"label"}} for hexagons.`,
+    `- Edge labels MUST be <=6 words: |"label"|`,
+    `- Solid edges: -->, Dashed edges: -.->, Thick edges: ==>`,
+    `- Apply classDefs from the plan.`,
+    `- Include %% section separators between subgraphs.`,
+    '',
+    `SHAPE REFERENCE:`,
+    `  rectangle:  NodeId["Label"]`,
+    `  stadium:    NodeId(["Label"])`,
+    `  cylinder:   NodeId[("Label")]`,
+    `  diamond:    NodeId{"Label"}`,
+    `  hexagon:    NodeId{{"Label"}}`,
+    `  rounded:    NodeId("Label")`,
+    '',
+    OUTPUT_FORMAT,
+  ].join('\n');
+
+  return { system, outputFormat: 'text', temperature: 0.0 };
+}
+
+function buildCompositionUserPrompt(plan, facts) {
+  const parts = [];
+  parts.push(`[DIAGRAM PLAN]`);
+  parts.push(JSON.stringify(plan, null, 2));
+  parts.push('');
+  parts.push(`[ARCHITECTURE FACTS]`);
+  parts.push(JSON.stringify(facts, null, 2));
+  parts.push('');
+  parts.push(`Generate the Mermaid source implementing this plan exactly. No additions. No omissions.`);
+  return parts.join('\n');
+}
+
+/**
+ * Semantic Repair: structured failure trace repair.
+ * Receives the failed Mermaid, the plan, the facts, AND the structured failure trace
+ * (which invariants failed, which entities missing, which edges malformed).
+ */
+function buildSemanticRepairPrompt() {
+  const system = [
+    `You are a Mermaid diagram repair engine operating on structured failure traces.`,
+    '',
+    AXIOMS_MERMAID_SYNTAX,
+    AXIOMS_PRESERVATION,
+    '',
+    `TASK: Fix the Mermaid source using the structured failure trace. The trace tells you exactly what is wrong.`,
+    '',
+    `RULES:`,
+    `- First line of output MUST be a valid Mermaid directive.`,
+    `- Fix ONLY what the failure trace identifies. Do not restructure working sections.`,
+    `- If entities are missing: add them as nodes with proper shapes from the plan.`,
+    `- If edges are malformed: fix the syntax, keep the label under 6 words.`,
+    `- If prose fragments appear as labels: replace with concise architectural terms (1-5 words).`,
+    `- If reserved words are used as IDs: rename by appending "Svc", "Node", or "Store" as appropriate.`,
+    `- Every entity from the facts MUST appear as a node in the output.`,
+    `- Every relationship from the facts MUST appear as an edge in the output.`,
+    '',
+    OUTPUT_FORMAT,
+  ].join('\n');
+
+  return { system, outputFormat: 'text', temperature: 0.0 };
+}
+
+function buildSemanticRepairUserPrompt(mmdSource, failureTrace, plan, facts) {
+  const parts = [];
+
+  parts.push(`[STRUCTURED FAILURE TRACE]`);
+  if (failureTrace.compileError) parts.push(`Compile error: ${failureTrace.compileError}`);
+  if (failureTrace.missingEntities?.length > 0) parts.push(`Missing entities (must add as nodes): ${failureTrace.missingEntities.join(', ')}`);
+  if (failureTrace.missingRelationships?.length > 0) parts.push(`Missing relationships (must add as edges): ${failureTrace.missingRelationships.map(r => `${r.from}→${r.to}`).join(', ')}`);
+  if (failureTrace.proseFragments?.length > 0) parts.push(`Prose-fragment labels (must shorten to <=6 words): ${failureTrace.proseFragments.join('; ')}`);
+  if (failureTrace.longLabels?.length > 0) parts.push(`Overlength labels: ${failureTrace.longLabels.join('; ')}`);
+  if (failureTrace.reservedIds?.length > 0) parts.push(`Reserved-word IDs (must rename): ${failureTrace.reservedIds.join(', ')}`);
+  if (failureTrace.invariantFailures?.length > 0) parts.push(`Invariant failures: ${failureTrace.invariantFailures.join('; ')}`);
+
+  parts.push('');
+  parts.push(`[FAILED MERMAID SOURCE]`);
+  parts.push(mmdSource);
+  parts.push('');
+  parts.push(`[DIAGRAM PLAN]`);
+  parts.push(JSON.stringify(plan, null, 2));
+  parts.push('');
+  parts.push(`[ARCHITECTURE FACTS]`);
+  parts.push(JSON.stringify(facts, null, 2));
+  parts.push('');
+  parts.push(`Fix the Mermaid source to resolve all failure trace items. Return only the corrected Mermaid source.`);
+
+  return parts.join('\n');
+}
+
+/**
+ * Max Composition: architect-grade final render.
+ * The Max model receives the normal-tier baseline .mmd, the facts, the plan,
+ * and the original user intent. Its job is to produce a visually superior,
+ * structurally richer, architect-grade Mermaid artifact.
+ */
+function buildMaxCompositionPrompt() {
+  const system = [
+    `You are a world-class enterprise architecture diagram composer. You produce the highest-quality Mermaid diagrams possible — visually elegant, structurally rigorous, and architecturally disciplined.`,
+    '',
+    AXIOMS_MERMAID_SYNTAX,
+    AXIOMS_AAD,
+    AXIOMS_COMPLEXITY,
+    AXIOMS_EXCELLENCE,
+    AXIOMS_PRESERVATION,
+    '',
+    `TASK: You are given a baseline Mermaid diagram that is structurally correct but visually weak. Recompose it into an architect-grade diagram that is STRICTLY BETTER in every dimension.`,
+    '',
+    `YOU MUST PRODUCE a diagram that is visibly, structurally, and semantically DIFFERENT from and SUPERIOR to the baseline.`,
+    '',
+    `ARCHITECTURE BEAUTY REQUIREMENTS:`,
+    `- Clean subgraph boundaries that map to real architectural layers (frontend, backend, data, external, observability).`,
+    `- Every subgraph must have a descriptive title and classDef color coding.`,
+    `- Nodes must use TYPED SHAPES: actors=([stadium]), services=[rectangle], stores=[(cylinder)], decisions={diamond}, external systems={{hexagon}}, queues=[(cylinder)].`,
+    `- Node labels: Line 1 = component name, Line 2 = responsibility (1-3 words). Use \\n for multi-line.`,
+    `- Edge labels: concise verb phrases, max 4 words. Protocol annotation where non-obvious (REST, gRPC, pub/sub, SQL).`,
+    `- Solid edges (-->) for synchronous runtime flow.`,
+    `- Dashed edges (-.->) for async, governance, observability.`,
+    `- Thick edges (==>) for critical path / happy path.`,
+    `- Visual hierarchy: actors at top, core services in middle layers, data stores at bottom, external systems at periphery.`,
+    `- Include classDef definitions with distinct fill colors per architectural layer.`,
+    `- Include at least one failure/error path if the architecture has critical flows.`,
+    `- Section separators (%% ==== Layer Name ====) between subgraph groups.`,
+    '',
+    `ABSOLUTE PROHIBITIONS:`,
+    `- NO prose sentences as node labels. Node labels must be component names + short responsibility.`,
+    `- NO paragraph-like edge labels. Edge labels must be verb phrases, max 4 words.`,
+    `- NO dangling clause fragments as nodes.`,
+    `- NO flat diagrams without subgraphs when the architecture has 5+ entities.`,
+    `- NO unlabeled edges in critical paths.`,
+    `- NO reserved words (end, subgraph, graph, flowchart, style, class, click, default) as node IDs.`,
+    '',
+    `OUTPUT CONTRACT:`,
+    `- First line MUST be a valid Mermaid directive.`,
+    `- Output MUST be ONLY valid Mermaid source. No markdown fencing. No prose. No explanation.`,
+    `- Every entity from the architecture facts MUST appear as a node.`,
+    `- Every relationship from the architecture facts MUST appear as an edge.`,
+    `- The output MUST compile without errors.`,
+  ].join('\n');
+
+  return { system, outputFormat: 'text', temperature: 0.1 };
+}
+
+function buildMaxCompositionUserPrompt(baselineMmd, facts, plan, originalSource) {
+  const parts = [];
+
+  parts.push(`[ORIGINAL USER INTENT]`);
+  parts.push(originalSource.slice(0, 2000));
+  parts.push('');
+  parts.push(`[ARCHITECTURE FACTS]`);
+  parts.push(JSON.stringify(facts, null, 2));
+  parts.push('');
+
+  if (plan) {
+    parts.push(`[DIAGRAM PLAN]`);
+    parts.push(JSON.stringify(plan, null, 2));
+    parts.push('');
+  }
+
+  parts.push(`[BASELINE MERMAID (correct but visually weak — you must produce something STRICTLY BETTER)]`);
+  parts.push(baselineMmd);
+  parts.push('');
+  parts.push(`Recompose this into an architect-grade Mermaid diagram. Add subgraph layering, typed node shapes, classDef color coding, edge protocol labels, and visual hierarchy. The result must be visibly superior to the baseline. Return ONLY the Mermaid source.`);
+
+  return parts.join('\n');
+}
+
 function buildRepairFromTraceUserPrompt(mmdSource, compileError, shadow, originalDescription, traceContext) {
   const parts = [];
 
@@ -573,4 +926,18 @@ module.exports = {
   buildDecomposeUserPrompt,
   buildRepairFromTracePrompt,
   buildRepairFromTraceUserPrompt,
+  // HPC-GoT bounded pipeline
+  buildFactExtractionPrompt,
+  buildFactExtractionUserPrompt,
+  buildDiagramPlanPrompt,
+  buildDiagramPlanUserPrompt,
+  buildCompositionPrompt,
+  buildCompositionUserPrompt,
+  buildSemanticRepairPrompt,
+  buildSemanticRepairUserPrompt,
+  buildMaxCompositionPrompt,
+  buildMaxCompositionUserPrompt,
+  ENTITY_TYPES,
+  EDGE_TYPES,
+  NODE_SHAPES,
 };

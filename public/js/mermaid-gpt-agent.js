@@ -26,6 +26,7 @@ window.MermaidAgent = class MermaidAgent {
     this._running = false;
     this._mode = null;
     this._draftText = '';
+    this._previewDiagramName = null;
     this._animating = false;
     this._thinkingEffect = null;
     this._thinkingEffectDot = null;
@@ -87,6 +88,7 @@ window.MermaidAgent = class MermaidAgent {
         current_text: this._draftText,
         mode: this._mode,
         user_notes: notes,
+        diagram_name: this._previewDiagramName,
       });
     } catch (err) {
       if (err.name !== 'AbortError') {
@@ -172,6 +174,7 @@ window.MermaidAgent = class MermaidAgent {
         this._markPreviousLogDone();
         this._addLog('Preview ready — add notes or finalize', 'done');
         this._draftText = event.draft_text || this.input.value;
+        this._previewDiagramName = event.diagram_name || null;
         this._showNotesUI();
         this.onStateChange('awaiting_notes');
         break;

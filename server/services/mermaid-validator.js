@@ -176,4 +176,224 @@ function isLikelyValid(source) {
   return errors.length === 0;
 }
 
-module.exports = { validate, isLikelyValid };
+// ---- HPC-GoT Deterministic Invariant Validation --------------------------------
+
+const PROSE_WORD_LIMIT = 6;
+const EDGE_LABEL_WORD_LIMIT = 6;
+
+/**
+ * Normalize a name for fuzzy matching: lowercase, strip non-alphanumeric, collapse whitespace.
+ */
+function normalizeName(name) {
+  return (name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * Extract all node labels from Mermaid source as an array of { id, label } objects.
+ */
+function extractNodeLabels(source) {
+  const nodes = [];
+  // Match patterns: Id["label"], Id(["label"]), Id[("label")], Id{"label"}, Id{{"label"}}, Id("label")
+  const patterns = [
+    /\b([A-Za-z_]\w*)\s*\["([^"]+)"\]/g,              // rectangle
+    /\b([A-Za-z_]\w*)\s*\(\["([^"]+)"\]\)/g,           // stadium
+    /\b([A-Za-z_]\w*)\s*\[\("([^"]+)"\)\]/g,           // cylinder
+    /\b([A-Za-z_]\w*)\s*\{"([^"]+)"\}/g,               // diamond
+    /\b([A-Za-z_]\w*)\s*\{\{"([^"]+)"\}\}/g,           // hexagon
+    /\b([A-Za-z_]\w*)\s*\("([^"]+)"\)/g,               // rounded
+    /\b([A-Za-z_]\w*)\s*\[([^\]]+)\]/g,                // bare bracket
+  ];
+  const seen = new Set();
+  for (const re of patterns) {
+    let m;
+    while ((m = re.exec(source)) !== null) {
+      const id = m[1];
+      if (['subgraph', 'classDef', 'class', 'style', 'click', 'linkStyle', 'direction'].includes(id)) continue;
+      if (!seen.has(id)) {
+        seen.add(id);
+        nodes.push({ id, label: m[2] });
+      }
+    }
+  }
+  return nodes;
+}
+
+/**
+ * Extract all edge labels from Mermaid source.
+ */
+function extractEdgeLabels(source) {
+  const labels = [];
+  // |"label"|, |label|
+  const re = /\|"?([^"\|]+)"?\|/g;
+  let m;
+  while ((m = re.exec(source)) !== null) {
+    labels.push(m[1].trim());
+  }
+  return labels;
+}
+
+/**
+ * Validate Mermaid source against typed architecture facts.
+ * Returns a structured failure trace describing every invariant violation.
+ *
+ * @param {string} mmdSource - Generated Mermaid source
+ * @param {object} facts - Stage 1 output (entities, relationships, boundaries, failurePaths)
+ * @param {object} [plan] - Optional Stage 2 plan for cross-reference
+ * @returns {{ passed: boolean, trace: object, coverage: object }}
+ */
+function validateInvariants(mmdSource, facts, plan) {
+  const trace = {
+    compileError: null,
+    missingEntities: [],
+    missingRelationships: [],
+    proseFragments: [],
+    longLabels: [],
+    reservedIds: [],
+    invariantFailures: [],
+  };
+
+  if (!mmdSource || !facts) {
+    trace.invariantFailures.push('Missing mmdSource or facts');
+    return { passed: false, trace, coverage: { entityCoverage: 0, relationCoverage: 0 } };
+  }
+
+  // Structural validity first
+  const structural = validate(mmdSource);
+  if (!structural.valid) {
+    trace.invariantFailures.push(...structural.errors.map(e => `${e.check}: ${e.message}`));
+  }
+
+  const sourceLower = mmdSource.toLowerCase();
+  const sourceNorm = normalizeName(mmdSource);
+  const nodeLabels = extractNodeLabels(mmdSource);
+  const nodeLabelNorms = nodeLabels.map(n => ({ ...n, norm: normalizeName(n.label) }));
+  const nodeIdNorms = nodeLabels.map(n => normalizeName(n.id));
+
+  // --- Entity coverage ---
+  const entities = facts.entities || [];
+  let entitiesCovered = 0;
+  for (const entity of entities) {
+    const nameNorm = normalizeName(entity.name);
+    const found = nodeLabelNorms.some(n => n.norm.includes(nameNorm) || nameNorm.includes(n.norm))
+      || nodeIdNorms.some(id => id.includes(nameNorm) || nameNorm.includes(id));
+    if (found) {
+      entitiesCovered++;
+    } else {
+      trace.missingEntities.push(entity.name);
+    }
+  }
+  const entityCoverage = entities.length > 0 ? entitiesCovered / entities.length : 1;
+
+  // --- Relationship coverage ---
+  const relationships = facts.relationships || [];
+  let relationsCovered = 0;
+  for (const rel of relationships) {
+    const fromNorm = normalizeName(rel.from);
+    const toNorm = normalizeName(rel.to);
+    // Check if both endpoints appear in the source
+    const fromFound = sourceNorm.includes(fromNorm);
+    const toFound = sourceNorm.includes(toNorm);
+    if (fromFound && toFound) {
+      relationsCovered++;
+    } else {
+      trace.missingRelationships.push({ from: rel.from, to: rel.to, verb: rel.verb });
+    }
+  }
+  const relationCoverage = relationships.length > 0 ? relationsCovered / relationships.length : 1;
+
+  // --- Prose fragment detection ---
+  for (const node of nodeLabels) {
+    const lines = node.label.split('\\n');
+    for (const line of lines) {
+      const wordCount = line.trim().split(/\s+/).length;
+      if (wordCount > PROSE_WORD_LIMIT * 2) {
+        trace.proseFragments.push(`Node ${node.id}: "${line.substring(0, 60)}..."`);
+      }
+    }
+  }
+
+  // --- Edge label length ---
+  const edgeLabels = extractEdgeLabels(mmdSource);
+  for (const label of edgeLabels) {
+    const wordCount = label.split(/\s+/).length;
+    if (wordCount > EDGE_LABEL_WORD_LIMIT) {
+      trace.longLabels.push(`"${label.substring(0, 40)}" (${wordCount} words)`);
+    }
+  }
+
+  // --- Reserved word IDs ---
+  for (const node of nodeLabels) {
+    if (RESERVED_IDS.has(node.id.toLowerCase())) {
+      trace.reservedIds.push(node.id);
+    }
+  }
+
+  // --- Coverage thresholds ---
+  if (entityCoverage < 0.8) {
+    trace.invariantFailures.push(`Entity coverage ${(entityCoverage * 100).toFixed(0)}% below 80% threshold`);
+  }
+  if (relationCoverage < 0.6) {
+    trace.invariantFailures.push(`Relationship coverage ${(relationCoverage * 100).toFixed(0)}% below 60% threshold`);
+  }
+
+  const hasTraceIssues =
+    trace.missingEntities.length > 0 ||
+    trace.missingRelationships.length > 0 ||
+    trace.proseFragments.length > 0 ||
+    trace.longLabels.length > 0 ||
+    trace.reservedIds.length > 0 ||
+    trace.invariantFailures.length > 0;
+
+  return {
+    passed: !hasTraceIssues,
+    trace,
+    coverage: {
+      entityCoverage: +entityCoverage.toFixed(3),
+      relationCoverage: +relationCoverage.toFixed(3),
+      entitiesTotal: entities.length,
+      entitiesCovered,
+      relationsTotal: relationships.length,
+      relationsCovered,
+    },
+  };
+}
+
+/**
+ * Compute the HPC canonical score: σ = 0.5 * SV + 0.5 * IC
+ * where SV = structural validity (0 or 1), IC = invariant coverage (0..1).
+ *
+ * @param {string} mmdSource
+ * @param {object} facts
+ * @returns {{ score: number, sv: number, ic: number, details: object }}
+ */
+function computeHPCScore(mmdSource, facts) {
+  const structural = validate(mmdSource);
+  const sv = structural.valid ? 1.0 : 0.0;
+
+  const invariants = validateInvariants(mmdSource, facts);
+  const ec = invariants.coverage.entityCoverage;
+  const rc = invariants.coverage.relationCoverage;
+  // IC = average of entity coverage and relationship coverage
+  const ic = (ec + rc) / 2;
+
+  const score = +(0.5 * sv + 0.5 * ic).toFixed(3);
+
+  return {
+    score,
+    sv,
+    ic: +ic.toFixed(3),
+    details: {
+      structuralErrors: structural.errors.length,
+      structuralWarnings: structural.warnings.length,
+      entityCoverage: ec,
+      relationCoverage: rc,
+      missingEntities: invariants.trace.missingEntities,
+      missingRelationships: invariants.trace.missingRelationships,
+      proseFragments: invariants.trace.proseFragments.length,
+      longLabels: invariants.trace.longLabels.length,
+      reservedIds: invariants.trace.reservedIds,
+    },
+  };
+}
+
+module.exports = { validate, isLikelyValid, validateInvariants, computeHPCScore };

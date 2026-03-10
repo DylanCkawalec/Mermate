@@ -186,6 +186,20 @@ body {
   outline: none;
 }
 
+.sidebar-item.pending {
+  border-left: 2px solid var(--accent);
+}
+
+.sidebar-item.pending .sidebar-item-name {
+  font-style: italic;
+  opacity: 0.7;
+}
+
+.sidebar-item.pending .sidebar-item-meta {
+  color: var(--accent);
+  opacity: 0.7;
+}
+
 /* ==========================================================================
    Main
    ========================================================================== */

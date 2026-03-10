@@ -5,7 +5,7 @@ const path = require('node:path');
 const fsp = require('node:fs/promises');
 const { archive, archiveCompiled } = require('../services/mermaid-archiver');
 const { validate: validateMmd } = require('../services/mermaid-validator');
-const { route, renderPrepare, decomposeAndRender, compileWithRetry, RouterError } = require('../services/input-router');
+const { route, renderPrepare, renderHPCGoT, renderMaxUpgrade, decomposeAndRender, compileWithRetry, RouterError } = require('../services/input-router');
 const enhancerBridge = require('../services/gpt-enhancer-bridge');
 const provider = require('../services/inference-provider');
 const { buildPrompt } = require('../services/axiom-prompts');
@@ -274,7 +274,7 @@ router.post('/render', async (req, res) => {
     const shouldUseProvider = isTextOrMd && enhance;
 
     if (shouldUseProvider) {
-      // ---- Provider-backed render: deliberate routing ----
+      // ---- Provider-backed render: HPC-GoT bounded pipeline ----
       const wantsDecompose = profile.shouldDecompose;
       const strongEnoughForSingleShot = profile.qualityScore >= 0.6
         && (profile.shadow?.entities?.length || 0) <= 15
@@ -282,6 +282,7 @@ router.post('/render', async (req, res) => {
       const useDecompose = wantsDecompose && !strongEnoughForSingleShot;
 
       logger.info('render.routing', {
+        pipeline: maxRequested ? 'max_upgrade' : 'hpc_got',
         shouldDecompose: wantsDecompose,
         strongEnoughForSingleShot,
         useDecompose,
@@ -290,32 +291,28 @@ router.post('/render', async (req, res) => {
         completeness: profile.completenessScore,
       });
 
-      let effectiveMax = useMax;
-
-      if (maxRequested && !useDecompose) {
-        const normalResult = await renderPrepare(source, profile, false);
-        const normalValid = require('../services/mermaid-validator').validate(normalResult.mmdSource);
-        const normalNodes = normalValid.stats?.nodeCount || 0;
-        const normalEdges = normalValid.stats?.edgeCount || 0;
-        const normalStrong = normalValid.valid && normalNodes >= 5 && normalEdges >= 4;
-
-        if (normalStrong) {
-          logger.info('render.max_gate_skipped', { reason: 'normal result already strong', nodes: normalNodes, edges: normalEdges });
-          effectiveMax = false;
-        }
+      let prepResult;
+      if (useDecompose) {
+        prepResult = await decomposeAndRender(source, profile, maxRequested);
+      } else if (maxRequested) {
+        // Max mode: always run the full Max upgrade pipeline.
+        // No gate — the user explicitly asked for Max. renderMaxUpgrade
+        // runs normal HPC-GoT internally as baseline, then recomposes
+        // via the strongest model with an architect-grade prompt.
+        prepResult = await renderMaxUpgrade(source, profile);
+      } else {
+        prepResult = await renderHPCGoT(source, profile, false);
       }
 
-      const prepResult = useDecompose
-        ? await decomposeAndRender(source, profile, effectiveMax)
-        : await renderPrepare(source, profile, effectiveMax);
       routeResult = {
         mmdSource: prepResult.mmdSource,
         diagramType: '',
         contentState: profile.contentState,
         enhanced: prepResult.enhanced,
         enhanceMeta: prepResult.enhanced ? {
-          transformation: 'render_prepare',
+          transformation: maxRequested ? 'max_upgrade' : 'hpc_got',
           provider: prepResult.provider,
+          hpcScore: prepResult.hpcScore || null,
         } : null,
         stagesExecuted: prepResult.stagesExecuted,
         totalEnhanceMs: Date.now() - startMs,

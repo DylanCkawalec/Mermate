@@ -17,7 +17,9 @@ window.MermaidSidebar = class MermaidSidebar {
   _load() {
     try {
       const raw = localStorage.getItem(this.STORAGE_KEY);
-      return raw ? JSON.parse(raw) : [];
+      if (!raw) return [];
+      // Drop stale pending entries from prior sessions
+      return JSON.parse(raw).filter(i => !i._pending);
     } catch {
       return [];
     }
@@ -67,7 +69,11 @@ window.MermaidSidebar = class MermaidSidebar {
   }
 
   add(entry) {
-    this.items = this.items.filter(i => i.name !== entry.name);
+    // Remove any pending placeholder that matches (or the empty pending stub)
+    this.items = this.items.filter(i => {
+      if (i._pending && (!i.name || i.name === entry.name)) return false;
+      return i.name !== entry.name;
+    });
     this.items.unshift(entry);
     if (this.items.length > 50) this.items.length = 50;
     this._save();
@@ -75,14 +81,95 @@ window.MermaidSidebar = class MermaidSidebar {
     this.render();
   }
 
+  /**
+   * Create a blank "pending" entry at the top of the sidebar and immediately
+   * open it in inline-rename mode so the user can name it.
+   *
+   * @param {(name: string|null) => void} onNameCommit
+   *   Called when the user commits a name (string) or cancels (null).
+   */
+  addPending(onNameCommit) {
+    // Remove any existing pending entry first
+    this.items = this.items.filter(i => !i._pending);
+
+    const pending = {
+      name: '',
+      type: '',
+      paths: null,
+      timestamp: '',
+      _pending: true,
+    };
+    this.items.unshift(pending);
+    this.activeIndex = 0;
+    this.render();
+
+    // Immediately enter rename mode on the new entry
+    const firstBtn = this.listEl.querySelector('.sidebar-item');
+    if (firstBtn) {
+      this._startPendingRename(firstBtn, pending, 0, onNameCommit);
+    }
+  }
+
+  /**
+   * Inline rename specifically for a pending (new) entry.
+   * Unlike _startRename, this does NOT call PATCH on the server.
+   */
+  _startPendingRename(btnEl, item, idx, onNameCommit) {
+    const nameSpan = btnEl.querySelector('.sidebar-item-name');
+    if (!nameSpan) return;
+
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.className = 'sidebar-rename-input';
+    inp.placeholder = 'Name this diagram…';
+    inp.value = '';
+    nameSpan.replaceWith(inp);
+    inp.focus();
+
+    let committed = false;
+    const commit = () => {
+      if (committed) return;
+      committed = true;
+      const newName = inp.value.trim();
+      if (!newName) {
+        // User cancelled or left empty — remove the pending entry
+        this.items = this.items.filter(i => i !== item);
+        this.activeIndex = this.items.length > 0 ? 0 : -1;
+        this._save();
+        this.render();
+        if (onNameCommit) onNameCommit(null);
+        return;
+      }
+      item.name = newName;
+      item._pending = true; // stays pending until render completes
+      this._save();
+      this.render();
+      if (onNameCommit) onNameCommit(newName);
+    };
+
+    inp.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); commit(); }
+      if (e.key === 'Escape') {
+        committed = true;
+        this.items = this.items.filter(i => i !== item);
+        this.activeIndex = this.items.length > 0 ? 0 : -1;
+        this._save();
+        this.render();
+        if (onNameCommit) onNameCommit(null);
+      }
+    });
+    inp.addEventListener('blur', () => commit());
+  }
+
   render() {
     this.listEl.innerHTML = '';
     this.items.forEach((item, idx) => {
       const btn = document.createElement('button');
-      btn.className = 'sidebar-item' + (idx === this.activeIndex ? ' active' : '');
+      btn.className = 'sidebar-item' + (idx === this.activeIndex ? ' active' : '') + (item._pending ? ' pending' : '');
+      const displayName = item.name || 'Untitled';
       btn.innerHTML = `
-        <span class="sidebar-item-name">${this._esc(item.name)}</span>
-        <span class="sidebar-item-meta">${item.type ? item.type + ' · ' : ''}${item.timestamp || ''}</span>
+        <span class="sidebar-item-name">${this._esc(displayName)}</span>
+        <span class="sidebar-item-meta">${item._pending ? 'new · awaiting content' : (item.type ? item.type + ' · ' : '') + (item.timestamp || '')}</span>
         <span class="sidebar-item-actions">
           <button class="btn-rename" aria-label="Rename ${this._esc(item.name)}" title="Rename">
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">

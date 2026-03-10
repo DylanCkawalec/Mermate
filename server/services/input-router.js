@@ -6,7 +6,13 @@ const { selectDiagramType } = require('./diagram-selector');
 const { validate } = require('./mermaid-validator');
 const { repair: deterministicRepair } = require('./mermaid-repairer');
 const { extractShadow, analyze } = require('./input-analyzer');
-const { buildRenderPrepareUserPrompt, buildModelRepairUserPrompt } = require('./axiom-prompts');
+const {
+  buildRenderPrepareUserPrompt, buildModelRepairUserPrompt,
+  buildFactExtractionUserPrompt, buildDiagramPlanUserPrompt,
+  buildCompositionUserPrompt, buildSemanticRepairUserPrompt,
+  buildMaxCompositionUserPrompt,
+} = require('./axiom-prompts');
+const { validateInvariants, computeHPCScore } = require('./mermaid-validator');
 const provider = require('./inference-provider');
 const enhancerBridge = require('./gpt-enhancer-bridge');
 const logger = require('../utils/logger');
@@ -339,6 +345,383 @@ async function renderPrepare(source, profile, useMax = false) {
   const mmdSource = localTextToMmd(source, shadow);
   stagesExecuted.push('local_fallback');
   return { mmdSource, enhanced: false, provider: 'local', stagesExecuted };
+}
+
+// ---- HPC-GoT Bounded Render Pipeline ----------------------------------------
+
+const HPC_PRUNE_THRESHOLD = 0.85;
+const HPC_MAX_REPAIR_ATTEMPTS = 2;
+
+/**
+ * Parse strict JSON from LLM output, tolerating markdown fencing.
+ */
+function _parseStrictJSON(raw) {
+  if (!raw) return null;
+  let cleaned = raw.trim();
+  // Strip markdown fencing
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+  }
+  const jsonStart = cleaned.indexOf('{');
+  const jsonEnd = cleaned.lastIndexOf('}');
+  if (jsonStart < 0 || jsonEnd <= jsonStart) return null;
+  try {
+    return JSON.parse(cleaned.slice(jsonStart, jsonEnd + 1));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Validate Stage 1 facts structure.
+ */
+function _validateFacts(facts) {
+  if (!facts || typeof facts !== 'object') return { valid: false, reason: 'not an object' };
+  if (!Array.isArray(facts.entities) || facts.entities.length === 0) return { valid: false, reason: 'no entities' };
+  if (!Array.isArray(facts.relationships)) return { valid: false, reason: 'relationships not an array' };
+
+  const validTypes = new Set(['actor', 'service', 'store', 'gateway', 'broker', 'cache', 'queue', 'external', 'decision', 'boundary']);
+  for (const e of facts.entities) {
+    if (!e.name || !e.type) return { valid: false, reason: `entity missing name or type: ${JSON.stringify(e)}` };
+    if (!validTypes.has(e.type)) {
+      e.type = 'service'; // auto-correct to default
+    }
+  }
+  return { valid: true };
+}
+
+/**
+ * Validate Stage 2 plan structure against Stage 1 facts.
+ */
+function _validatePlan(plan, facts) {
+  if (!plan || typeof plan !== 'object') return { valid: false, reason: 'not an object' };
+  if (!plan.directive) return { valid: false, reason: 'missing directive' };
+  if (!Array.isArray(plan.nodes) || plan.nodes.length === 0) return { valid: false, reason: 'no nodes' };
+  if (!Array.isArray(plan.edges)) return { valid: false, reason: 'edges not an array' };
+
+  // Check plan nodes reference facts entities
+  const factEntityNames = new Set((facts.entities || []).map(e => e.name.toLowerCase()));
+  let planEntityCoverage = 0;
+  for (const node of plan.nodes) {
+    if (!node.id || !node.label) continue;
+    const ref = (node.entityRef || node.label || '').toLowerCase();
+    if (factEntityNames.has(ref) || [...factEntityNames].some(n => ref.includes(n) || n.includes(ref))) {
+      planEntityCoverage++;
+    }
+  }
+  const coverage = facts.entities.length > 0 ? planEntityCoverage / facts.entities.length : 1;
+
+  // Check edge labels <= 6 words
+  for (const edge of plan.edges) {
+    if (edge.label && edge.label.split(/\s+/).length > 6) {
+      edge.label = edge.label.split(/\s+/).slice(0, 6).join(' ');
+    }
+  }
+
+  // Check nesting depth <= 3
+  const subgraphs = plan.subgraphs || [];
+  if (subgraphs.length > 10) {
+    plan.subgraphs = subgraphs.slice(0, 10);
+  }
+
+  return { valid: true, coverage: +coverage.toFixed(3) };
+}
+
+/**
+ * HPC-GoT bounded render pipeline: 3-stage fact→plan→compose with
+ * deterministic invariant validation and structured semantic repair.
+ *
+ * @param {string} source - User's original text
+ * @param {object} profile - InputProfile from input-analyzer
+ * @param {boolean} [useMax=false] - Use Max-tier inference
+ * @returns {Promise<{mmdSource: string, enhanced: boolean, provider: string, stagesExecuted: string[], facts?: object, plan?: object, hpcScore?: object}>}
+ */
+async function renderHPCGoT(source, profile, useMax = false) {
+  const stagesExecuted = [];
+  const inferFn = useMax ? provider.inferMax : provider.infer;
+
+  // ---- Stage 1: Typed Architecture Fact Extraction ---
+  const factUserPrompt = buildFactExtractionUserPrompt(source, profile);
+  const factResult = await inferFn('fact_extraction', { userPrompt: factUserPrompt });
+  stagesExecuted.push('fact_extraction');
+
+  const facts = _parseStrictJSON(factResult.output);
+  const factValidation = _validateFacts(facts);
+
+  if (!factValidation.valid) {
+    logger.warn('hpc.stage1_failed', { reason: factValidation.reason, provider: factResult.provider });
+    // Fall back to legacy renderPrepare
+    return renderPrepare(source, profile, useMax);
+  }
+
+  // Enrich facts with shadow data if available
+  if (profile?.shadow) {
+    const shadow = profile.shadow;
+    // Add any shadow entities not already in facts
+    const factEntityNames = new Set(facts.entities.map(e => e.name.toLowerCase()));
+    for (const se of (shadow.entities || [])) {
+      if (!factEntityNames.has(se.name.toLowerCase())) {
+        facts.entities.push({ name: se.name, type: se.type || 'service', responsibility: 'detected' });
+      }
+    }
+  }
+
+  logger.info('hpc.stage1_complete', {
+    entities: facts.entities.length,
+    relationships: (facts.relationships || []).length,
+    boundaries: (facts.boundaries || []).length,
+    failurePaths: (facts.failurePaths || []).length,
+    provider: factResult.provider,
+  });
+
+  // ---- Stage 2: Diagram Plan ---
+  const planUserPrompt = buildDiagramPlanUserPrompt(facts, profile);
+  const planResult = await inferFn('diagram_plan', { userPrompt: planUserPrompt });
+  stagesExecuted.push('diagram_plan');
+
+  const plan = _parseStrictJSON(planResult.output);
+  const planValidation = _validatePlan(plan, facts);
+
+  if (!planValidation.valid) {
+    logger.warn('hpc.stage2_failed', { reason: planValidation.reason, provider: planResult.provider });
+    return renderPrepare(source, profile, useMax);
+  }
+
+  logger.info('hpc.stage2_complete', {
+    nodes: plan.nodes.length,
+    edges: plan.edges.length,
+    subgraphs: (plan.subgraphs || []).length,
+    coverage: planValidation.coverage,
+    provider: planResult.provider,
+  });
+
+  // ---- Stage 3: Mermaid Composition ---
+  const compUserPrompt = buildCompositionUserPrompt(plan, facts);
+  const compResult = await inferFn('composition', { userPrompt: compUserPrompt });
+  stagesExecuted.push('composition');
+
+  let mmdSource = compResult.output || '';
+
+  // Strip markdown fencing if present
+  if (mmdSource.trim().startsWith('```')) {
+    mmdSource = mmdSource.trim().replace(/^```(?:mermaid)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+  }
+
+  // Validate first line is a valid directive
+  const firstLine = mmdSource.split('\n').find(l => l.trim() && !l.trim().startsWith('%%'));
+  if (!firstLine || !VALID_DIRECTIVE_RE.test(firstLine.trim())) {
+    logger.warn('hpc.stage3_invalid_directive', { firstLine: firstLine?.slice(0, 80) });
+    return renderPrepare(source, profile, useMax);
+  }
+
+  // ---- Invariant Validation + Bounded Repair ---
+  let hpcScore = computeHPCScore(mmdSource, facts);
+  logger.info('hpc.stage3_initial_score', { score: hpcScore.score, sv: hpcScore.sv, ic: hpcScore.ic });
+
+  let repairAttempt = 0;
+  while (hpcScore.score < HPC_PRUNE_THRESHOLD && repairAttempt < HPC_MAX_REPAIR_ATTEMPTS) {
+    repairAttempt++;
+    const invariantResult = validateInvariants(mmdSource, facts, plan);
+
+    logger.info('hpc.semantic_repair', {
+      attempt: repairAttempt,
+      missingEntities: invariantResult.trace.missingEntities.length,
+      missingRelationships: invariantResult.trace.missingRelationships.length,
+      proseFragments: invariantResult.trace.proseFragments.length,
+    });
+
+    const repairUserPrompt = buildSemanticRepairUserPrompt(mmdSource, invariantResult.trace, plan, facts);
+    const repairResult = await inferFn('semantic_repair', { userPrompt: repairUserPrompt });
+    stagesExecuted.push(`semantic_repair_${repairAttempt}`);
+
+    if (!repairResult.output) break;
+
+    let repairedSource = repairResult.output;
+    if (repairedSource.trim().startsWith('```')) {
+      repairedSource = repairedSource.trim().replace(/^```(?:mermaid)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+    }
+
+    const repairedFirstLine = repairedSource.split('\n').find(l => l.trim() && !l.trim().startsWith('%%'));
+    if (!repairedFirstLine || !VALID_DIRECTIVE_RE.test(repairedFirstLine.trim())) break;
+
+    const newScore = computeHPCScore(repairedSource, facts);
+
+    // Only accept repair if score does not decrease
+    if (newScore.score >= hpcScore.score) {
+      mmdSource = repairedSource;
+      hpcScore = newScore;
+      logger.info('hpc.repair_accepted', { attempt: repairAttempt, newScore: newScore.score });
+    } else {
+      logger.info('hpc.repair_rejected', { attempt: repairAttempt, oldScore: hpcScore.score, newScore: newScore.score });
+      break;
+    }
+  }
+
+  // Final pruning check
+  if (hpcScore.score < HPC_PRUNE_THRESHOLD * 0.7) {
+    logger.warn('hpc.below_prune_threshold', { score: hpcScore.score, threshold: HPC_PRUNE_THRESHOLD * 0.7 });
+    // Score is very low — fall back to legacy path
+    const legacy = await renderPrepare(source, profile, useMax);
+    legacy.stagesExecuted = [...stagesExecuted, ...legacy.stagesExecuted, 'legacy_fallback'];
+    return legacy;
+  }
+
+  return {
+    mmdSource,
+    enhanced: true,
+    provider: compResult.provider,
+    stagesExecuted,
+    facts,
+    plan,
+    hpcScore,
+  };
+}
+
+// ---- Max Upgrade: architect-grade recomposition via strongest model ----------
+
+/**
+ * Strict .mmd contract enforcement: strip any non-Mermaid content from
+ * model output and validate it's a pure Mermaid artifact.
+ * @param {string} raw
+ * @returns {{ mmd: string|null, violations: string[] }}
+ */
+function _enforceMmdContract(raw) {
+  const violations = [];
+  if (!raw || typeof raw !== 'string') {
+    return { mmd: null, violations: ['empty output'] };
+  }
+
+  let cleaned = raw.trim();
+
+  // Strip markdown fencing
+  if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/^```(?:mermaid|mmd)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+    violations.push('stripped markdown fencing');
+  }
+
+  // Strip any leading prose lines before the directive
+  const lines = cleaned.split('\n');
+  let directiveIdx = -1;
+  for (let i = 0; i < Math.min(lines.length, 10); i++) {
+    const line = lines[i].trim();
+    if (!line || line.startsWith('%%')) continue;
+    if (VALID_DIRECTIVE_RE.test(line)) {
+      directiveIdx = i;
+      break;
+    }
+  }
+
+  if (directiveIdx < 0) {
+    return { mmd: null, violations: ['no valid Mermaid directive found'] };
+  }
+
+  if (directiveIdx > 0) {
+    const stripped = lines.slice(0, directiveIdx).filter(l => l.trim() && !l.trim().startsWith('%%'));
+    if (stripped.length > 0) {
+      violations.push(`stripped ${stripped.length} leading prose lines`);
+    }
+    cleaned = lines.slice(directiveIdx).join('\n');
+  } else {
+    cleaned = lines.join('\n');
+  }
+
+  // Strip any trailing prose after the Mermaid body
+  const trailingProseRe = /\n\n[A-Z][^\n]{20,}$/;
+  if (trailingProseRe.test(cleaned)) {
+    cleaned = cleaned.replace(trailingProseRe, '');
+    violations.push('stripped trailing prose');
+  }
+
+  return { mmd: cleaned.trim(), violations };
+}
+
+/**
+ * Max Upgrade pipeline: runs normal HPC-GoT to get a baseline, then
+ * calls the strongest model with a dedicated architect-grade prompt
+ * to recompose the diagram. Returns the better of baseline vs Max.
+ *
+ * @param {string} source - User's original text
+ * @param {object} profile - InputProfile from input-analyzer
+ * @returns {Promise<{mmdSource: string, enhanced: boolean, provider: string, stagesExecuted: string[], facts?: object, plan?: object, hpcScore?: object}>}
+ */
+async function renderMaxUpgrade(source, profile) {
+  // Step 1: Run normal HPC-GoT to get a baseline
+  const baseline = await renderHPCGoT(source, profile, false);
+  const baselineStages = [...baseline.stagesExecuted];
+
+  // If baseline completely failed (fell back to local), still try Max
+  const facts = baseline.facts;
+  const plan = baseline.plan;
+
+  if (!facts || !facts.entities?.length) {
+    // No facts extracted — can't do Max upgrade meaningfully.
+    // Run inferMax on the raw HPC pipeline instead.
+    logger.info('max.no_baseline_facts', { reason: 'running full HPC-GoT with Max model' });
+    return renderHPCGoT(source, profile, true);
+  }
+
+  // Step 2: Call Max model with architect-grade composition prompt
+  const maxUserPrompt = buildMaxCompositionUserPrompt(
+    baseline.mmdSource, facts, plan, source,
+  );
+  const maxResult = await provider.inferMax('max_composition', { userPrompt: maxUserPrompt });
+  const stagesExecuted = [...baselineStages, 'max_composition'];
+
+  if (!maxResult.output) {
+    logger.warn('max.no_output', { provider: maxResult.provider });
+    return { ...baseline, stagesExecuted };
+  }
+
+  // Step 3: Enforce strict .mmd contract
+  const contract = _enforceMmdContract(maxResult.output);
+  if (!contract.mmd) {
+    logger.warn('max.contract_violation', { violations: contract.violations });
+    return { ...baseline, stagesExecuted: [...stagesExecuted, 'max_contract_failed'] };
+  }
+
+  if (contract.violations.length > 0) {
+    logger.info('max.contract_cleaned', { violations: contract.violations });
+  }
+
+  // Step 4: Score the Max result
+  const maxScore = computeHPCScore(contract.mmd, facts);
+  const baselineScore = baseline.hpcScore?.score || 0;
+
+  logger.info('max.scored', {
+    baselineScore,
+    maxScore: maxScore.score,
+    maxSv: maxScore.sv,
+    maxIc: maxScore.ic,
+    provider: maxResult.provider,
+  });
+
+  // Step 5: Accept Max if it doesn't regress
+  // (Slightly lower threshold — Max output may have richer structure that
+  // the simple coverage metric doesn't fully capture)
+  if (maxScore.score >= baselineScore * 0.9 && maxScore.sv >= 0.5) {
+    logger.info('max.accepted', {
+      baselineScore,
+      maxScore: maxScore.score,
+      improvement: +(maxScore.score - baselineScore).toFixed(3),
+    });
+    return {
+      mmdSource: contract.mmd,
+      enhanced: true,
+      provider: maxResult.provider,
+      stagesExecuted,
+      facts,
+      plan,
+      hpcScore: maxScore,
+    };
+  }
+
+  // Max result regressed — fall back to baseline
+  logger.info('max.rejected', {
+    reason: 'Max score regressed below threshold',
+    baselineScore,
+    maxScore: maxScore.score,
+  });
+  return { ...baseline, stagesExecuted: [...stagesExecuted, 'max_rejected_fallback'] };
 }
 
 // ---- Decompose-and-render for complex inputs --------------------------------
@@ -749,6 +1132,8 @@ class RouterError extends Error {
 module.exports = {
   route,
   renderPrepare,
+  renderHPCGoT,
+  renderMaxUpgrade,
   decomposeAndRender,
   compileWithRetry,
   detect,

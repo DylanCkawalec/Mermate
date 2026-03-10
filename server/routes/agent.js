@@ -175,7 +175,10 @@ router.post('/agent/run', async (req, res) => {
     });
     const previewData = await previewResp.json();
 
+    // Track preview diagram_name so finalize can overwrite it
+    let previewDiagramName = null;
     if (previewData.success) {
+      previewDiagramName = previewData.diagram_name;
       sendEvent('preview_render', {
         success: true,
         paths: previewData.paths,
@@ -195,6 +198,7 @@ router.post('/agent/run', async (req, res) => {
     sendEvent('preview_ready', {
       message: 'Preview ready. Add optional notes before final Max render.',
       draft_text: draftText,
+      diagram_name: previewDiagramName,
     });
 
   } catch (err) {
@@ -253,10 +257,18 @@ router.post('/agent/finalize', async (req, res) => {
     sendEvent('stage', { stage: 'finalizing', message: 'Running final Max render...' });
 
     const PORT = process.env.PORT || 3333;
+    // Pass diagram_name from the body so the final render overwrites the preview
+    const diagramName = req.body.diagram_name || undefined;
     const finalResp = await fetch(`http://localhost:${PORT}/api/render`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mermaid_source: draftText, enhance: true, input_mode: 'idea', max_mode: true }),
+      body: JSON.stringify({
+        mermaid_source: draftText,
+        diagram_name: diagramName,
+        enhance: true,
+        input_mode: 'idea',
+        max_mode: true,
+      }),
     });
     const finalData = await finalResp.json();
 

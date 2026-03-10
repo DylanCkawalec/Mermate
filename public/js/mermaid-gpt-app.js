@@ -443,7 +443,16 @@
     currentPaths = null;
     currentDiagramName = '';
     if (copilot) copilot.dismissGhost();
-    input.focus();
+
+    // Create a pending sidebar entry and immediately prompt for a name
+    sidebar.addPending((name) => {
+      if (name && diagramNameInput) {
+        diagramNameInput.value = name;
+        currentDiagramName = name;
+      }
+      // After naming, focus the main input for content
+      input.focus();
+    });
   });
 
   btnFlip.addEventListener('click', () => flipCard.toggle());
