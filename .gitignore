@@ -9,6 +9,11 @@ archs/*
 .DS_Store
 *.log
 .env
-.env.*
 
+# Ignore outputs and temp artifacts
 prompt-example.md
+
+# Ignore experiment outputs
+mermate-arch-GoT.txt
+GoT.tex
+mermate-arch-GoT.txt
