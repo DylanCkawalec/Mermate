@@ -599,6 +599,16 @@ body {
   cursor: not-allowed;
 }
 
+.btn-agent-run.is-stopping {
+  background: var(--surface);
+  color: #e8820c;
+  border: 1px solid #e8820c;
+}
+
+.btn-agent-run.is-stopping:hover {
+  background: rgba(232, 130, 12, 0.08);
+}
+
 /* Planning panel */
 .agent-panel {
   margin-top: 8px;

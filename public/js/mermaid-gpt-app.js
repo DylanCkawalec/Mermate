@@ -570,23 +570,32 @@
         }
       },
       onComplete: () => {
+        btnAgentRun.textContent = 'Run Agent';
+        btnAgentRun.classList.remove('is-stopping');
         btnAgentRun.disabled = false;
         input.readOnly = false;
       },
       onError: (msg) => {
         showError(msg);
+        btnAgentRun.textContent = 'Run Agent';
+        btnAgentRun.classList.remove('is-stopping');
         btnAgentRun.disabled = false;
         input.readOnly = false;
       },
       onStateChange: (state) => {
         if (state === 'awaiting_notes') {
           input.readOnly = false;
-          btnAgentRun.disabled = true;
+          // Keep stop available during notes phase
+          btnAgentRun.textContent = 'Stop Agent';
+          btnAgentRun.classList.add('is-stopping');
+          btnAgentRun.disabled = false;
         } else if (state === 'finalizing') {
           input.readOnly = true;
           btnAgentRun.disabled = true;
           setLoading(true, 'text');
         } else if (state === 'idle') {
+          btnAgentRun.textContent = 'Run Agent';
+          btnAgentRun.classList.remove('is-stopping');
           btnAgentRun.disabled = false;
           input.readOnly = false;
           setLoading(false);
@@ -597,9 +606,24 @@
 
   if (btnAgentRun) {
     btnAgentRun.addEventListener('click', () => {
-      if (!selectedAgentMode || isLoading) return;
+      if (isLoading) return;
+
+      // If agent is already running, stop and restore original text
+      if (agent && agent.running) {
+        agent.stopAndRestore();
+        btnAgentRun.disabled = false;
+        btnAgentRun.textContent = 'Run Agent';
+        btnAgentRun.classList.remove('is-stopping');
+        input.readOnly = false;
+        setLoading(false);
+        return;
+      }
+
+      if (!selectedAgentMode) return;
       _createAgent();
-      btnAgentRun.disabled = true;
+      btnAgentRun.textContent = 'Stop Agent';
+      btnAgentRun.classList.add('is-stopping');
+      btnAgentRun.disabled = false; // keep enabled so user can stop
       input.readOnly = true;
       hideError();
       agent.run(selectedAgentMode);

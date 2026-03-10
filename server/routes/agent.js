@@ -104,8 +104,20 @@ router.post('/agent/run', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
+  // Abort controller — cancelled when the client disconnects (browser
+  // refresh, tab close, or frontend stop). Propagated into all fetch calls
+  // so in-flight LLM requests are torn down immediately.
+  const abort = new AbortController();
+  req.on('close', () => {
+    if (!abort.signal.aborted) {
+      logger.info('agent.run.client_disconnected');
+      abort.abort();
+    }
+  });
+
   function sendEvent(type, data) {
-    res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
+    if (abort.signal.aborted) return;
+    try { res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`); } catch {}
   }
 
   try {
@@ -116,6 +128,7 @@ router.post('/agent/run', async (req, res) => {
     const systemPrompt = _buildAgentSystemPrompt(modePromptSkeleton);
 
     // ---- Planning ----
+    if (abort.signal.aborted) return;
     sendEvent('stage', { stage: 'planning', message: 'Analyzing architecture and generating plan...' });
 
     const profile = analyze(startText, 'idea');
@@ -138,6 +151,7 @@ router.post('/agent/run', async (req, res) => {
       'Produce a stronger architecture description. Be specific about services, data stores, flows, and failure handling.',
     ].filter(Boolean).join('\n');
 
+    if (abort.signal.aborted) return;
     const planResult = await provider.infer('copilot_enhance', {
       systemPrompt, userPrompt: planningUserPrompt,
     });
@@ -149,10 +163,12 @@ router.post('/agent/run', async (req, res) => {
     }
 
     // ---- Refinement ----
+    if (abort.signal.aborted) return;
     sendEvent('stage', { stage: 'refining', message: 'Refining architecture structure...' });
 
     const refinedProfile = analyze(draftText, 'idea');
     if (refinedProfile.qualityScore < 0.6 || refinedProfile.completenessScore < 0.6) {
+      if (abort.signal.aborted) return;
       const refineResult = await provider.infer('copilot_enhance', {
         systemPrompt,
         userPrompt: `[CURRENT DRAFT]\n${draftText}\n\n[ANALYSIS]\nQuality: ${refinedProfile.qualityScore}\nGaps: ${(refinedProfile.shadow?.gaps || []).join('; ')}\n\nImprove this further. Add missing failure paths, boundaries, and specificity.`,
@@ -165,6 +181,7 @@ router.post('/agent/run', async (req, res) => {
     }
 
     // ---- Validation / preview render (cheap mode) ----
+    if (abort.signal.aborted) return;
     sendEvent('stage', { stage: 'preview', message: 'Running preview render...' });
 
     const PORT = process.env.PORT || 3333;
@@ -172,6 +189,7 @@ router.post('/agent/run', async (req, res) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mermaid_source: draftText, enhance: true, input_mode: 'idea', max_mode: false }),
+      signal: abort.signal,
     });
     const previewData = await previewResp.json();
 
@@ -202,6 +220,7 @@ router.post('/agent/run', async (req, res) => {
     });
 
   } catch (err) {
+    if (abort.signal.aborted) return; // client left — nothing to send
     logger.error('agent.run.error', { error: err.message });
     sendEvent('error', { message: err.message });
   } finally {
@@ -223,8 +242,17 @@ router.post('/agent/finalize', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
+  const abort = new AbortController();
+  req.on('close', () => {
+    if (!abort.signal.aborted) {
+      logger.info('agent.finalize.client_disconnected');
+      abort.abort();
+    }
+  });
+
   function sendEvent(type, data) {
-    res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
+    if (abort.signal.aborted) return;
+    try { res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`); } catch {}
   }
 
   try {
@@ -232,6 +260,7 @@ router.post('/agent/finalize', async (req, res) => {
 
     // If user provided notes, do one more refinement pass incorporating them
     if (user_notes && user_notes.trim()) {
+      if (abort.signal.aborted) return;
       sendEvent('stage', { stage: 'incorporating_notes', message: 'Applying your notes to the architecture...' });
 
       const modePromptSkeleton = mode ? await _loadModePrompt(mode) : null;
@@ -254,6 +283,7 @@ router.post('/agent/finalize', async (req, res) => {
     }
 
     // ---- Final Max render ----
+    if (abort.signal.aborted) return;
     sendEvent('stage', { stage: 'finalizing', message: 'Running final Max render...' });
 
     const PORT = process.env.PORT || 3333;
@@ -269,6 +299,7 @@ router.post('/agent/finalize', async (req, res) => {
         input_mode: 'idea',
         max_mode: true,
       }),
+      signal: abort.signal,
     });
     const finalData = await finalResp.json();
 
@@ -294,6 +325,7 @@ router.post('/agent/finalize', async (req, res) => {
     sendEvent('done', { final_text: draftText });
 
   } catch (err) {
+    if (abort.signal.aborted) return;
     logger.error('agent.finalize.error', { error: err.message });
     sendEvent('error', { message: err.message });
   } finally {

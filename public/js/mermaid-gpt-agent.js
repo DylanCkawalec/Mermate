@@ -26,6 +26,7 @@ window.MermaidAgent = class MermaidAgent {
     this._running = false;
     this._mode = null;
     this._draftText = '';
+    this._originalText = '';  // snapshot before agent starts
     this._previewDiagramName = null;
     this._animating = false;
     this._thinkingEffect = null;
@@ -49,6 +50,9 @@ window.MermaidAgent = class MermaidAgent {
       this._running = false;
       return;
     }
+
+    // Snapshot the user's original text so we can restore on stop
+    this._originalText = prompt;
 
     this.panel.hidden = false;
     this.panelMode.textContent = mode;
@@ -108,6 +112,16 @@ window.MermaidAgent = class MermaidAgent {
     this._running = false;
     this.notesWrap.hidden = true;
     this.onStateChange('idle');
+  }
+
+  /** Stop and restore the textarea to the user's original text. */
+  stopAndRestore() {
+    this.stop();
+    if (this._originalText) {
+      this.input.value = this._originalText;
+      this.input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    this.panel.hidden = true;
   }
 
   // ---- SSE streaming ----
