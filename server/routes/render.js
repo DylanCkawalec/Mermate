@@ -281,11 +281,25 @@ router.post('/render', async (req, res) => {
         && profile.completenessScore >= 0.5;
       const useDecompose = wantsDecompose && !strongEnoughForSingleShot;
 
+      // Decide whether the input is rich enough to benefit from the
+      // 3-stage HPC-GoT pipeline (fact→plan→compose). Simple ideas are
+      // faster and more reliable with the single-shot renderPrepare path.
+      const entityCount = profile.shadow?.entities?.length || 0;
+      const useHPCGoT = !useDecompose && !maxRequested
+        && (profile.complexity >= 0.15 || entityCount >= 5);
+
+      const pipelineName = useDecompose ? 'decompose'
+        : maxRequested ? 'max_upgrade'
+        : useHPCGoT ? 'hpc_got'
+        : 'render_prepare';
+
       logger.info('render.routing', {
-        pipeline: maxRequested ? 'max_upgrade' : 'hpc_got',
+        pipeline: pipelineName,
         shouldDecompose: wantsDecompose,
         strongEnoughForSingleShot,
         useDecompose,
+        useHPCGoT,
+        entityCount,
         complexity: profile.complexity,
         quality: profile.qualityScore,
         completeness: profile.completenessScore,
@@ -300,8 +314,11 @@ router.post('/render', async (req, res) => {
         // runs normal HPC-GoT internally as baseline, then recomposes
         // via the strongest model with an architect-grade prompt.
         prepResult = await renderMaxUpgrade(source, profile);
-      } else {
+      } else if (useHPCGoT) {
         prepResult = await renderHPCGoT(source, profile, false);
+      } else {
+        // Simple idea: single-shot render is faster and more reliable
+        prepResult = await renderPrepare(source, profile, false);
       }
 
       routeResult = {
@@ -310,7 +327,7 @@ router.post('/render', async (req, res) => {
         contentState: profile.contentState,
         enhanced: prepResult.enhanced,
         enhanceMeta: prepResult.enhanced ? {
-          transformation: maxRequested ? 'max_upgrade' : 'hpc_got',
+          transformation: pipelineName,
           provider: prepResult.provider,
           hpcScore: prepResult.hpcScore || null,
         } : null,
