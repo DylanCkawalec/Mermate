@@ -16,3 +16,6 @@ prompt-example.md
 # Ignore experiment outputs
 mermate-arch-GoT.txt
 GoT.tex
+.env
+node_modules/
+flows/

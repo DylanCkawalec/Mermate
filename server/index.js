@@ -1,5 +1,7 @@
 'use strict';
 
+require('dotenv').config({ path: require('node:path').resolve(__dirname, '..', '.env') });
+
 const express = require('express');
 const path = require('node:path');
 const logger = require('./utils/logger');
