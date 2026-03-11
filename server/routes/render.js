@@ -8,6 +8,7 @@ const { validate: validateMmd } = require('../services/mermaid-validator');
 const { route, renderPrepare, renderHPCGoT, renderMaxUpgrade, decomposeAndRender, compileWithRetry, RouterError } = require('../services/input-router');
 const enhancerBridge = require('../services/gpt-enhancer-bridge');
 const provider = require('../services/inference-provider');
+const visualProvider = require('../services/visual-provider');
 const { buildPrompt } = require('../services/axiom-prompts');
 const { analyze } = require('../services/input-analyzer');
 const { deriveDiagramName } = require('../utils/naming');
@@ -47,11 +48,13 @@ router.get('/copilot/health', async (_req, res) => {
     const providers = await provider.checkProviders();
     const available = providers.ollama || providers.premium || providers.enhancer;
     const maxAvailable = provider.isMaxAvailable();
+    const visualAvailable = visualProvider.isAvailable();
     return res.status(available ? 200 : 503).json({
       success: available,
       available,
       providers,
       maxAvailable,
+      visual: visualAvailable,
     });
   } catch (err) {
     logger.warn('copilot.health.error', { error: err.message });
@@ -60,6 +63,19 @@ router.get('/copilot/health', async (_req, res) => {
       available: false,
     });
   }
+});
+
+/**
+ * GET /api/visual/styles
+ * Returns available visual style presets for the Gemini visualization layer.
+ */
+router.get('/visual/styles', (_req, res) => {
+  return res.json({
+    success: true,
+    available: visualProvider.isAvailable(),
+    styles: visualProvider.getStyles(),
+    default_style: process.env.GEMINI_VISUAL_STYLE || 'tech-dark',
+  });
 });
 
 /**
@@ -227,7 +243,7 @@ router.post('/copilot/enhance', async (req, res) => {
  * The input-router detects the content type and selects the correct pipeline.
  */
 router.post('/render', async (req, res) => {
-  const { mermaid_source, diagram_name, enhance, max_mode, input_mode } = req.body || {};
+  const { mermaid_source, diagram_name, enhance, max_mode, input_mode, visual, visual_style } = req.body || {};
 
   if (!mermaid_source || typeof mermaid_source !== 'string' || !mermaid_source.trim()) {
     return res.status(400).json({
@@ -422,7 +438,30 @@ router.post('/render', async (req, res) => {
       structurallyValid: postRenderValidation.valid,
     };
 
-    // 7. Respond with final artifacts + compiled source + quality metrics
+    // 7. Optional: generate polished visual via Gemini (nanobanana layer)
+    let visualResult = null;
+    if (visual && visualProvider.isAvailable()) {
+      try {
+        const entities = (profile.shadow?.entities || []).map(e => e.name);
+        const relationships = (profile.shadow?.relationships || []).map(r => `${r.from} ${r.verb} ${r.to}`);
+
+        visualResult = await visualProvider.render({
+          description: source,
+          diagramName,
+          outputDir: outputDir,
+          diagramType: finalDiagramType || diagramType,
+          title: diagram_name || diagramName,
+          style: visual_style || undefined,
+          entities,
+          relationships,
+        });
+      } catch (err) {
+        logger.warn('render.visual.error', { error: err.message });
+        visualResult = { success: false, error: err.message };
+      }
+    }
+
+    // 8. Respond with final artifacts + compiled source + quality metrics
     return res.json({
       success: true,
       diagram_name: diagramName,
@@ -443,11 +482,17 @@ router.post('/render', async (req, res) => {
       paths: {
         png: `/flows/${diagramName}/${diagramName}.png`,
         svg: `/flows/${diagramName}/${diagramName}.svg`,
+        visual: visualResult?.success ? `/flows/${diagramName}/${diagramName}-visual.png` : null,
         mmd: archivePaths.mmdPath,
         md: archivePaths.mdPath,
         compiled_mmd: compiledArchivePath,
       },
       compiled_source: finalMmd,
+      visual: visualResult ? {
+        success: visualResult.success,
+        style: visualResult.style || null,
+        error: visualResult.error || null,
+      } : null,
       validation: {
         svg_valid: compileOutcome.result.svg.valid,
         png_valid: compileOutcome.result.png.valid,
