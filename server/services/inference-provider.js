@@ -26,8 +26,8 @@ const OLLAMA_MODEL = process.env.MERMATE_OLLAMA_MODEL || 'gpt-oss:20b';
 
 const ENHANCER_URL = process.env.MERMAID_ENHANCER_URL || 'http://localhost:8100';
 
-const INFER_TIMEOUT_MS     = 30_000;
-const MAX_INFER_TIMEOUT_MS = 120_000;
+const INFER_TIMEOUT_MS     = parseInt(process.env.MERMATE_INFER_TIMEOUT || '90000', 10);
+const MAX_INFER_TIMEOUT_MS = parseInt(process.env.MERMATE_MAX_INFER_TIMEOUT || '180000', 10);
 
 // ---- Health cache ---------------------------------------------------------
 
