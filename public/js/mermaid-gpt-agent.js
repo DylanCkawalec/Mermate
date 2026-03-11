@@ -51,13 +51,18 @@ window.MermaidAgent = class MermaidAgent {
       return;
     }
 
-    // Snapshot the user's original text so we can restore on stop
     this._originalText = prompt;
+
+    if (this._abortController) {
+      try { this._abortController.abort(); } catch {}
+    }
 
     this.panel.hidden = false;
     this.panelMode.textContent = mode;
     this.panelLog.innerHTML = '';
     this.notesWrap.hidden = true;
+    this._draftText = '';
+    this._previewDiagramName = null;
     this._addLog('Starting agent...', 'active');
     this.onStateChange('running');
 
@@ -72,6 +77,8 @@ window.MermaidAgent = class MermaidAgent {
         this._addLog(`Error: ${err.message}`, 'done');
         this.onError(err.message);
       }
+    } finally {
+      this._running = false;
     }
   }
 

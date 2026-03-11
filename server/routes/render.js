@@ -227,7 +227,7 @@ router.post('/copilot/enhance', async (req, res) => {
  * The input-router detects the content type and selects the correct pipeline.
  */
 router.post('/render', async (req, res) => {
-  const { mermaid_source, diagram_name, enhance, max_mode } = req.body || {};
+  const { mermaid_source, diagram_name, enhance, max_mode, input_mode } = req.body || {};
 
   if (!mermaid_source || typeof mermaid_source !== 'string' || !mermaid_source.trim()) {
     return res.status(400).json({
@@ -252,7 +252,7 @@ router.post('/render', async (req, res) => {
     const startMs = Date.now();
 
     // 1. Analyze input holistically (maturity, quality, shadow model, intent)
-    const profile = analyze(source, 'idea');
+    const profile = analyze(source, input_mode || 'idea');
 
     const maxRequested = !!(max_mode && provider.isMaxAvailable());
     let useMax = maxRequested;

@@ -11,8 +11,14 @@ const PROJECT_ROOT = path.resolve(__dirname, '..');
 // Body parsing
 app.use(express.json({ limit: '2mb' }));
 
-// Static files: frontend
-app.use(express.static(path.join(PROJECT_ROOT, 'public')));
+// Static files: frontend (no-cache for JS/CSS so code changes take effect immediately)
+app.use(express.static(path.join(PROJECT_ROOT, 'public'), {
+  setHeaders(res, filePath) {
+    if (/\.(js|css|html)$/.test(filePath)) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    }
+  },
+}));
 
 // Static files: compiled diagram outputs
 app.use('/flows', express.static(path.join(PROJECT_ROOT, 'flows')));
