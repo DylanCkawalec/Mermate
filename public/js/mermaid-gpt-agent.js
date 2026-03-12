@@ -5,8 +5,31 @@
  *   Phase 1 (run):      planning -> refinement -> preview render -> pause for notes
  *   Phase 2 (finalize): user notes -> optional refinement -> final Max render
  *
- * Includes semantic draft-typing animation for text updates.
+ * Includes:
+ *   - Collapsible phase accordion (sub-steps fold under phase headers)
+ *   - Gamified metrics bar with rolling-number animation
+ *   - Semantic draft-typing animation for text updates
  */
+
+const PHASE_LABELS = {
+  ingest:              'Reading your idea',
+  planning:            'Exploring architectures',
+  refining:            'Refining structure',
+  preview:             'Building preview',
+  incorporating_notes: 'Applying your notes',
+  finalizing:          'Final render',
+  complete:            'Complete',
+};
+
+const METRIC_DEFS = [
+  { key: 'level',    label: 'Level',    format: 'int',      unit: '/ 3' },
+  { key: 'sigma',    label: 'Score',    format: 'float',    unit: '' },
+  { key: 'branches', label: 'Branches', format: 'int',      unit: '' },
+  { key: 'tokens',   label: 'Tokens',   format: 'int',      unit: '' },
+  { key: 'cost',     label: 'Cost',     format: 'currency', unit: '' },
+  { key: 'elapsed',  label: 'Time',     format: 'time',     unit: '' },
+];
+
 window.MermaidAgent = class MermaidAgent {
   constructor(opts) {
     this.input = opts.input;
@@ -21,18 +44,29 @@ window.MermaidAgent = class MermaidAgent {
     this.onComplete = opts.onComplete || (() => {});
     this.onError = opts.onError || (() => {});
     this.onStateChange = opts.onStateChange || (() => {});
+    this.onContinue = opts.onContinue || (() => {});
 
     this._abortController = null;
     this._running = false;
     this._mode = null;
     this._draftText = '';
-    this._originalText = '';  // snapshot before agent starts
+    this._originalText = '';
     this._previewDiagramName = null;
     this._animating = false;
     this._thinkingEffect = null;
     this._thinkingEffectDot = null;
     this._thinkingEffectToken = 0;
     this._thinkingEffectLoader = null;
+
+    this._currentPhaseGroup = null;
+    this._currentPhaseBody = null;
+    this._currentPhaseName = null;
+    this._phaseStepCount = 0;
+    this._phaseStartTime = 0;
+    this._metricsBar = null;
+    this._metricEls = {};
+    this._metricValues = {};
+    this._scroller = typeof NumberScroller !== 'undefined' ? new NumberScroller() : null;
   }
 
   get running() { return this._running; }
@@ -64,6 +98,12 @@ window.MermaidAgent = class MermaidAgent {
     this.notesWrap.hidden = true;
     this._draftText = '';
     this._previewDiagramName = null;
+    this._currentPhaseGroup = null;
+    this._currentPhaseBody = null;
+    this._currentPhaseName = null;
+
+    this._buildMetricsBar();
+    this._openPhase('ingest');
     this._addLog('Starting agent...', 'active');
     this.onStateChange('running');
 
@@ -91,6 +131,7 @@ window.MermaidAgent = class MermaidAgent {
 
     const notes = this.notesInput?.value?.trim() || '';
     this.notesWrap.hidden = true;
+    this._openPhase('finalizing');
     this._addLog(notes ? 'Applying notes and running Max render...' : 'Running final Max render...', 'active');
     this.onStateChange('finalizing');
 
@@ -123,7 +164,6 @@ window.MermaidAgent = class MermaidAgent {
     this.onStateChange('idle');
   }
 
-  /** Stop and restore the textarea to the user's original text. */
   stopAndRestore() {
     this.stop();
     if (this._originalText) {
@@ -131,6 +171,153 @@ window.MermaidAgent = class MermaidAgent {
       this.input.dispatchEvent(new Event('input', { bubbles: true }));
     }
     this.panel.hidden = true;
+  }
+
+  // ---- Metrics bar ----
+
+  _buildMetricsBar() {
+    if (this._metricsBar) this._metricsBar.remove();
+
+    const bar = document.createElement('div');
+    bar.className = 'agent-metrics-bar';
+    this._metricEls = {};
+    this._metricValues = {};
+
+    for (const def of METRIC_DEFS) {
+      const cell = document.createElement('div');
+      cell.className = 'metric-cell';
+      cell.dataset.metric = def.key;
+
+      const label = document.createElement('span');
+      label.className = 'metric-label';
+      label.textContent = def.label;
+
+      const value = document.createElement('span');
+      value.className = 'metric-value';
+      value.textContent = def.format === 'currency' ? '$0.00'
+        : def.format === 'float' ? '0.00'
+        : def.format === 'time' ? '0.0s'
+        : '0';
+
+      cell.append(label, value);
+      if (def.unit) {
+        const unit = document.createElement('span');
+        unit.className = 'metric-unit';
+        unit.textContent = def.unit;
+        cell.appendChild(unit);
+      }
+
+      bar.appendChild(cell);
+      this._metricEls[def.key] = value;
+      this._metricValues[def.key] = 0;
+    }
+
+    this.panelLog.parentNode.insertBefore(bar, this.panelLog);
+    this._metricsBar = bar;
+  }
+
+  _updateMetric(key, newValue) {
+    const el = this._metricEls[key];
+    if (!el) return;
+    const def = METRIC_DEFS.find(d => d.key === key);
+    if (!def) return;
+
+    const oldValue = this._metricValues[key] || 0;
+    this._metricValues[key] = newValue;
+
+    if (oldValue === newValue) return;
+
+    const direction = newValue > oldValue ? 'rising' : 'falling';
+    el.classList.add(direction);
+    setTimeout(() => el.classList.remove(direction), 600);
+
+    if (this._scroller) {
+      this._scroller.animate(el, oldValue, newValue, def.format);
+    } else {
+      el.textContent = this._formatMetric(newValue, def.format);
+    }
+  }
+
+  _formatMetric(value, format) {
+    switch (format) {
+      case 'float': return value.toFixed(2);
+      case 'currency': return '$' + value.toFixed(2);
+      case 'time': return value.toFixed(1) + 's';
+      case 'int':
+      default: return Math.round(value).toLocaleString();
+    }
+  }
+
+  // ---- Phase accordion ----
+
+  _openPhase(phaseName) {
+    if (this._currentPhaseGroup) {
+      this._closeCurrentPhase();
+    }
+
+    this._currentPhaseName = phaseName;
+    this._phaseStepCount = 0;
+    this._phaseStartTime = Date.now();
+
+    const group = document.createElement('div');
+    group.className = 'phase-group phase-active';
+    group.dataset.phase = phaseName;
+
+    const header = document.createElement('div');
+    header.className = 'phase-header';
+
+    const dot = document.createElement('span');
+    dot.className = 'phase-dot';
+
+    const label = document.createElement('span');
+    label.className = 'phase-label';
+    label.textContent = PHASE_LABELS[phaseName] || phaseName;
+
+    const badge = document.createElement('span');
+    badge.className = 'phase-badge';
+    badge.textContent = '';
+
+    const time = document.createElement('span');
+    time.className = 'phase-time';
+    time.textContent = '';
+
+    const chevron = document.createElement('span');
+    chevron.className = 'phase-chevron';
+    chevron.textContent = '\u25BC';
+
+    header.append(dot, label, badge, time, chevron);
+    header.addEventListener('click', () => {
+      group.classList.toggle('collapsed');
+    });
+
+    const body = document.createElement('div');
+    body.className = 'phase-body';
+
+    group.append(header, body);
+    this.panelLog.appendChild(group);
+    this.panelLog.scrollTop = this.panelLog.scrollHeight;
+
+    this._currentPhaseGroup = group;
+    this._currentPhaseBody = body;
+  }
+
+  _closeCurrentPhase(status = 'done') {
+    if (!this._currentPhaseGroup) return;
+
+    const elapsed = ((Date.now() - this._phaseStartTime) / 1000).toFixed(1);
+    const badge = this._currentPhaseGroup.querySelector('.phase-badge');
+    const time = this._currentPhaseGroup.querySelector('.phase-time');
+
+    if (badge) badge.textContent = this._phaseStepCount > 0 ? `${this._phaseStepCount} steps` : '';
+    if (time) time.textContent = `${elapsed}s`;
+
+    this._currentPhaseGroup.classList.remove('phase-active');
+    this._currentPhaseGroup.classList.add(status === 'error' ? 'phase-error' : 'phase-done');
+    this._currentPhaseGroup.classList.add('collapsed');
+  }
+
+  _getLogTarget() {
+    return this._currentPhaseBody || this.panelLog;
   }
 
   // ---- SSE streaming ----
@@ -169,54 +356,65 @@ window.MermaidAgent = class MermaidAgent {
 
   async _handleEvent(event) {
     switch (event.type) {
-      // ---- Primary display path: narration events from terminal-narrator ----
-      // These are the high-quality, compressed terminal messages. They replace
-      // the noisy raw stage/thinking dump as the primary visible output.
       case 'narration':
+        this._phaseStepCount++;
         this._addNarrationLog(event.message, event.source, event.eventType);
+        if (event.elapsed) {
+          this._updateMetric('elapsed', event.elapsed / 1000);
+        }
         break;
 
-      // ---- Stage events: used for state tracking only when no narration ----
-      // Still shown if narration is not active (e.g., first event before
-      // the narrator has wired up), but suppressed once narration is flowing.
       case 'stage':
+        if (event.stage && event.stage !== this._currentPhaseName) {
+          this._openPhase(event.stage);
+        }
         if (!this._narratorActive) {
           this._markPreviousLogDone();
           this._addLog(event.message, 'active');
         }
         if (event.stage === 'ingest' || event.stage === 'planning') {
-          this._narratorActive = false; // reset at run start
+          this._narratorActive = false;
         }
         break;
 
-      // ---- Thinking events: shown as expert badges in the audit expand ----
       case 'thinking':
-        this._narratorActive = true; // narrator is now flowing
+        this._narratorActive = true;
+        this._phaseStepCount++;
         this._addThinkingLog(event.role, event.summary, event.domain);
         break;
 
-      // ---- Heartbeat / telemetry / audit: hidden from visible terminal ----
+      case 'phase_metric':
+        this._applyPhaseMetric(event);
+        break;
+
       case 'heartbeat':
+        break;
+
       case 'telemetry':
+        this._applyTelemetry(event);
+        break;
+
       case 'audit_summary':
         break;
 
-      // ---- Analysis: append to expandable audit detail only ----
       case 'analysis':
         this._auditDetail = this._auditDetail || [];
         this._auditDetail.push(`quality=${event.quality} · completeness=${event.completeness} · maturity=${event.maturity}`);
+        if (typeof event.quality === 'number') {
+          this._updateMetric('sigma', event.quality);
+        }
         break;
 
       case 'draft_update':
         await this._animateDraftUpdate(event.original || this.input.value, event.text);
         this._draftText = event.text;
-        // If narrator isn't active yet, show a fallback log entry
         if (!this._narratorActive) {
           this._addLog(event.reason || 'Architecture updated', 'done');
         }
         break;
 
       case 'preview_render':
+        this._phaseStepCount++;
         if (event.success) {
           if (!this._narratorActive) {
             this._addLog(`Preview: ${event.metrics?.nodeCount || '?'} nodes, ${event.metrics?.edgeCount || '?'} edges`, 'done');
@@ -229,7 +427,8 @@ window.MermaidAgent = class MermaidAgent {
 
       case 'preview_ready':
         this._markPreviousLogDone();
-        this._addNarrationLog('◈ Preview ready  —  add notes or finalize', 'system', 'preview_ready');
+        this._closeCurrentPhase();
+        this._addNarrationLog('Preview ready  —  add notes or finalize', 'system', 'preview_ready');
         this._draftText = event.draft_text || this.input.value;
         this._previewDiagramName = event.diagram_name || null;
         this._showNotesUI();
@@ -237,21 +436,24 @@ window.MermaidAgent = class MermaidAgent {
         break;
 
       case 'final_render':
+        this._phaseStepCount++;
         if (event.success) {
           this._addNarrationLog(
-            `✓ Final render complete  —  ${event.metrics?.nodeCount || '?'} nodes, ${event.metrics?.subgraphCount || 0} subgraphs`,
+            `Final render complete  —  ${event.metrics?.nodeCount || '?'} nodes, ${event.metrics?.subgraphCount || 0} subgraphs`,
             'system', 'render:complete',
           );
           this.onRenderResult(event);
+          this._showContinuationCTA('tla', 'Diagram complete', 'Continue to TLA+ Specification');
         } else {
-          this._addNarrationLog(`✗ Render failed  —  ${(event.error || 'unknown').slice(0, 45)}`, 'system', 'render:failed');
+          this._addNarrationLog(`Render failed  —  ${(event.error || 'unknown').slice(0, 45)}`, 'system', 'render:failed');
           this.onError(event.error || 'Render failed — try a simpler description or check your model connection');
         }
         break;
 
       case 'done':
         this._markPreviousLogDone();
-        this._addNarrationLog('✓ Agent workflow complete', 'system', 'done');
+        this._closeCurrentPhase();
+        this._addNarrationLog('Agent workflow complete', 'system', 'done');
         this._running = false;
         this._narratorActive = false;
         this.onComplete(event.final_text);
@@ -260,10 +462,67 @@ window.MermaidAgent = class MermaidAgent {
 
       case 'error':
         this._markPreviousLogDone();
-        this._addNarrationLog(`✗ ${event.message}`, 'system', 'sys:error');
+        this._closeCurrentPhase('error');
+        this._addNarrationLog(`${event.message}`, 'system', 'sys:error');
         this.onError(event.message);
         break;
     }
+  }
+
+  // ---- Metrics from server events ----
+
+  _applyPhaseMetric(m) {
+    if (m.level != null)            this._updateMetric('level', m.level);
+    if (m.sigma != null)            this._updateMetric('sigma', m.sigma);
+    if (m.branches_active != null)  this._updateMetric('branches', m.branches_active);
+    if (m.tokens_in != null || m.tokens_out != null) {
+      this._updateMetric('tokens', (m.tokens_in || 0) + (m.tokens_out || 0));
+    }
+    if (m.cost != null)             this._updateMetric('cost', m.cost);
+    if (m.elapsed_ms != null)       this._updateMetric('elapsed', m.elapsed_ms / 1000);
+  }
+
+  _applyTelemetry(t) {
+    if (t.totalTokensIn != null || t.totalTokensOut != null) {
+      this._updateMetric('tokens', (t.totalTokensIn || 0) + (t.totalTokensOut || 0));
+    }
+    if (t.totalCost != null) this._updateMetric('cost', t.totalCost);
+    if (t.wallClockMs != null) this._updateMetric('elapsed', t.wallClockMs / 1000);
+  }
+
+  // ---- Continuation CTA ----
+
+  _showContinuationCTA(nextStage, label, buttonText) {
+    this._removeContinuationCTA();
+
+    const wrap = document.createElement('div');
+    wrap.className = 'agent-continuation';
+    wrap.dataset.continuationStage = nextStage;
+
+    const span = document.createElement('span');
+    span.className = 'continuation-label';
+    span.textContent = label;
+
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-continuation';
+    btn.dataset.nextStage = nextStage;
+    btn.textContent = buttonText;
+    btn.addEventListener('click', () => {
+      this._removeContinuationCTA();
+      this.onContinue(nextStage);
+    });
+
+    wrap.append(span, btn);
+    this.panelLog.parentNode.insertBefore(wrap, this.notesWrap);
+    this.panelLog.scrollTop = this.panelLog.scrollHeight;
+  }
+
+  showTsContinuation() {
+    this._showContinuationCTA('ts', 'TLA+ verified', 'Continue to TypeScript Runtime');
+  }
+
+  _removeContinuationCTA() {
+    this.panel.querySelectorAll('.agent-continuation').forEach(el => el.remove());
   }
 
   // ---- Pre-Max notes UI ----
@@ -286,14 +545,12 @@ window.MermaidAgent = class MermaidAgent {
     const oldWords = this._tokenize(oldText || '');
     const newWords = this._tokenize(newText);
 
-    // Build a classification for each word in the new text
     const oldSet = new Set(oldWords.map(w => w.toLowerCase()));
     const classified = newWords.map(w => ({
       word: w,
       preserved: oldSet.has(w.toLowerCase()),
     }));
 
-    // Create animation overlay
     const wrap = textarea.closest('.copilot-wrap') || textarea.parentElement;
     const overlay = document.createElement('div');
     overlay.className = 'agent-typing-overlay';
@@ -308,7 +565,6 @@ window.MermaidAgent = class MermaidAgent {
     textarea.style.opacity = '0';
     wrap.appendChild(overlay);
 
-    // Animate words appearing
     const BATCH = 8;
     const DELAY = 12;
     const colors = ['#e8820c', '#4f46e5', '#db2777'];
@@ -327,7 +583,6 @@ window.MermaidAgent = class MermaidAgent {
         overlay.appendChild(span);
       }
 
-      // Reveal batch
       await this._frame();
       const spans = overlay.querySelectorAll('span');
       for (let j = Math.max(0, i); j < Math.min(spans.length, i + BATCH); j++) {
@@ -336,7 +591,6 @@ window.MermaidAgent = class MermaidAgent {
       if (DELAY > 0) await this._sleep(DELAY);
     }
 
-    // Settle: transition all to black
     await this._sleep(120);
     overlay.querySelectorAll('span').forEach(s => {
       s.style.color = 'var(--text)';
@@ -345,7 +599,6 @@ window.MermaidAgent = class MermaidAgent {
 
     await this._sleep(250);
 
-    // Swap: set the real textarea and remove overlay
     textarea.value = newText;
     textarea.dispatchEvent(new Event('input', { bubbles: true }));
     textarea.style.opacity = '1';
@@ -373,6 +626,7 @@ window.MermaidAgent = class MermaidAgent {
   // ---- Log helpers ----
 
   _addLog(text, state = '') {
+    const target = this._getLogTarget();
     const entry = document.createElement('div');
     entry.className = 'agent-log-entry' + (state ? ' ' + state : '');
     const dot = document.createElement('span');
@@ -383,7 +637,7 @@ window.MermaidAgent = class MermaidAgent {
     label.textContent = text;
 
     entry.append(dot, label);
-    this.panelLog.appendChild(entry);
+    target.appendChild(entry);
     this.panelLog.scrollTop = this.panelLog.scrollHeight;
 
     if (state === 'active') {
@@ -391,19 +645,12 @@ window.MermaidAgent = class MermaidAgent {
     }
   }
 
-  /**
-   * Add a narration log entry — the primary visible terminal output.
-   * Narration entries are the distilled, premium terminal messages from
-   * the terminal-narrator service or the system itself.
-   *
-   * source: 'template' | 'oss' | 'system'
-   * eventType: the audit event type that triggered this narration
-   */
   _addNarrationLog(message, source = 'system', eventType = '') {
     if (!message) return;
 
-    // Collapse any active thinking entries
-    this.panelLog.querySelectorAll('.agent-log-entry.thinking').forEach(e => {
+    const target = this._getLogTarget();
+
+    target.querySelectorAll('.agent-log-entry.thinking').forEach(e => {
       e.classList.remove('thinking');
       e.classList.add('done');
     });
@@ -422,7 +669,6 @@ window.MermaidAgent = class MermaidAgent {
     const dot = document.createElement('span');
     dot.className = 'agent-log-dot';
 
-    // Source badge for OSS-summarized messages
     const sourceBadge = source === 'oss' ? (() => {
       const b = document.createElement('span');
       b.className = 'narration-source-badge';
@@ -435,12 +681,14 @@ window.MermaidAgent = class MermaidAgent {
     text.textContent = message;
 
     entry.append(dot, ...(sourceBadge ? [sourceBadge] : []), text);
-    this.panelLog.appendChild(entry);
+    target.appendChild(entry);
     this.panelLog.scrollTop = this.panelLog.scrollHeight;
   }
 
   _addThinkingLog(role, summary, domain) {
-    this.panelLog.querySelectorAll('.agent-log-entry.thinking').forEach(e => {
+    const target = this._getLogTarget();
+
+    target.querySelectorAll('.agent-log-entry.thinking').forEach(e => {
       e.classList.remove('thinking');
       e.classList.add('done');
     });
@@ -463,13 +711,14 @@ window.MermaidAgent = class MermaidAgent {
     text.textContent = summary || '';
 
     entry.append(dot, badge, text);
-    this.panelLog.appendChild(entry);
+    target.appendChild(entry);
     this.panelLog.scrollTop = this.panelLog.scrollHeight;
   }
 
   _markPreviousLogDone() {
     this._teardownThinkingEffect();
-    this.panelLog.querySelectorAll('.agent-log-entry.active').forEach(e => {
+    const target = this._getLogTarget();
+    target.querySelectorAll('.agent-log-entry.active').forEach(e => {
       e.classList.remove('active');
       e.classList.add('done');
     });

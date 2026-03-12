@@ -360,6 +360,22 @@ router.post('/agent/run', async (req, res) => {
       stage: 'planning',
     });
 
+    // Emit phase_metric after planning batch
+    {
+      const runTotals = telemetry.getRunSummary(runId) || {};
+      sendEvent('phase_metric', {
+        level: 0,
+        branches_active: scoredPlans.length,
+        branches_pruned: planRoles.length - scoredPlans.length,
+        sigma: scoredPlans.length > 0 ? +(scoredPlans[0]?.score || 0).toFixed(3) : 0,
+        budget_used: planRoles.length,
+        tokens_in: runTotals.totalTokensIn || 0,
+        tokens_out: runTotals.totalTokensOut || 0,
+        cost: runTotals.totalCost || 0,
+        elapsed_ms: Date.now() - planCallStart,
+      });
+    }
+
     // Select best plan by combined quality+completeness score
     let draftText = startText;
     if (scoredPlans.length > 0) {
@@ -480,6 +496,21 @@ router.post('/agent/run', async (req, res) => {
 
     auditTracker.emit(auditId, 'got:level_complete', { level: 1, stage: 'refining', skipped: skipRefinement });
 
+    // Emit phase_metric after refinement
+    {
+      const runTotals = telemetry.getRunSummary(runId) || {};
+      const refProfile = analyze(draftText, 'idea');
+      sendEvent('phase_metric', {
+        level: 1,
+        sigma: +(refProfile.qualityScore || 0).toFixed(3),
+        branches_active: scoredPlans.length,
+        tokens_in: runTotals.totalTokensIn || 0,
+        tokens_out: runTotals.totalTokensOut || 0,
+        cost: runTotals.totalCost || 0,
+        elapsed_ms: Date.now() - planCallStart,
+      });
+    }
+
     // ---- Validation / preview render (cheap mode) ----
     if (abort.signal.aborted) return;
     auditTracker.emit(auditId, 'agent:stage_enter', { stage: 'preview' });
@@ -538,6 +569,21 @@ router.post('/agent/run', async (req, res) => {
     }
 
     auditTracker.emit(auditId, 'got:level_complete', { level: 2, stage: 'preview' });
+
+    // Emit phase_metric after preview render
+    {
+      const runTotals = telemetry.getRunSummary(runId) || {};
+      sendEvent('phase_metric', {
+        level: 2,
+        sigma: previewData.success ? 1 : 0,
+        sv: previewData.success ? 1 : 0,
+        branches_active: scoredPlans.length,
+        tokens_in: runTotals.totalTokensIn || 0,
+        tokens_out: runTotals.totalTokensOut || 0,
+        cost: runTotals.totalCost || 0,
+        elapsed_ms: Date.now() - planCallStart,
+      });
+    }
 
     const runSummary = telemetry.getRunSummary(runId);
     if (runSummary) {
@@ -683,6 +729,12 @@ router.post('/agent/finalize', async (req, res) => {
         maxMode: true,
       });
       auditTracker.emit(finalizeAuditId, 'agent:convergence', { pct: 100 });
+      sendEvent('phase_metric', {
+        level: 3,
+        sigma: 1,
+        sv: 1,
+        elapsed_ms: Date.now() - (req._agentStartTime || Date.now()),
+      });
       sendEvent('final_render', {
         success: true,
         diagram_name: finalData.diagram_name,

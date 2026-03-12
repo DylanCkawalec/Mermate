@@ -325,9 +325,15 @@
     document.querySelectorAll('.mode-btn').forEach(btn => {
       const btnMode = btn.dataset.mode;
       const unlocked = orchestrator.isUnlocked(btnMode);
+      const wasHidden = btn.hidden;
       btn.hidden = !unlocked;
       btn.classList.toggle('active', btnMode === mode);
       btn.setAttribute('aria-checked', btnMode === mode ? 'true' : 'false');
+
+      if (wasHidden && unlocked && (btnMode === 'tla' || btnMode === 'ts')) {
+        btn.classList.add('newly-unlocked');
+        setTimeout(() => btn.classList.remove('newly-unlocked'), 800);
+      }
 
       const badge = btn.querySelector('.stage-badge');
       if (badge) {
@@ -343,6 +349,10 @@
           badge.hidden = false;
           badge.textContent = '\u2713';
           badge.className = 'stage-badge stage-pass';
+        } else if (unlocked && !orchestrator.isCompleted(btnMode) && (btnMode === 'tla' || btnMode === 'ts')) {
+          badge.hidden = false;
+          badge.textContent = 'Ready';
+          badge.className = 'stage-badge stage-ready';
         } else {
           badge.hidden = true;
         }
@@ -1169,6 +1179,10 @@
       if (data.progressionUpdate) {
         orchestrator.updateFromBackend(data.progressionUpdate);
       }
+
+      if (data.sany?.valid && agent && typeof agent.showTsContinuation === 'function') {
+        agent.showTsContinuation();
+      }
     } catch (err) {
       if (tlaResultsEl) {
         if (artifactResults) artifactResults.hidden = false;
@@ -1409,6 +1423,11 @@
           showResult(event.paths, event.diagram_name, event.run_id);
           sidebar.add({ name: event.diagram_name, type: event.diagram_type || 'flowchart', paths: event.paths, timestamp: new Date().toLocaleString(), source: input.value, run_id: event.run_id || null });
         }
+      },
+      onContinue: (stage) => {
+        if (!orchestrator.isUnlocked(stage)) return;
+        setMode(stage);
+        setTimeout(() => render(), 300);
       },
       onComplete: () => { agentState = 'idle'; btnAgentRun.textContent = 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; input.readOnly = false; syncUiGuidance(); },
       onError: (msg) => { agentState = 'idle'; notesDirty = false; showError(msg); btnAgentRun.textContent = 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; input.readOnly = false; setLoading(false); syncUiGuidance(); },

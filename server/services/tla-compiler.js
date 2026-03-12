@@ -401,9 +401,242 @@ function computeTlaMetrics(variables, actions, invariants, facts) {
   };
 }
 
+// ---- Subsystem-Level Splitting ---------------------------------------------
+
+/**
+ * Split a large architecture into independent TLA+ submodules by boundary.
+ * Each boundary gets its own self-contained module with only its entities,
+ * internal actions, and relevant invariants. A master module EXTENDS all
+ * submodules and defines cross-boundary actions + the global Spec.
+ *
+ * Falls back to the single-module path when boundaries < 2.
+ *
+ * @param {object} facts
+ * @param {object} plan
+ * @param {string} masterModuleName
+ * @returns {{ submodules: Array<{name, tlaSource, cfgSource}>, masterModule: {name, tlaSource, cfgSource} }}
+ */
+function factsToTlaSubmodules(facts, plan, masterModuleName) {
+  const boundaries = facts?.boundaries || [];
+
+  if (boundaries.length < 2) {
+    const result = factsToTlaModule(facts, plan, masterModuleName);
+    const cfg = factsToTlaCfg(result.invariants, masterModuleName);
+    return {
+      submodules: [],
+      masterModule: { name: masterModuleName, tlaSource: result.tlaSource, cfgSource: cfg },
+    };
+  }
+
+  const entities = facts?.entities || [];
+  const relationships = facts?.relationships || [];
+  const failurePaths = facts?.failurePaths || [];
+
+  const entityMap = {};
+  for (const e of entities) {
+    entityMap[e.name] = mapEntityToVariable(e);
+  }
+
+  const memberToBoundary = new Map();
+  for (const b of boundaries) {
+    for (const member of (b.members || [])) {
+      memberToBoundary.set(member, b.name);
+    }
+  }
+
+  const boundaryEntities = new Map();
+  const unboundedEntities = [];
+  for (const e of entities) {
+    const bName = memberToBoundary.get(e.name) || memberToBoundary.get(_sanitizeId(e.name));
+    if (bName) {
+      if (!boundaryEntities.has(bName)) boundaryEntities.set(bName, []);
+      boundaryEntities.get(bName).push(e);
+    } else {
+      unboundedEntities.push(e);
+    }
+  }
+
+  const submodules = [];
+
+  for (const [bName, bEntities] of boundaryEntities) {
+    const bEntityNames = new Set(bEntities.map(e => e.name));
+    const bEntityIds = new Set(bEntities.map(e => _sanitizeId(e.name)));
+    const subName = `${masterModuleName}_${_sanitizeId(bName)}`;
+
+    const bRels = relationships.filter(r => bEntityNames.has(r.from) && bEntityNames.has(r.to));
+    const bFPs = failurePaths.filter(fp => bEntityNames.has(fp.trigger) || bEntityNames.has(fp.handler));
+
+    const subFacts = {
+      entities: bEntities,
+      relationships: bRels,
+      boundaries: [],
+      failurePaths: bFPs,
+    };
+
+    const result = factsToTlaModule(subFacts, plan, subName);
+    const cfg = factsToTlaCfg(result.invariants, subName);
+
+    submodules.push({
+      name: subName,
+      boundary: bName,
+      tlaSource: result.tlaSource,
+      cfgSource: cfg,
+      variables: result.variables,
+      actions: result.actions,
+      invariants: result.invariants,
+    });
+  }
+
+  const allSubVars = new Set();
+  const allSubActions = new Set();
+  for (const sub of submodules) {
+    for (const v of sub.variables) allSubVars.add(v.id);
+    for (const a of sub.actions) allSubActions.add(a.actionName);
+  }
+
+  const crossRels = relationships.filter(r => {
+    const fromB = memberToBoundary.get(r.from);
+    const toB = memberToBoundary.get(r.to);
+    return fromB !== toB || !fromB;
+  });
+
+  const masterVars = unboundedEntities.map(e => entityMap[e.name]).filter(v => v && v.isStateful);
+  const crossActions = crossRels.map(r => mapRelationshipToAction(r, entityMap));
+  const crossFPs = failurePaths.filter(fp => {
+    const tB = memberToBoundary.get(fp.trigger);
+    const hB = memberToBoundary.get(fp.handler);
+    return tB !== hB || !tB;
+  });
+  const crossInvariants = crossFPs.map((fp, i) => mapFailurePathToInvariant(fp, entityMap, i));
+
+  const allVariables = [];
+  for (const sub of submodules) allVariables.push(...sub.variables);
+  allVariables.push(...masterVars);
+
+  const allActions = [];
+  for (const sub of submodules) allActions.push(...sub.actions);
+  allActions.push(...crossActions);
+
+  const allInvariants = [];
+  for (const sub of submodules) allInvariants.push(...sub.invariants);
+  allInvariants.push(...crossInvariants);
+
+  const masterLines = [];
+  const date = new Date().toISOString().split('T')[0];
+
+  masterLines.push(`${'-'.repeat(22)} MODULE ${masterModuleName} ${'-'.repeat(22)}`);
+  masterLines.push(`(${'*'.repeat(74)}`);
+  masterLines.push(` * ${masterModuleName} — Master Specification (boundary-split)`);
+  masterLines.push(` * Date: ${date}`);
+  masterLines.push(` * Submodules: ${submodules.map(s => s.name).join(', ')}`);
+  masterLines.push(` ${'*'.repeat(74)})`);
+  masterLines.push(``);
+  masterLines.push(`EXTENDS Naturals, Sequences, FiniteSets`);
+  masterLines.push(``);
+
+  masterLines.push(`\\* All variables across all subsystems`);
+  masterLines.push(`VARIABLES`);
+  const allVarDecls = allVariables.map((v, i) => {
+    const comma = i < allVariables.length - 1 ? ',' : '';
+    return `  ${v.id}${comma}    \\* ${v.name} (${v.type})`;
+  });
+  masterLines.push(...allVarDecls);
+  masterLines.push(``);
+  masterLines.push(`vars == <<${allVariables.map(v => v.id).join(', ')}>>`);
+  masterLines.push(``);
+
+  for (const v of allVariables) {
+    masterLines.push(`${v.id}_States == ${v.stateSet}`);
+  }
+  masterLines.push(``);
+
+  masterLines.push(`TypeInvariant ==`);
+  for (const v of allVariables) {
+    masterLines.push(`  /\\ ${v.id} \\in ${v.id}_States`);
+  }
+  masterLines.push(``);
+
+  for (const inv of allInvariants) {
+    masterLines.push(`${inv.name} ==`);
+    masterLines.push(`  ${inv.tlaExpr}`);
+    masterLines.push(``);
+  }
+
+  masterLines.push(`MasterSafety ==`);
+  masterLines.push(`  /\\ TypeInvariant`);
+  for (const inv of allInvariants) {
+    masterLines.push(`  /\\ ${inv.name}`);
+  }
+  masterLines.push(``);
+
+  masterLines.push(`Init ==`);
+  for (const v of allVariables) {
+    masterLines.push(`  /\\ ${v.id} = ${v.initState}`);
+  }
+  masterLines.push(``);
+
+  masterLines.push(`\\* Cross-boundary actions`);
+  for (const action of crossActions) {
+    masterLines.push(``);
+    masterLines.push(`${action.actionName} ==`);
+    masterLines.push(`  /\\ ${action.precondition}`);
+    masterLines.push(`  /\\ ${action.fromEffect}`);
+    masterLines.push(`  /\\ ${action.toEffect}`);
+    const unchanged = allVariables
+      .filter(v => v.id !== action.fromId && v.id !== action.toId)
+      .map(v => v.id);
+    if (unchanged.length > 0) {
+      masterLines.push(`  /\\ UNCHANGED <<${unchanged.join(', ')}>>`);
+    }
+  }
+  masterLines.push(``);
+
+  masterLines.push(`Next ==`);
+  if (allActions.length > 0) {
+    for (const a of allActions) {
+      masterLines.push(`  \\/ ${a.actionName}`);
+    }
+  } else {
+    masterLines.push(`  UNCHANGED vars`);
+  }
+  masterLines.push(``);
+
+  masterLines.push(`Spec == Init /\\ [][Next]_vars`);
+  masterLines.push(``);
+  masterLines.push(`THEOREM Spec => []MasterSafety`);
+  masterLines.push(``);
+  masterLines.push(`${'='.repeat(68)}`);
+
+  const masterTlaSource = masterLines.join('\n');
+  const masterCfgSource = factsToTlaCfg(allInvariants, masterModuleName);
+
+  logger.info('tla_compiler.submodules_generated', {
+    masterModuleName,
+    submoduleCount: submodules.length,
+    totalVariables: allVariables.length,
+    crossActions: crossActions.length,
+    crossInvariants: crossInvariants.length,
+  });
+
+  return {
+    submodules: submodules.map(s => ({
+      name: s.name,
+      boundary: s.boundary,
+      tlaSource: s.tlaSource,
+      cfgSource: s.cfgSource,
+    })),
+    masterModule: {
+      name: masterModuleName,
+      tlaSource: masterTlaSource,
+      cfgSource: masterCfgSource,
+    },
+  };
+}
+
 module.exports = {
   factsToTlaModule,
   factsToTlaCfg,
+  factsToTlaSubmodules,
   mapEntityToVariable,
   mapRelationshipToAction,
   mapFailurePathToInvariant,

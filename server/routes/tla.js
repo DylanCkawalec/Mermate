@@ -155,11 +155,6 @@ router.post('/render/tla', async (req, res) => {
 
     logger.info('tla.compile_start', { moduleName, run_id: run_id.slice(0, 8), entities: facts.entities.length });
 
-    // Phase: COMPILE — deterministic mapping
-    const { tlaSource, variables, actions, invariants } = tlaCompiler.factsToTlaModule(facts, plan, moduleName);
-    const cfgSource = tlaCompiler.factsToTlaCfg(invariants, moduleName);
-
-    // Phase: VALIDATE — SANY + TLC with optional repair
     const repairFn = async (source, errors) => {
       const { system } = buildTlaRepairPrompt();
       const userPrompt = buildTlaRepairUserPrompt(source, errors);
@@ -176,13 +171,93 @@ router.post('/render/tla', async (req, res) => {
       return null;
     };
 
-    const validation = await tlaValidator.fullValidation(tlaSource, cfgSource, tlaDir, moduleName, repairFn);
+    const boundaries = facts?.boundaries || [];
+    const useSplit = boundaries.length >= 2;
+    let validation, cfgSource, variables, actions, invariants;
+    let submoduleResults = [];
 
-    // Phase: PERSIST — write artifacts
+    if (useSplit) {
+      // Subsystem-level splitting: one .tla per boundary
+      logger.info('tla.split_mode', { boundaries: boundaries.length, moduleName });
+      const splitResult = tlaCompiler.factsToTlaSubmodules(facts, plan, moduleName);
+
+      const subDir = path.join(tlaDir, 'tla');
+      await fsp.mkdir(subDir, { recursive: true });
+
+      // Validate each submodule with SANY independently (parallel)
+      const subValidations = await Promise.all(splitResult.submodules.map(async (sub) => {
+        const subSany = await tlaValidator.validateWithRepair(
+          sub.tlaSource, subDir, sub.name, repairFn,
+        );
+        await fsp.writeFile(path.join(subDir, `${sub.name}.tla`), subSany.tlaSource, 'utf8');
+        await fsp.writeFile(path.join(subDir, `${sub.name}.cfg`), sub.cfgSource, 'utf8');
+        return { name: sub.name, boundary: sub.boundary, sany: subSany.sany };
+      }));
+
+      submoduleResults = subValidations;
+
+      // Write and validate master module with TLC
+      const master = splitResult.masterModule;
+      cfgSource = master.cfgSource;
+      validation = await tlaValidator.fullValidation(master.tlaSource, cfgSource, tlaDir, moduleName, repairFn);
+
+      const masterResult = tlaCompiler.factsToTlaModule(facts, plan, moduleName);
+      variables = masterResult.variables;
+      actions = masterResult.actions;
+      invariants = masterResult.invariants;
+    } else {
+      // Single-module path (no splitting)
+      const result = tlaCompiler.factsToTlaModule(facts, plan, moduleName);
+      variables = result.variables;
+      actions = result.actions;
+      invariants = result.invariants;
+      cfgSource = tlaCompiler.factsToTlaCfg(invariants, moduleName);
+      validation = await tlaValidator.fullValidation(result.tlaSource, cfgSource, tlaDir, moduleName, repairFn);
+    }
+
+    // Phase: PERSIST — write artifacts to flows/
     const tlaPath = path.join(tlaDir, `${moduleName}.tla`);
     const cfgPath = path.join(tlaDir, `${moduleName}.cfg`);
     await fsp.writeFile(tlaPath, validation.tlaSource, 'utf8');
     await fsp.writeFile(cfgPath, cfgSource, 'utf8');
+
+    // Phase: TLA-DUMP — separate copy for archival
+    const TLA_DUMP_DIR = path.join(PROJECT_ROOT, 'tla-dump');
+    const dumpDir = path.join(TLA_DUMP_DIR, name);
+    try {
+      // Archive existing dump if it exists
+      try {
+        await fsp.access(dumpDir);
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const archiveDir = path.join(TLA_DUMP_DIR, '_archive', `${name}_${ts}`);
+        await fsp.mkdir(path.dirname(archiveDir), { recursive: true });
+        await fsp.rename(dumpDir, archiveDir);
+        logger.info('tla.archive_old', { from: name, to: archiveDir });
+      } catch { /* no previous dump */ }
+
+      await fsp.mkdir(dumpDir, { recursive: true });
+      await fsp.writeFile(path.join(dumpDir, `${moduleName}.tla`), validation.tlaSource, 'utf8');
+      await fsp.writeFile(path.join(dumpDir, `${moduleName}.cfg`), cfgSource, 'utf8');
+      if (validation.tracePath) {
+        try {
+          const traceData = await fsp.readFile(path.join(tlaDir, 'trace.json'), 'utf8');
+          await fsp.writeFile(path.join(dumpDir, 'trace.json'), traceData, 'utf8');
+        } catch { /* trace copy is best-effort */ }
+      }
+      if (useSplit && submoduleResults.length > 0) {
+        const subDumpDir = path.join(dumpDir, 'submodules');
+        await fsp.mkdir(subDumpDir, { recursive: true });
+        const srcSubDir = path.join(tlaDir, 'tla');
+        for (const sub of submoduleResults) {
+          try {
+            const src = await fsp.readFile(path.join(srcSubDir, `${sub.name}.tla`), 'utf8');
+            await fsp.writeFile(path.join(subDumpDir, `${sub.name}.tla`), src, 'utf8');
+          } catch { /* best-effort */ }
+        }
+      }
+    } catch (err) {
+      logger.warn('tla.dump_failed', { error: err.message });
+    }
 
     // Compute quality metrics
     const metrics = tlaCompiler.computeTlaMetrics(variables, actions, invariants, facts);
@@ -191,6 +266,11 @@ router.post('/render/tla', async (req, res) => {
     metrics.tlcViolations = validation.tlc.violations.length;
     metrics.tlcStatesExplored = validation.tlc.statesExplored;
     metrics.tlcWallClockMs = validation.tlc.wallClockMs;
+    if (useSplit) {
+      metrics.splitMode = true;
+      metrics.submoduleCount = submoduleResults.length;
+      metrics.submodulesSanyValid = submoduleResults.filter(s => s.sany?.valid).length;
+    }
 
     // Update run JSON with TLA+ metrics
     try {
@@ -207,6 +287,8 @@ router.post('/render/tla', async (req, res) => {
 
     logger.info('tla.compile_complete', {
       moduleName,
+      splitMode: useSplit,
+      submodules: submoduleResults.length,
       sanyValid: validation.sany.valid,
       repairAttempts: validation.sany.repairAttempts,
       tlcChecked: validation.tlc.checked,
@@ -214,6 +296,10 @@ router.post('/render/tla', async (req, res) => {
       statesExplored: validation.tlc.statesExplored,
       wallClockMs: validation.tlc.wallClockMs,
     });
+
+    const tlaConfidence = validation.sany.valid
+      ? (validation.tlc.success ? 0.95 : 0.7)
+      : 0.3;
 
     // Phase: OUTPUT — structured response
     res.json({
@@ -232,10 +318,16 @@ router.post('/render/tla', async (req, res) => {
         timedOut: validation.tlc.timedOut,
       },
       metrics,
+      submodules: useSplit ? submoduleResults.map(s => ({
+        name: s.name,
+        boundary: s.boundary,
+        sany: s.sany,
+      })) : undefined,
       paths: {
         tla: `/flows/${name}/${moduleName}.tla`,
         cfg: `/flows/${name}/${moduleName}.cfg`,
         trace: validation.tracePath ? `/flows/${name}/trace.json` : null,
+        dump: `/tla-dump/${name}/`,
       },
       progressionUpdate: {
         stage: 'tla',
@@ -243,9 +335,7 @@ router.post('/render/tla', async (req, res) => {
           ? ['idea', 'md', 'mmd', 'tla', 'ts']
           : ['idea', 'md', 'mmd', 'tla'],
         nextRecommended: validation.sany.valid ? 'ts' : undefined,
-        confidence: validation.sany.valid
-          ? (validation.tlc.success ? 0.95 : 0.7)
-          : 0.3,
+        confidence: tlaConfidence,
       },
     });
   } catch (err) {

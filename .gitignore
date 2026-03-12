@@ -14,6 +14,7 @@ archs/*
 prompt-example.md
 runs/
 vendor/
+tla-dump/
 
 # Ignore experiment outputs
 mermate-arch-GoT.txt
