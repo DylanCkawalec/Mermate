@@ -24,7 +24,6 @@ window.MermaidCopilot = class MermaidCopilot {
 
     // Timers
     this._idleTimer = null;
-    this._healthTimer = null;
 
     // Flags
     this.isSuggesting = false;
@@ -47,6 +46,7 @@ window.MermaidCopilot = class MermaidCopilot {
     // Health cache
     this._enhancerHealthy = false;
     this._lastHealthCheck = 0;
+    this._healthCheckPromise = null;
 
     // AbortControllers
     this._suggestAC = null;
@@ -55,8 +55,12 @@ window.MermaidCopilot = class MermaidCopilot {
     // InputProfile from /api/analyze (updated on debounced input)
     this._profile = null;
     this._analyzeTimer = null;
+    this._analyzeAC = null;
     this._lastAnalyzedHash = '';
+    this._lastAnalyzeAt = 0;
     this.ANALYZE_DELAY_MS = 800;
+    this.ANALYZE_MIN_GAP_MS = 1500;
+    this.MIN_ANALYZE_CHARS = 12;
 
     // Dismiss tracking: stop suggesting after N consecutive dismissals
     this._consecutiveDismissals = 0;
@@ -82,7 +86,12 @@ window.MermaidCopilot = class MermaidCopilot {
     this._onInput = this._onInput.bind(this);
     this._onKeyDown = this._onKeyDown.bind(this);
     this._onBlur = this._onBlur.bind(this);
+    this._onFocus = this._onFocus.bind(this);
     this._onScroll = this._onScroll.bind(this);
+    this._onVisibilityChange = this._onVisibilityChange.bind(this);
+    this._onWindowFocus = this._onWindowFocus.bind(this);
+    this._onOnline = this._onOnline.bind(this);
+    this._onOffline = this._onOffline.bind(this);
 
     this._init();
   }
@@ -99,10 +108,14 @@ window.MermaidCopilot = class MermaidCopilot {
     this.input.addEventListener('input', this._onInput);
     this.input.addEventListener('keydown', this._onKeyDown);
     this.input.addEventListener('blur', this._onBlur);
+    this.input.addEventListener('focus', this._onFocus);
     this.input.addEventListener('scroll', this._onScroll);
+    document.addEventListener('visibilitychange', this._onVisibilityChange);
+    window.addEventListener('focus', this._onWindowFocus);
+    window.addEventListener('online', this._onOnline);
+    window.addEventListener('offline', this._onOffline);
 
-    this._checkHealth();
-    this._healthTimer = setInterval(() => this._checkHealth(), this.HEALTH_INTERVAL);
+    void this._checkHealth({ force: true });
   }
 
   // ---- Teardown -------------------------------------------------------------
@@ -110,19 +123,25 @@ window.MermaidCopilot = class MermaidCopilot {
   destroy() {
     clearTimeout(this._idleTimer);
     clearTimeout(this._analyzeTimer);
-    clearInterval(this._healthTimer);
+    if (this._analyzeAC) this._analyzeAC.abort();
     if (this._suggestAC) this._suggestAC.abort();
     if (this._enhanceAC) this._enhanceAC.abort();
     this.input.removeEventListener('input', this._onInput);
     this.input.removeEventListener('keydown', this._onKeyDown);
     this.input.removeEventListener('blur', this._onBlur);
+    this.input.removeEventListener('focus', this._onFocus);
     this.input.removeEventListener('scroll', this._onScroll);
+    document.removeEventListener('visibilitychange', this._onVisibilityChange);
+    window.removeEventListener('focus', this._onWindowFocus);
+    window.removeEventListener('online', this._onOnline);
+    window.removeEventListener('offline', this._onOffline);
     this._dismissGhost();
     this._hideThinking();
     this._idleTimer = null;
     this._analyzeTimer = null;
-    this._healthTimer = null;
+    this._analyzeAC = null;
     this._profile = null;
+    this._healthCheckPromise = null;
   }
 
   dismissGhost() {
@@ -131,40 +150,61 @@ window.MermaidCopilot = class MermaidCopilot {
 
   // ---- Health check ---------------------------------------------------------
 
-  async _checkHealth() {
+  async _checkHealth({ force = false } = {}) {
     if (!this.apiBase) {
       this._enhancerHealthy = false;
       this._lastHealthCheck = Date.now();
-      return;
+      return false;
     }
 
-    let timer = null;
-    try {
-      const controller = new AbortController();
-      timer = setTimeout(() => controller.abort(), 2000);
-      const res = await fetch(`${this.apiBase}/health`, { signal: controller.signal });
-      let healthy = res.ok;
+    if (!force && Date.now() - this._lastHealthCheck < this.HEALTH_INTERVAL) {
+      return this._enhancerHealthy;
+    }
 
-      const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      if (contentType.includes('application/json')) {
-        const data = await res.json().catch(() => null);
-        if (data && typeof data.available === 'boolean') {
-          healthy = data.available;
+    if (this._healthCheckPromise) {
+      return this._healthCheckPromise;
+    }
+
+    this._healthCheckPromise = (async () => {
+      let timer = null;
+      try {
+        const controller = new AbortController();
+        timer = setTimeout(() => controller.abort(), 2000);
+        const res = await fetch(`${this.apiBase}/health`, { signal: controller.signal });
+        let healthy = res.ok;
+
+        const contentType = (res.headers.get('content-type') || '').toLowerCase();
+        if (contentType.includes('application/json')) {
+          const data = await res.json().catch(() => null);
+          if (data && typeof data.available === 'boolean') {
+            healthy = data.available;
+          }
         }
+
+        this._enhancerHealthy = healthy;
+      } catch {
+        this._enhancerHealthy = false;
+      } finally {
+        if (timer) clearTimeout(timer);
+        this._lastHealthCheck = Date.now();
       }
 
-      this._enhancerHealthy = healthy;
-    } catch {
-      this._enhancerHealthy = false;
+      return this._enhancerHealthy;
+    })();
+
+    try {
+      return await this._healthCheckPromise;
     } finally {
-      if (timer) clearTimeout(timer);
-      this._lastHealthCheck = Date.now();
+      this._healthCheckPromise = null;
     }
   }
 
   _isHealthy() {
     if (!this.apiBase) return false;
-    if (Date.now() - this._lastHealthCheck > this.HEALTH_INTERVAL) return false;
+    if (Date.now() - this._lastHealthCheck > this.HEALTH_INTERVAL) {
+      if (!document.hidden) void this._checkHealth();
+      return false;
+    }
     if (!this._enhancerHealthy) return false;
     return this._isModelReliable();
   }
@@ -174,6 +214,10 @@ window.MermaidCopilot = class MermaidCopilot {
   _onInput() {
     this._dismissGhost();
     clearTimeout(this._idleTimer);
+
+    if (Date.now() - this._lastHealthCheck > this.HEALTH_INTERVAL) {
+      void this._checkHealth();
+    }
 
     if (this.inCooldown) {
       this.charsSinceCooldown++;
@@ -194,7 +238,13 @@ window.MermaidCopilot = class MermaidCopilot {
 
     // Schedule profile analysis (separate from suggestion idle)
     clearTimeout(this._analyzeTimer);
-    this._analyzeTimer = setTimeout(() => this._refreshProfile(), this.ANALYZE_DELAY_MS);
+    const trimmed = this.input.value.trim();
+    if (trimmed.length >= this.MIN_ANALYZE_CHARS) {
+      this._analyzeTimer = setTimeout(() => this._refreshProfile(), this.ANALYZE_DELAY_MS);
+    } else if (this._profile) {
+      this._profile = null;
+      if (this.onProfileUpdate) this.onProfileUpdate(null);
+    }
 
     // Track chars since last dismissal for resetting dismissal counter
     if (this._consecutiveDismissals > 0) {
@@ -240,10 +290,33 @@ window.MermaidCopilot = class MermaidCopilot {
     this._dismissGhost();
   }
 
+  _onFocus() {
+    void this._checkHealth();
+  }
+
   _onScroll() {
     if (!this.ghostVisible || !this.ghostLayer) return;
     this.ghostLayer.scrollTop = this.input.scrollTop;
     this.ghostLayer.scrollLeft = this.input.scrollLeft;
+  }
+
+  _onVisibilityChange() {
+    if (!document.hidden) {
+      void this._checkHealth();
+    }
+  }
+
+  _onWindowFocus() {
+    void this._checkHealth();
+  }
+
+  _onOnline() {
+    void this._checkHealth({ force: true });
+  }
+
+  _onOffline() {
+    this._enhancerHealthy = false;
+    this._lastHealthCheck = Date.now();
   }
 
   // ---- Idle detection -------------------------------------------------------
@@ -720,15 +793,34 @@ window.MermaidCopilot = class MermaidCopilot {
 
   async _refreshProfile() {
     const text = this.input.value;
+    if (document.hidden || this.input.readOnly || text.trim().length < this.MIN_ANALYZE_CHARS) return;
+
     const hash = this._hash(text);
     if (hash === this._lastAnalyzedHash) return;
+
+    const now = Date.now();
+    if (now - this._lastAnalyzeAt < this.ANALYZE_MIN_GAP_MS) {
+      clearTimeout(this._analyzeTimer);
+      this._analyzeTimer = setTimeout(
+        () => this._refreshProfile(),
+        this.ANALYZE_MIN_GAP_MS - (now - this._lastAnalyzeAt),
+      );
+      return;
+    }
+
     this._lastAnalyzedHash = hash;
+    this._lastAnalyzeAt = now;
+
+    if (this._analyzeAC) this._analyzeAC.abort();
+    const controller = new AbortController();
+    this._analyzeAC = controller;
 
     try {
       const res = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, mode: 'idea' }),
+        signal: controller.signal,
       });
       if (!res.ok) return;
       const data = await res.json();
@@ -736,8 +828,13 @@ window.MermaidCopilot = class MermaidCopilot {
         this._profile = data.profile;
         if (this.onProfileUpdate) this.onProfileUpdate(this._profile);
       }
-    } catch {
+    } catch (err) {
+      if (err?.name === 'AbortError') return;
       // Non-critical: profile analysis failure doesn't block anything
+    } finally {
+      if (this._analyzeAC === controller) {
+        this._analyzeAC = null;
+      }
     }
   }
 

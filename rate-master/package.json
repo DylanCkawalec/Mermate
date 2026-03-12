@@ -1,0 +1,37 @@
+{
+  "name": "rate-master",
+  "version": "1.0.0",
+  "description": "Adaptive OODA-driven rate limiter and job processor for Local AI and External API inference — always forwards, never denies.",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "bin": {
+    "rate-master": "dist/bin/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "start": "node dist/bin/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "rate-limiter",
+    "job-processor",
+    "ooda",
+    "adaptive",
+    "ai",
+    "llm",
+    "concurrency",
+    "queue",
+    "priority",
+    "distributed",
+    "middleware"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.4.5",
+    "@types/node": "^20.14.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

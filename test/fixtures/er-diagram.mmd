@@ -1,12 +1,20 @@
-erDiagram
-  CUSTOMER ||--o{ ORDER : places
-  ORDER ||--|{ LINE-ITEM : contains
-  PRODUCT ||--o{ LINE-ITEM : "is in"
-  CUSTOMER {
-    string name
-    string email
-  }
-  ORDER {
-    int id
-    date created
-  }
+%% Compiled Mermaid source for: architecture-outlines-multi-tenant
+%% Generated: 2026-03-11T10:05:47.834Z
+%% Compile attempts: 3
+
+stateDiagram-v2
+    N1:["architecture outlines\nmulti-tenant"]
+    N2:["primary entities\ninclude"]
+    N3:["Each entity\ndefined"]
+    N4:["Represents\ncustomer client"]
+    N5:["TENANT entity\ncentral"]
+    N6:["tenant can\nmultiple"]
+    N7:["Users associated\nspecific"]
+    N8:["Failure paths\ninclude"]
+    N1 --> N2
+    N2 --> N3
+    N3 --> N4
+    N4 --> N5
+    N5 --> N6
+    N6 --> N7
+    N7 --> N8

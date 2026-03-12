@@ -1,14 +1,47 @@
-classDiagram
-  class Animal {
-    +String name
-    +int age
-    +makeSound()
-  }
-  class Dog {
-    +fetch()
-  }
-  class Cat {
-    +purr()
-  }
-  Animal <|-- Dog
-  Animal <|-- Cat
+The architecture represents a domain-driven design model with several key components and relationships, focusing on minimal structure and clear boundaries. The primary entities include AggregateRoot, Entity, ValueObject, DomainEvent, Repository, Specification, Command, CommandHandler, EventSourcedAggregate, Order, OrderLine, Money, Customer, InventoryPolicy, and SagaOrchestrator. Each component plays a specific role in the system, with defined attributes and methods.
+
+AggregateRoot is an abstract class that serves as the base for entities that are aggregates. It includes an ID, version, and a list of domain events. It provides methods to apply, raise, and clear events, ensuring that all changes are tracked and can be audited.
+
+Entity is another abstract class with an ID and methods for equality and hash code generation, ensuring consistent identity management across the system.
+
+ValueObject is an interface that requires implementing classes to define equality and validity checks, promoting immutability and value semantics.
+
+DomainEvent is an abstract class representing events in the domain, with attributes like eventId, aggregateId, version, occurredOn, and eventType. It supports event sourcing and ensures that all state changes are event-driven.
+
+Repository is a generic interface for data access, providing methods to find, save, delete, and find all entities based on specifications. It acts as a boundary between the domain and data storage, supporting persistence and retrieval operations.
+
+Specification is an interface for defining criteria that entities must satisfy, with methods for logical operations like and, or, and not. It allows for flexible querying and filtering of entities.
+
+Command is an abstract class representing actions to be performed, with attributes like commandId, correlationId, and issuedAt. It encapsulates user intentions and triggers state changes.
+
+CommandHandler is an interface for handling commands, returning a result. It ensures that commands are processed in a consistent and reliable manner.
+
+EventSourcedAggregate is an abstract class for aggregates that use event sourcing, with methods to load from history and get uncommitted changes. It supports rebuilding the current state from past events, ensuring consistency and traceability.
+
+Order is a concrete class representing a customer order, with attributes like orderId, customerId, totalAmount, status, and lines. It provides methods to create, add lines, confirm, cancel, and apply events, managing the lifecycle of an order.
+
+OrderLine is a value object representing a line item in an order, with attributes like SKU, quantity, unit price, and a method to calculate the line total. It ensures accurate representation of order details.
+
+Money is a value object for monetary values, with methods for arithmetic operations and checking positivity. It ensures correct handling of currency and financial calculations.
+
+Customer is a class representing a customer, with attributes like customerId, email, shipping address, and credit limit. It includes a method to check if the customer can place an order, enforcing business rules.
+
+InventoryPolicy is an interface for inventory management, with methods to check fulfillment, reserve, and release stock. It ensures that inventory levels are maintained and orders can be fulfilled.
+
+SagaOrchestrator is an abstract class for managing long-running business processes, with methods to start a saga, handle events, and compensate for failed steps. It coordinates complex workflows and ensures eventual consistency.
+
+The relationships between these components are as follows:
+- AggregateRoot is a specialization of Entity.
+- EventSourcedAggregate is a specialization of AggregateRoot.
+- Order is a specialization of EventSourcedAggregate.
+- Customer is a specialization of AggregateRoot.
+- OrderLine and Money are specializations of ValueObject.
+- Repository uses Specification for querying.
+- CommandHandler handles Command objects.
+- SagaOrchestrator reacts to DomainEvents and dispatches Commands.
+- Order contains multiple OrderLines and is associated with Money and Customer.
+- Order queries InventoryPolicy for stock management.
+
+Failure paths are addressed through the use of DomainEvents and SagaOrchestrator, which provide mechanisms for compensating transactions and handling errors gracefully. Observability is enhanced by logging DomainEvents and tracking command execution, allowing for monitoring and debugging. Boundaries are clearly defined through the use of interfaces and abstract classes, ensuring separation of concerns and promoting modularity.
+
+This architecture supports a robust domain-driven design with clear separation of concerns, allowing for scalability and maintainability. The use of interfaces and abstract classes promotes flexibility and extensibility, while the relationships ensure cohesive interaction between components. The inclusion of failure paths and observability mechanisms strengthens the system's resilience and transparency.

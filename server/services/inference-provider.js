@@ -12,22 +12,74 @@
 
 const { buildPrompt } = require('./axiom-prompts');
 const logger = require('../utils/logger');
+const rmBridge = require('./rate-master-bridge');
+const catalog = require('./model-catalog');
 
 // ---- Configuration --------------------------------------------------------
 
-const PREMIUM_API_KEY   = process.env.MERMATE_AI_API_KEY || '';
+// Single API key — prefer OPENAI_API_KEY (new), fall back to MERMATE_AI_API_KEY (legacy)
+const PREMIUM_API_KEY   = process.env.OPENAI_API_KEY || process.env.MERMATE_AI_API_KEY || '';
 const PREMIUM_PROVIDER  = process.env.MERMATE_AI_PROVIDER || 'openai';
-const PREMIUM_MODEL     = process.env.MERMATE_AI_MODEL || 'gpt-4o-mini';
-const PREMIUM_MAX_MODEL = process.env.MERMATE_AI_MAX_MODEL || '';
+
+// Tiered model pool — each stage picks the right tier
+const MODELS = Object.freeze({
+  // Orchestrator / final synthesis — most capable, slowest
+  orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || process.env.MERMATE_AI_MAX_MODEL || 'gpt-4o',
+  // Worker — primary reasoning, branch exploration, enhance
+  worker:       process.env.MERMATE_WORKER_MODEL       || process.env.MERMATE_AI_MODEL       || 'gpt-4o',
+  // Fast structured — JSON extraction, routing, repair, narration
+  fast:         process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-4o-mini',
+  // Validator / router — cheap scoring, suggestions
+  nano:         process.env.MERMATE_ROUTER_MODEL       || 'gpt-4o-mini',
+  // Image generation
+  image:        process.env.MERMATE_IMAGE_MODEL        || 'gpt-image-1',
+});
+
+// Backward-compat aliases used throughout the file
+const PREMIUM_MODEL     = MODELS.worker;
+const PREMIUM_MAX_MODEL = MODELS.orchestrator;
 const MAX_ENABLED       = process.env.MERMATE_AI_MAX_ENABLED === 'true';
 
-const OLLAMA_URL   = process.env.MERMATE_OLLAMA_URL || 'http://localhost:11434';
-const OLLAMA_MODEL = process.env.MERMATE_OLLAMA_MODEL || 'gpt-oss:20b';
+const OLLAMA_URL   = process.env.LOCAL_LLM_BASE_URL || process.env.MERMATE_OLLAMA_URL || 'http://localhost:11434';
+const OLLAMA_MODEL = process.env.LOCAL_LLM_MODEL    || process.env.MERMATE_OLLAMA_MODEL || 'gpt-oss:20b';
 
 const ENHANCER_URL = process.env.MERMAID_ENHANCER_URL || 'http://localhost:8100';
 
-const INFER_TIMEOUT_MS     = parseInt(process.env.MERMATE_INFER_TIMEOUT || '90000', 10);
-const MAX_INFER_TIMEOUT_MS = parseInt(process.env.MERMATE_MAX_INFER_TIMEOUT || '180000', 10);
+const INFER_TIMEOUT_MS     = parseInt(process.env.MERMATE_INFER_TIMEOUT || process.env.MERMATE_INFER_TIMEOUT_MS || '120000', 10);
+const MAX_INFER_TIMEOUT_MS = parseInt(process.env.MERMATE_MAX_INFER_TIMEOUT || process.env.MERMATE_MAX_INFER_TIMEOUT_MS || '180000', 10);
+const MAX_RETRIES          = parseInt(process.env.MERMATE_MAX_RETRIES || '2', 10);
+
+// P3: Per-stage model routing — each stage gets the optimal model tier
+const STAGE_MODEL_MAP = Object.freeze({
+  fact_extraction:     MODELS.fast,         // structured JSON — gpt-4.1-mini
+  diagram_plan:        MODELS.fast,         // structured JSON — gpt-4.1-mini
+  composition:         MODELS.worker,       // creative Mermaid — gpt-5.2
+  semantic_repair:     MODELS.fast,         // targeted JSON fix — gpt-4.1-mini
+  copilot_suggest:     MODELS.nano,         // short completion — gpt-4.1-nano
+  copilot_enhance:     MODELS.worker,       // full enhancement — gpt-5.2
+  decompose:           MODELS.worker,       // multi-view reasoning — gpt-5.2
+  render_prepare:      MODELS.worker,       // one-shot Mermaid — gpt-5.2
+  model_repair:        MODELS.fast,         // targeted fix — gpt-4.1-mini
+  max_composition:     MODELS.orchestrator, // final quality — gpt-5.4
+  merge_composition:   MODELS.orchestrator, // merge all subviews into mega-diagram — gpt-5.4
+  repair_from_trace:   MODELS.fast,         // error-trace repair — gpt-4.1-mini
+});
+
+// P5: Per-stage token caps — right-size output budget to reduce waste
+const STAGE_TOKEN_CAP = Object.freeze({
+  fact_extraction:     2048,
+  diagram_plan:        3072,
+  composition:         8192,
+  semantic_repair:     4096,
+  copilot_suggest:     128,
+  copilot_enhance:     8192,
+  decompose:           6144,
+  render_prepare:      8192,
+  model_repair:        4096,
+  max_composition:     16384,
+  merge_composition:   16384,
+  repair_from_trace:   4096,
+});
 
 // ---- Health cache ---------------------------------------------------------
 
@@ -70,71 +122,228 @@ async function _checkHealth(provider) {
 
 // ---- Provider implementations ---------------------------------------------
 
-async function _callPremium(systemPrompt, userPrompt, modelOverride, timeoutMs) {
+// ---- Rate-limit aware HTTP call helper ------------------------------------
+
+const _activeConcurrency = { count: 0 };
+
+function _parseRetryAfter(res) {
+  const header = res.headers.get('retry-after');
+  if (!header) return 5000;
+  const secs = parseInt(header, 10);
+  return Number.isFinite(secs) ? secs * 1000 : 5000;
+}
+
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+/**
+ * Core HTTP call with 429/503 retry logic, routed through rate-master's
+ * OODA-driven adaptive queue for per-endpoint traffic shaping.
+ *
+ * @param {object} opts
+ * @param {string} opts.url
+ * @param {object} opts.headers
+ * @param {object} opts.body
+ * @param {number} opts.timeoutMs
+ * @param {string} opts.model
+ * @param {string} opts.logPrefix
+ * @param {Array}  opts.rateEvents - accumulator for rate event metadata
+ * @param {Function} opts.extractContent - (data) => string|null
+ * @param {string} [opts.stage] - pipeline stage for rate-master priority
+ * @param {string} [opts.inputText] - input text for context size estimation
+ * @returns {Promise<{content: string|null, actionTag: object|null}>}
+ */
+async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix, rateEvents, extractContent, stage, inputText }) {
+  let lastError = null;
+  let actionTag = null;
+
+  const rawFetch = async () => {
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+      _activeConcurrency.count++;
+      try {
+        const res = await fetch(url, {
+          method: 'POST', headers,
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+
+        // Feed upstream headers back to rate-master for self-calibration
+        const remaining = res.headers.get('x-ratelimit-remaining');
+        const resetAfter = res.headers.get('x-ratelimit-reset-after');
+        const retryAfterHeader = res.headers.get('retry-after');
+        if (remaining || resetAfter || retryAfterHeader) {
+          rmBridge.feedback(model, {
+            remainingRequests: remaining ? parseInt(remaining, 10) : undefined,
+            resetAfterMs: resetAfter ? parseFloat(resetAfter) * 1000 : undefined,
+            retryAfterMs: retryAfterHeader ? parseInt(retryAfterHeader, 10) * 1000 : undefined,
+            statusCode: res.status,
+          });
+        }
+
+        if (res.status === 429 || res.status === 503) {
+          const retryAfterMs = _parseRetryAfter(res);
+          const eventType = res.status === 429 ? '429_rate_limit' : '503_overloaded';
+
+          logger.warn(`${logPrefix}.rate_limited`, {
+            model, status: res.status, retryAfterMs,
+            attempt: attempt + 1, maxRetries: MAX_RETRIES,
+            concurrency: _activeConcurrency.count,
+          });
+
+          const rateEvent = {
+            type: eventType,
+            http_status: res.status,
+            retry_after_ms: retryAfterMs,
+            retry_count: attempt + 1,
+            concurrency_window: _activeConcurrency.count,
+            deferred: false,
+            downgraded_to: null,
+            impact_ms: retryAfterMs,
+          };
+
+          if (attempt < MAX_RETRIES) {
+            const backoff = retryAfterMs || (Math.pow(2, attempt + 1) * 1000);
+            rateEvent.impact_ms = backoff;
+            rateEvents.push(rateEvent);
+            await _sleep(backoff);
+            continue;
+          }
+          rateEvents.push(rateEvent);
+          return null;
+        }
+
+        if (!res.ok) {
+          logger.warn(`${logPrefix}.http_error`, { model, status: res.status });
+          return null;
+        }
+
+        const data = await res.json();
+        return extractContent(data);
+      } catch (err) {
+        lastError = err;
+        if (err.name === 'AbortError') {
+          const rateEvent = {
+            type: 'timeout', http_status: 0,
+            retry_after_ms: 0, retry_count: attempt + 1,
+            concurrency_window: _activeConcurrency.count,
+            deferred: false, downgraded_to: null, impact_ms: timeoutMs,
+          };
+          rateEvents.push(rateEvent);
+        }
+        logger.warn(`${logPrefix}.error`, { model, error: err.message, attempt: attempt + 1 });
+        if (attempt < MAX_RETRIES) {
+          await _sleep(Math.pow(2, attempt + 1) * 1000);
+          continue;
+        }
+      } finally {
+        _activeConcurrency.count--;
+        clearTimeout(timer);
+      }
+    }
+
+    logger.warn(`${logPrefix}.exhausted`, { model, error: lastError?.message });
+    return null;
+  };
+
+  // Route through rate-master's adaptive queue
+  try {
+    const executed = await rmBridge.execute(stage || logPrefix, model, inputText, rawFetch);
+    actionTag = executed.actionTag;
+    return { content: executed.result, actionTag };
+  } catch {
+    // If rate-master fails to execute (queue timeout etc.), fall through directly
+    const content = await rawFetch();
+    return { content, actionTag };
+  }
+}
+
+/**
+ * Call the premium API with an explicit API key (for role-based inference).
+ * Includes 429/503 retry with exponential backoff.
+ * @returns {Promise<{content: string|null, actionTag: object|null}>}
+ */
+async function _callPremiumWithKey(apiKey, systemPrompt, userPrompt, modelOverride, timeoutMs, rateEvents, stage) {
+  const model = modelOverride || PREMIUM_MODEL;
+  const events = rateEvents || [];
+  const tokenParam = catalog.usesCompletionTokens(model) ? { max_completion_tokens: 16384 } : { max_tokens: 8192 };
+
+  return _fetchWithRetry({
+    url: 'https://api.openai.com/v1/chat/completions',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+    body: {
+      model, temperature: 0, ...tokenParam,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    },
+    timeoutMs: timeoutMs || INFER_TIMEOUT_MS,
+    model,
+    logPrefix: 'provider.role',
+    rateEvents: events,
+    extractContent: (data) => data.choices?.[0]?.message?.content || null,
+    stage: stage || 'copilot_enhance',
+    inputText: userPrompt,
+  });
+}
+
+/**
+ * @returns {Promise<{content: string|null, actionTag: object|null}>}
+ */
+async function _callPremium(systemPrompt, userPrompt, modelOverride, timeoutMs, maxTokensOverride, rateEvents, stage) {
   const model = modelOverride || PREMIUM_MODEL;
   const timeout = timeoutMs || INFER_TIMEOUT_MS;
-  const baseUrl = PREMIUM_PROVIDER === 'anthropic'
-    ? 'https://api.anthropic.com/v1/messages'
-    : 'https://api.openai.com/v1/chat/completions';
+  const events = rateEvents || [];
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
-
-  try {
-    if (PREMIUM_PROVIDER === 'anthropic') {
-      const res = await fetch(baseUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': PREMIUM_API_KEY,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: 8192,
-          temperature: 0,
-          system: systemPrompt,
-          messages: [{ role: 'user', content: userPrompt }],
-        }),
-        signal: controller.signal,
-      });
-      if (!res.ok) {
-        logger.warn('provider.premium.http_error', { model, status: res.status });
-        return null;
-      }
-      const data = await res.json();
-      return data.content?.[0]?.text || null;
-    }
-
-    const res = await fetch(baseUrl, {
-      method: 'POST',
+  if (PREMIUM_PROVIDER === 'anthropic') {
+    return _fetchWithRetry({
+      url: 'https://api.anthropic.com/v1/messages',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${PREMIUM_API_KEY}`,
+        'x-api-key': PREMIUM_API_KEY,
+        'anthropic-version': '2023-06-01',
       },
-      body: JSON.stringify({
-        model,
-        temperature: 0,
-        max_tokens: 8192,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt },
-        ],
-      }),
-      signal: controller.signal,
+      body: {
+        model, max_tokens: 8192, temperature: 0,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
+      },
+      timeoutMs: timeout, model,
+      logPrefix: 'provider.premium',
+      rateEvents: events,
+      extractContent: (data) => data.content?.[0]?.text || null,
+      stage: stage || 'copilot_enhance',
+      inputText: userPrompt,
     });
-    if (!res.ok) {
-      logger.warn('provider.premium.http_error', { model, status: res.status });
-      return null;
-    }
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content || null;
-  } catch (err) {
-    logger.warn('provider.premium.error', { model, error: err.message });
-    return null;
-  } finally {
-    clearTimeout(timer);
   }
+
+  const tokenLimit = maxTokensOverride || 16384;
+  const tokenParam = catalog.usesCompletionTokens(model)
+    ? { max_completion_tokens: tokenLimit }
+    : { max_tokens: Math.min(tokenLimit, 8192) };
+
+  return _fetchWithRetry({
+    url: 'https://api.openai.com/v1/chat/completions',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${PREMIUM_API_KEY}`,
+    },
+    body: {
+      model, temperature: 0, ...tokenParam,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    },
+    timeoutMs: timeout, model,
+    logPrefix: 'provider.premium',
+    rateEvents: events,
+    extractContent: (data) => data.choices?.[0]?.message?.content || null,
+    stage: stage || 'copilot_enhance',
+    inputText: userPrompt,
+  });
 }
 
 async function _callOllama(systemPrompt, userPrompt) {
@@ -222,46 +431,63 @@ async function infer(stage, context = {}) {
 
   const systemPrompt = promptConfig.system;
   const userPrompt = context.userPrompt || '';
+  const rateEvents = [];
 
-  // Copilot stages prefer local (cheap, fast) first
+  const stageModel = STAGE_MODEL_MAP[stage] || PREMIUM_MODEL;
+  const stageTokenCap = STAGE_TOKEN_CAP[stage] || undefined;
+
+  // Parallel health pre-check — eliminates sequential provider probing
+  const [premiumOk, ollamaOk, enhancerOk] = await Promise.all([
+    _checkHealth('premium'),
+    _checkHealth('ollama'),
+    _checkHealth('enhancer'),
+  ]);
+
   const preferLocal = stage === 'copilot_suggest' || stage === 'copilot_enhance';
 
+  const providers = [
+    { name: 'premium',  ok: premiumOk,  call: () => _callPremium(systemPrompt, userPrompt, stageModel, undefined, stageTokenCap, rateEvents, stage), isPremium: true },
+    { name: 'ollama',   ok: ollamaOk,   call: () => _callOllama(systemPrompt, userPrompt), isPremium: false },
+    { name: 'enhancer', ok: enhancerOk, call: () => _callEnhancer(systemPrompt, userPrompt, stage, context.extra), isPremium: false },
+  ];
+
+  // Reorder: local-first for copilot stages, premium-first otherwise
   const chain = preferLocal
-    ? [
-        { name: 'ollama',   check: () => _checkHealth('ollama'),   call: () => _callOllama(systemPrompt, userPrompt) },
-        { name: 'enhancer', check: () => _checkHealth('enhancer'), call: () => _callEnhancer(systemPrompt, userPrompt, stage, context.extra) },
-        { name: 'premium',  check: () => _checkHealth('premium'),  call: () => _callPremium(systemPrompt, userPrompt) },
-      ]
-    : [
-        { name: 'premium',  check: () => _checkHealth('premium'),  call: () => _callPremium(systemPrompt, userPrompt) },
-        { name: 'ollama',   check: () => _checkHealth('ollama'),   call: () => _callOllama(systemPrompt, userPrompt) },
-        { name: 'enhancer', check: () => _checkHealth('enhancer'), call: () => _callEnhancer(systemPrompt, userPrompt, stage, context.extra) },
-      ];
+    ? [providers[1], providers[2], providers[0]]
+    : providers;
 
-  for (const provider of chain) {
-    const available = await provider.check();
-    if (!available) continue;
+  for (const prov of chain) {
+    if (!prov.ok) continue;
 
-    logger.info('provider.attempting', { provider: provider.name, stage });
-    const output = await provider.call();
+    logger.info('provider.route', { provider: prov.name, stage, tier: prov.isPremium ? catalog.classifyTier(stageModel) : catalog.Tier.LOCAL });
+    const callStart = Date.now();
+    const callResult = await prov.call();
+    const latencyMs = Date.now() - callStart;
+
+    const output = prov.isPremium ? callResult?.content : callResult;
+    const actionTag = prov.isPremium ? callResult?.actionTag : null;
 
     if (!output || !output.trim()) {
-      logger.warn('provider.empty_output', { provider: provider.name, stage });
+      logger.warn('provider.empty', { provider: prov.name, stage, ms: latencyMs });
       continue;
     }
 
-    const isNoOp = output.trim() === userPrompt.trim();
-    if (isNoOp) {
-      logger.warn('provider.no_op', { provider: provider.name, stage });
+    if (output.trim() === userPrompt.trim()) {
+      logger.warn('provider.noop', { provider: prov.name, stage, ms: latencyMs });
       continue;
     }
 
-    logger.info('provider.success', { provider: provider.name, stage, outputLen: output.length });
-    return { output: output.trim(), provider: provider.name, noOp: false };
+    logger.info('provider.ok', { provider: prov.name, stage, len: output.length, ms: latencyMs, model: prov.isPremium ? stageModel : undefined, tag: actionTag?.tag });
+    return {
+      output: output.trim(), provider: prov.name, noOp: false, latencyMs,
+      model: prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer'),
+      rateEvents: rateEvents.length ? rateEvents : undefined,
+      actionTag,
+    };
   }
 
-  logger.warn('provider.all_failed', { stage });
-  return { output: null, provider: 'none', noOp: true };
+  logger.warn('provider.exhausted', { stage });
+  return { output: null, provider: 'none', noOp: true, latencyMs: 0, model: 'none', rateEvents: rateEvents.length ? rateEvents : undefined };
 }
 
 /**
@@ -281,16 +507,28 @@ async function inferMax(stage, context = {}) {
 
   const systemPrompt = promptConfig.system;
   const userPrompt = context.userPrompt || '';
+  const rateEvents = [];
 
   logger.info('provider.max.attempting', { model: maxModel, stage });
-  const output = await _callPremium(systemPrompt, userPrompt, maxModel, MAX_INFER_TIMEOUT_MS);
+  const callStart = Date.now();
+  const callResult = await _callPremium(systemPrompt, userPrompt, maxModel, MAX_INFER_TIMEOUT_MS, undefined, rateEvents, stage);
+  const latencyMs = Date.now() - callStart;
+  const output = callResult?.content;
+  const actionTag = callResult?.actionTag;
 
   if (output && output.trim() && output.trim() !== userPrompt.trim()) {
-    logger.info('provider.max.success', { model: maxModel, stage, outputLen: output.length });
-    return { output: output.trim(), provider: `premium-max:${maxModel}`, noOp: false };
+    logger.info('provider.max.success', { model: maxModel, stage, outputLen: output.length, latencyMs, rmTag: actionTag?.tag });
+    return {
+      output: output.trim(), provider: `premium-max:${maxModel}`, noOp: false, latencyMs, model: maxModel,
+      rateEvents: rateEvents.length ? rateEvents : undefined,
+      actionTag,
+    };
   }
 
-  logger.warn('provider.max.failed', { model: maxModel, stage, fallback: 'default_infer' });
+  if (rateEvents.length) {
+    logger.warn('provider.max.rate_limited_downgrade', { model: maxModel, stage, events: rateEvents.length });
+  }
+  logger.warn('provider.max.failed', { model: maxModel, stage, fallback: 'default_infer', latencyMs });
   return infer(stage, context);
 }
 
@@ -314,4 +552,96 @@ async function checkProviders() {
   return { premium, ollama, enhancer };
 }
 
-module.exports = { infer, inferMax, checkProviders, isMaxAvailable };
+// ---- Allowed stages for role-based inference --------------------------------
+// Only these stages may use a named role. All other stages fall through
+// to the default provider chain. This prevents arbitrary role execution.
+const ROLE_ALLOWED_STAGES = new Set([
+  'fact_extraction',
+  'diagram_plan',
+  'composition',
+  'semantic_repair',
+  'render_prepare',
+  'decompose',
+  'repair_from_trace',
+  'copilot_enhance',
+]);
+
+/**
+ * Run inference using a specific named role's credentials and model.
+ *
+ * Stage-safe: only stages in ROLE_ALLOWED_STAGES may use a role.
+ * Controller-gated: if the role is not found, not enabled, or has no
+ * valid API key, falls through to the default infer() chain.
+ *
+ * This function does NOT schedule agents or launch workers. It simply
+ * uses the role's API key and model for a single inference call within
+ * the bounded controller pipeline.
+ *
+ * @param {string} stage - Pipeline stage name
+ * @param {object} context - Same as infer() context
+ * @param {string} roleName - Name from ARCHITECT_AI_{N}_NAME
+ * @returns {Promise<{output: string|null, provider: string, noOp: boolean}>}
+ */
+async function inferWithRole(stage, context, roleName) {
+  if (!ROLE_ALLOWED_STAGES.has(stage)) {
+    logger.info('provider.role.stage_blocked', { stage, roleName, reason: 'stage not allowed for role inference' });
+    return infer(stage, context);
+  }
+
+  const registry = require('./role-registry');
+  const role = registry.getRoleByName(roleName);
+
+  if (!role || !role.enabled) {
+    logger.info('provider.role.not_available', { roleName, found: !!role, enabled: role?.enabled });
+    return infer(stage, context);
+  }
+
+  const apiKey = role.apiKey;
+  if (!apiKey || apiKey.startsWith('{')) {
+    logger.info('provider.role.no_valid_key', { roleName, reason: 'unresolved or empty key' });
+    return infer(stage, context);
+  }
+
+  const model = role.model || PREMIUM_MODEL;
+
+  // ALWAYS use the axiom-based stage prompt — never bypass it.
+  // The context.systemPrompt (if any) is agent role context injected into
+  // the user prompt by the caller, not a system prompt override.
+  const promptConfig = buildPrompt(stage);
+  const systemPrompt = promptConfig.system;
+  const userPrompt = context.userPrompt || '';
+
+  logger.info('provider.role.attempting', { roleName, model, stage, domain: role.domain });
+
+  const rateEvents = [];
+  const callStart = Date.now();
+  try {
+    const callResult = await _callPremiumWithKey(apiKey, systemPrompt, userPrompt, model, INFER_TIMEOUT_MS, rateEvents, stage);
+    const latencyMs = Date.now() - callStart;
+    const output = callResult?.content;
+    const actionTag = callResult?.actionTag;
+
+    if (!output || !output.trim()) {
+      logger.warn('provider.role.empty_output', { roleName, stage, latencyMs });
+      return infer(stage, context);
+    }
+
+    if (output.trim() === userPrompt.trim()) {
+      logger.warn('provider.role.no_op', { roleName, stage, latencyMs });
+      return infer(stage, context);
+    }
+
+    logger.info('provider.role.success', { roleName, model, stage, outputLen: output.length, latencyMs, rmTag: actionTag?.tag });
+    return {
+      output: output.trim(), provider: `role:${roleName}:${model}`, noOp: false, latencyMs, model,
+      rateEvents: rateEvents.length ? rateEvents : undefined,
+      actionTag,
+    };
+  } catch (err) {
+    const latencyMs = Date.now() - callStart;
+    logger.warn('provider.role.error', { roleName, stage, error: err.message, latencyMs });
+    return infer(stage, context);
+  }
+}
+
+module.exports = { infer, inferMax, inferWithRole, checkProviders, isMaxAvailable };

@@ -122,13 +122,40 @@ check_enhancer() {
 }
 
 clear_port() {
+    local pids=()
     local pid
-    pid=$(lsof -ti :"${APP_PORT}" 2>/dev/null || true)
-    if [ -n "${pid}" ]; then
-        echo "  Port ${APP_PORT} in use by PID ${pid} — stopping it..."
-        kill "${pid}" 2>/dev/null || true
-        sleep 1
+    local attempts
+
+    while IFS= read -r pid; do
+        [ -n "${pid}" ] && pids+=("${pid}")
+    done < <(lsof -nP -tiTCP:"${APP_PORT}" -sTCP:LISTEN 2>/dev/null || true)
+
+    if [ "${#pids[@]}" -eq 0 ]; then
+        return
     fi
+
+    echo "  Port ${APP_PORT} in use by listener PID(s) ${pids[*]} — stopping it..."
+    kill "${pids[@]}" 2>/dev/null || true
+
+    for attempts in {1..10}; do
+        if ! lsof -nP -tiTCP:"${APP_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+            return
+        fi
+        sleep 1
+    done
+
+    echo "  Listener still active on port ${APP_PORT} after SIGTERM — forcing stop..."
+    kill -9 "${pids[@]}" 2>/dev/null || true
+
+    for attempts in {1..5}; do
+        if ! lsof -nP -tiTCP:"${APP_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+            return
+        fi
+        sleep 1
+    done
+
+    echo "Error: could not free port ${APP_PORT}. Stop the listener manually and retry." >&2
+    exit 1
 }
 
 start_service() {

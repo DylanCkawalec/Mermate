@@ -15,6 +15,8 @@ const {
 const { validateInvariants, computeHPCScore } = require('./mermaid-validator');
 const provider = require('./inference-provider');
 const enhancerBridge = require('./gpt-enhancer-bridge');
+const rmBridge = require('./rate-master-bridge');
+const catalog = require('./model-catalog');
 const logger = require('../utils/logger');
 
 // ---- Local text-to-mmd fallback (no enhancer required) ----------------------
@@ -36,10 +38,12 @@ function _cleanLabel(str) {
     .join(' ');
 }
 
-function _nodeShape(label) {
-  if (DECISION_RE.test(label)) return `{"${label}"}`;
-  if (STORE_RE.test(label))    return `[("${label}")]`;
-  if (EXTERNAL_RE.test(label)) return `(["${label}"])`;
+function _nodeShape(label, entityType) {
+  if (entityType === 'actor')      return `(["${label}"])`;
+  if (entityType === 'technology') return `[("${label}")]`;
+  if (DECISION_RE.test(label))     return `{"${label}"}`;
+  if (STORE_RE.test(label))        return `[("${label}")]`;
+  if (EXTERNAL_RE.test(label))     return `(["${label}"])`;
   return `["${label}"]`;
 }
 
@@ -106,7 +110,7 @@ function localTextToMmd(source, shadow) {
   }
 
   let mmd = directive + '\n';
-  for (const [label, id] of nodeMap) mmd += `    ${id}${_nodeShape(label)}\n`;
+  for (const [label, id] of nodeMap) mmd += `    ${id}${_nodeShape(label, null)}\n`;
   for (const edge of edges)          mmd += `    ${edge.from} --> ${edge.to}\n`;
   return mmd;
 }
@@ -199,13 +203,13 @@ function _shadowToFlowchart(directive, shadow) {
       const sgLabel = bTerm.charAt(0).toUpperCase() + bTerm.slice(1);
       mmd += `    subgraph ${sgId}["${sgLabel}"]\n`;
       for (const node of bNodes) {
-        mmd += `        ${node.id}${_nodeShape(node.name)}\n`;
+        mmd += `        ${node.id}${_nodeShape(node.name, node.type)}\n`;
       }
       mmd += `    end\n`;
     }
   } else {
     for (const [, node] of nodeMap) {
-      mmd += `    ${node.id}${_nodeShape(node.name)}\n`;
+      mmd += `    ${node.id}${_nodeShape(node.name, node.type)}\n`;
     }
   }
   for (const edge of edges) {
@@ -321,26 +325,52 @@ async function compileWithRetry(mmdSource, outputDir, baseName) {
 async function renderPrepare(source, profile, useMax = false) {
   const stagesExecuted = [];
   const userPrompt = buildRenderPrepareUserPrompt(source, profile);
+  const rt = _rt();
 
   const inferFn = useMax ? provider.inferMax : provider.infer;
+  const callStart = Date.now();
   const result = await inferFn('render_prepare', { userPrompt });
   stagesExecuted.push(useMax ? 'render_prepare_max' : 'render_prepare');
+
+  if (rt) {
+    const stageLabel = useMax ? 'render_prepare_max' : 'render_prepare';
+    rt.addStage(_activeRunId, stageLabel);
+    const contextEst = rmBridge.estimateContextSize('render_prepare', userPrompt);
+    rt.recordAgentCall(_activeRunId, {
+      stage: 'render_prepare', model: result.model, provider: result.provider,
+      promptText: userPrompt, outputText: result.output || '',
+      latencyMs: result.latencyMs || (Date.now() - callStart),
+      success: !!result.output, outputType: 'text',
+      actionTag: result.actionTag || null,
+      contextEst,
+    });
+    if (result.rateEvents) {
+      for (const re of result.rateEvents) rt.recordRateEvent(_activeRunId, re);
+    }
+  }
 
   if (result.output) {
     const firstLine = result.output.split('\n').find(l => l.trim() && !l.trim().startsWith('%%'));
     if (firstLine && VALID_DIRECTIVE_RE.test(firstLine.trim())) {
-      logger.info('render_prepare.success', { provider: result.provider, outputLen: result.output.length });
-      return {
-        mmdSource: result.output,
-        enhanced: true,
+      const fragmentCheck = _checkForProseFragments(result.output);
+      if (fragmentCheck.clean) {
+        logger.info('render_prepare.success', { provider: result.provider, outputLen: result.output.length });
+        return {
+          mmdSource: result.output,
+          enhanced: true,
+          provider: result.provider,
+          stagesExecuted,
+        };
+      }
+      logger.warn('render_prepare.prose_fragments_detected', {
         provider: result.provider,
-        stagesExecuted,
-      };
+        fragments: fragmentCheck.fragments.slice(0, 5),
+      });
+    } else {
+      logger.warn('render_prepare.invalid_output', { provider: result.provider, firstLine: firstLine?.slice(0, 80) });
     }
-    logger.warn('render_prepare.invalid_output', { provider: result.provider, firstLine: firstLine?.slice(0, 80) });
   }
 
-  // Fallback: local conversion
   const shadow = profile?.shadow || extractShadow(source);
   const mmdSource = localTextToMmd(source, shadow);
   stagesExecuted.push('local_fallback');
@@ -349,8 +379,7 @@ async function renderPrepare(source, profile, useMax = false) {
 
 // ---- HPC-GoT Bounded Render Pipeline ----------------------------------------
 
-const HPC_PRUNE_THRESHOLD = 0.85;
-const HPC_MAX_REPAIR_ATTEMPTS = 2;
+const { getConfig: getGotConfig } = require('./got-config');
 
 /**
  * Parse strict JSON from LLM output, tolerating markdown fencing.
@@ -436,14 +465,51 @@ function _validatePlan(plan, facts) {
  * @param {boolean} [useMax=false] - Use Max-tier inference
  * @returns {Promise<{mmdSource: string, enhanced: boolean, provider: string, stagesExecuted: string[], facts?: object, plan?: object, hpcScore?: object}>}
  */
+let _auditEmit = null;
+let _activeRunId = null;
+
+function _setAuditEmitter(fn) { _auditEmit = fn; }
+function _audit(type, data) { if (_auditEmit) _auditEmit(type, data); }
+function _setRunId(runId) { _activeRunId = runId; }
+
+let _runTrackerRef = null;
+function _rt() {
+  if (!_activeRunId) return null;
+  if (!_runTrackerRef) {
+    try { _runTrackerRef = require('./run-tracker'); } catch { return null; }
+  }
+  return _runTrackerRef;
+}
+
 async function renderHPCGoT(source, profile, useMax = false) {
   const stagesExecuted = [];
   const inferFn = useMax ? provider.inferMax : provider.infer;
+  const gotCfg = getGotConfig();
+  const rt = _rt();
+
+  let stateCount = 1;
+  _audit('got:root_init', { stateBudget: gotCfg.stateBudget, depth: gotCfg.maxDepth });
 
   // ---- Stage 1: Typed Architecture Fact Extraction ---
+  _audit('render:hpc_stage1', { stage: 'fact_extraction', useMax });
+  if (rt) rt.addStage(_activeRunId, 'fact_extraction');
   const factUserPrompt = buildFactExtractionUserPrompt(source, profile);
+  const factCallStart = Date.now();
   const factResult = await inferFn('fact_extraction', { userPrompt: factUserPrompt });
   stagesExecuted.push('fact_extraction');
+
+  if (rt) {
+    const factContextEst = rmBridge.estimateContextSize('fact_extraction', factUserPrompt);
+    rt.recordAgentCall(_activeRunId, {
+      stage: 'fact_extraction', model: factResult.model, provider: factResult.provider,
+      promptText: factUserPrompt, outputText: factResult.output || '',
+      latencyMs: factResult.latencyMs || (Date.now() - factCallStart),
+      success: !!factResult.output, outputType: 'json',
+      actionTag: factResult.actionTag || null,
+      contextEst: factContextEst,
+    });
+    if (factResult.rateEvents) for (const re of factResult.rateEvents) rt.recordRateEvent(_activeRunId, re);
+  }
 
   const facts = _parseStrictJSON(factResult.output);
   const factValidation = _validateFacts(facts);
@@ -466,6 +532,15 @@ async function renderHPCGoT(source, profile, useMax = false) {
     }
   }
 
+  if (facts.entities.length > gotCfg.maxEntities) {
+    logger.info('hpc.capping_entities', { original: facts.entities.length, capped: gotCfg.maxEntities });
+    facts.entities = facts.entities.slice(0, gotCfg.maxEntities);
+  }
+  if ((facts.relationships || []).length > gotCfg.maxRelationships) {
+    logger.info('hpc.capping_relationships', { original: facts.relationships.length, capped: gotCfg.maxRelationships });
+    facts.relationships = facts.relationships.slice(0, gotCfg.maxRelationships);
+  }
+
   logger.info('hpc.stage1_complete', {
     entities: facts.entities.length,
     relationships: (facts.relationships || []).length,
@@ -475,9 +550,25 @@ async function renderHPCGoT(source, profile, useMax = false) {
   });
 
   // ---- Stage 2: Diagram Plan ---
+  _audit('render:hpc_stage2', { stage: 'diagram_plan', entities: facts.entities.length });
+  if (rt) rt.addStage(_activeRunId, 'diagram_plan');
   const planUserPrompt = buildDiagramPlanUserPrompt(facts, profile);
+  const planCallStart = Date.now();
   const planResult = await inferFn('diagram_plan', { userPrompt: planUserPrompt });
   stagesExecuted.push('diagram_plan');
+
+  if (rt) {
+    const planContextEst = rmBridge.estimateContextSize('diagram_plan', planUserPrompt);
+    rt.recordAgentCall(_activeRunId, {
+      stage: 'diagram_plan', model: planResult.model, provider: planResult.provider,
+      promptText: planUserPrompt, outputText: planResult.output || '',
+      latencyMs: planResult.latencyMs || (Date.now() - planCallStart),
+      success: !!planResult.output, outputType: 'json',
+      actionTag: planResult.actionTag || null,
+      contextEst: planContextEst,
+    });
+    if (planResult.rateEvents) for (const re of planResult.rateEvents) rt.recordRateEvent(_activeRunId, re);
+  }
 
   const plan = _parseStrictJSON(planResult.output);
   const planValidation = _validatePlan(plan, facts);
@@ -495,34 +586,160 @@ async function renderHPCGoT(source, profile, useMax = false) {
     provider: planResult.provider,
   });
 
-  // ---- Stage 3: Mermaid Composition ---
+  // ---- Stage 3: 2-Branch Composition (GoT branching at composition level) ---
+  _audit('render:hpc_stage3', { stage: 'composition', nodes: plan.nodes.length, edges: plan.edges.length, branches: 2 });
   const compUserPrompt = buildCompositionUserPrompt(plan, facts);
-  const compResult = await inferFn('composition', { userPrompt: compUserPrompt });
-  stagesExecuted.push('composition');
 
-  let mmdSource = compResult.output || '';
+  // Branch: generate 2 structurally competing compositions concurrently.
+  // Branch A: top-down layout grouped by architectural boundary (default).
+  // Branch B: left-right layout grouped by data-flow stage for genuine divergence.
+  _audit('got:branch_start', { level: 2, branchCount: 2 });
+  const branchBDirective = [
+    '',
+    '%% BRANCH-B COMPOSITION DIRECTIVE — structural alternative',
+    '%% Use LR (left-to-right) layout direction instead of TB.',
+    '%% Group nodes by data-flow stage rather than architectural boundary.',
+    '%% Prioritize edge label clarity over subgraph nesting depth.',
+    '%% Prefer flat subgraph structure with explicit cross-stage edges.',
+  ].join('\n');
+  if (rt) rt.addStage(_activeRunId, 'composition');
+  const compCallStart = Date.now();
+  const [compResultA, compResultB] = await Promise.all([
+    inferFn('composition', { userPrompt: compUserPrompt }),
+    inferFn('composition', { userPrompt: compUserPrompt + branchBDirective }),
+  ]);
+  stagesExecuted.push('composition_branch_a', 'composition_branch_b');
+  stateCount += 2;
+  _audit('got:branch_end', { branchCount: 2, stateCount });
 
-  // Strip markdown fencing if present
-  if (mmdSource.trim().startsWith('```')) {
-    mmdSource = mmdSource.trim().replace(/^```(?:mermaid)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+  if (rt) {
+    const compLatency = Date.now() - compCallStart;
+    const compContextEstA = rmBridge.estimateContextSize('composition', compUserPrompt);
+    const compContextEstB = rmBridge.estimateContextSize('composition', compUserPrompt + branchBDirective);
+    rt.recordAgentCall(_activeRunId, {
+      stage: 'composition', role: 'branch_a', model: compResultA.model, provider: compResultA.provider,
+      promptText: compUserPrompt, outputText: compResultA.output || '',
+      latencyMs: compResultA.latencyMs || compLatency, success: !!compResultA.output, outputType: 'text',
+      batchId: 'composition_branches',
+      actionTag: compResultA.actionTag || null,
+      contextEst: compContextEstA,
+    });
+    rt.recordAgentCall(_activeRunId, {
+      stage: 'composition', role: 'branch_b', model: compResultB.model, provider: compResultB.provider,
+      promptText: compUserPrompt + branchBDirective, outputText: compResultB.output || '',
+      latencyMs: compResultB.latencyMs || compLatency, success: !!compResultB.output, outputType: 'text',
+      batchId: 'composition_branches',
+      actionTag: compResultB.actionTag || null,
+      contextEst: compContextEstB,
+    });
+    for (const r of [compResultA, compResultB]) {
+      if (r.rateEvents) for (const re of r.rateEvents) rt.recordRateEvent(_activeRunId, re);
+    }
   }
 
-  // Validate first line is a valid directive
-  const firstLine = mmdSource.split('\n').find(l => l.trim() && !l.trim().startsWith('%%'));
-  if (!firstLine || !VALID_DIRECTIVE_RE.test(firstLine.trim())) {
-    logger.warn('hpc.stage3_invalid_directive', { firstLine: firstLine?.slice(0, 80) });
+  function _cleanComposition(raw) {
+    if (!raw) return null;
+    let cleaned = raw.trim();
+    if (cleaned.startsWith('```')) {
+      cleaned = cleaned.replace(/^```(?:mermaid)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+    }
+    const fl = cleaned.split('\n').find(l => l.trim() && !l.trim().startsWith('%%'));
+    if (!fl || !VALID_DIRECTIVE_RE.test(fl.trim())) return null;
+    return cleaned;
+  }
+
+  const candidateA = _cleanComposition(compResultA.output);
+  const candidateB = _cleanComposition(compResultB.output);
+
+  // Score both candidates
+  const scoreA = candidateA ? computeHPCScore(candidateA, facts) : { score: 0, sv: 0, ic: 0 };
+  const scoreB = candidateB ? computeHPCScore(candidateB, facts) : { score: 0, sv: 0, ic: 0 };
+  _audit('got:validate', { branchA: scoreA.score, branchB: scoreB.score });
+
+  logger.info('hpc.branch_scores', {
+    branchA: scoreA.score, svA: scoreA.sv, icA: scoreA.ic,
+    branchB: scoreB.score, svB: scoreB.sv, icB: scoreB.ic,
+  });
+
+  if (rt) {
+    rt.recordBranch(_activeRunId, {
+      parentStateId: 'root', level: 2, label: 'composition_branch_A',
+      score: { composite: scoreA.score, sv: scoreA.sv, ic: scoreA.ic },
+      decision: candidateA && scoreA.score >= gotCfg.pruneThreshold * 0.7 ? 'retained' : 'pruned',
+    });
+    rt.recordBranch(_activeRunId, {
+      parentStateId: 'root', level: 2, label: 'composition_branch_B',
+      score: { composite: scoreB.score, sv: scoreB.sv, ic: scoreB.ic },
+      decision: candidateB && scoreB.score >= gotCfg.pruneThreshold * 0.7 ? 'retained' : 'pruned',
+    });
+  }
+
+  const softTau = gotCfg.pruneThreshold * 0.7;
+  const survivors = [];
+  if (candidateA && scoreA.score >= softTau) survivors.push({ mmd: candidateA, score: scoreA, provider: compResultA.provider, label: 'A' });
+  if (candidateB && scoreB.score >= softTau) survivors.push({ mmd: candidateB, score: scoreB, provider: compResultB.provider, label: 'B' });
+  _audit('got:prune', { kept: survivors.length, total: 2, tau: softTau });
+
+  if (survivors.length === 0) {
+    logger.warn('hpc.stage3_all_pruned');
     return renderPrepare(source, profile, useMax);
   }
 
-  // ---- Invariant Validation + Bounded Repair ---
-  let hpcScore = computeHPCScore(mmdSource, facts);
+  // Select best survivor
+  survivors.sort((a, b) => b.score.score - a.score.score);
+  let mmdSource = survivors[0].mmd;
+  let hpcScore = survivors[0].score;
+
+  // ---- Merge: if 2 survivors, try combining compatible elements from runner-up ---
+  if (survivors.length >= 2 && gotCfg.mergeEnabled) {
+    _audit('got:merge_eval', { candidateCount: survivors.length });
+
+    // Parallel shadow extraction — both are independent pure computations
+    const [bestShadow, runnerShadow] = await Promise.all([
+      Promise.resolve(extractShadow(survivors[0].mmd)),
+      Promise.resolve(extractShadow(survivors[1].mmd)),
+    ]);
+    const bestEntities = new Set((bestShadow.entities || []).map(e => e.name.toLowerCase()));
+
+    // Find compatible elements: entities in runner-up not already in best
+    const compatibleEntities = (runnerShadow.entities || []).filter(e => !bestEntities.has(e.name.toLowerCase()));
+
+    if (compatibleEntities.length > 0 && compatibleEntities.length <= 5) {
+      // Lightweight merge: append compatible nodes as additional entries
+      const entityLines = compatibleEntities.map(e => {
+        const id = e.name.replace(/[^a-zA-Z0-9]/g, '');
+        return `    ${id}["${e.name}"]`;
+      }).join('\n');
+      const mergedMmd = mmdSource.trim() + '\n' + entityLines;
+      const mergedScore = computeHPCScore(mergedMmd, facts);
+
+      if (mergedScore.score >= hpcScore.score) {
+        _audit('got:merge_accept', { score: mergedScore.score, added: compatibleEntities.length });
+        logger.info('hpc.merge_accepted', { oldScore: hpcScore.score, newScore: mergedScore.score, added: compatibleEntities.length });
+        mmdSource = mergedMmd;
+        hpcScore = mergedScore;
+        stagesExecuted.push('merge_accepted');
+      } else {
+        _audit('got:merge_reject', { reason: 'score_decreased', oldScore: hpcScore.score, newScore: mergedScore.score });
+        logger.info('hpc.merge_rejected', { reason: 'score_decreased' });
+      }
+    }
+  }
+
+  _audit('render:validate', { score: hpcScore.score, sv: hpcScore.sv, ic: hpcScore.ic, valid: hpcScore.sv > 0 });
   logger.info('hpc.stage3_initial_score', { score: hpcScore.score, sv: hpcScore.sv, ic: hpcScore.ic });
 
   let repairAttempt = 0;
-  while (hpcScore.score < HPC_PRUNE_THRESHOLD && repairAttempt < HPC_MAX_REPAIR_ATTEMPTS) {
+  while (hpcScore.score < gotCfg.pruneThreshold && repairAttempt < gotCfg.maxRepairAttempts) {
+    if (stateCount >= gotCfg.stateBudget) {
+      logger.info('hpc.state_budget_reached', { stateCount, budget: gotCfg.stateBudget });
+      break;
+    }
     repairAttempt++;
+    stateCount++;
     const invariantResult = validateInvariants(mmdSource, facts, plan);
 
+    _audit('render:repair', { attempt: repairAttempt, stateCount, missingEntities: invariantResult.trace.missingEntities.length });
     logger.info('hpc.semantic_repair', {
       attempt: repairAttempt,
       missingEntities: invariantResult.trace.missingEntities.length,
@@ -531,8 +748,23 @@ async function renderHPCGoT(source, profile, useMax = false) {
     });
 
     const repairUserPrompt = buildSemanticRepairUserPrompt(mmdSource, invariantResult.trace, plan, facts);
+    const repairCallStart = Date.now();
     const repairResult = await inferFn('semantic_repair', { userPrompt: repairUserPrompt });
     stagesExecuted.push(`semantic_repair_${repairAttempt}`);
+
+    if (rt) {
+      rt.addStage(_activeRunId, `semantic_repair_${repairAttempt}`);
+      const repairContextEst = rmBridge.estimateContextSize('semantic_repair', repairUserPrompt);
+      rt.recordAgentCall(_activeRunId, {
+        stage: 'semantic_repair', model: repairResult.model, provider: repairResult.provider,
+        promptText: repairUserPrompt, outputText: repairResult.output || '',
+        latencyMs: repairResult.latencyMs || (Date.now() - repairCallStart),
+        success: !!repairResult.output, outputType: 'text',
+        actionTag: repairResult.actionTag || null,
+        contextEst: repairContextEst,
+      });
+      if (repairResult.rateEvents) for (const re of repairResult.rateEvents) rt.recordRateEvent(_activeRunId, re);
+    }
 
     if (!repairResult.output) break;
 
@@ -558,9 +790,9 @@ async function renderHPCGoT(source, profile, useMax = false) {
   }
 
   // Final pruning check
-  if (hpcScore.score < HPC_PRUNE_THRESHOLD * 0.7) {
-    logger.warn('hpc.below_prune_threshold', { score: hpcScore.score, threshold: HPC_PRUNE_THRESHOLD * 0.7 });
-    // Score is very low — fall back to legacy path
+  if (hpcScore.score < gotCfg.pruneThreshold * 0.7) {
+    _audit('render:fallback', { reason: 'below_prune_threshold', score: hpcScore.score });
+    logger.warn('hpc.below_prune_threshold', { score: hpcScore.score, threshold: gotCfg.pruneThreshold * 0.7 });
     const legacy = await renderPrepare(source, profile, useMax);
     legacy.stagesExecuted = [...stagesExecuted, ...legacy.stagesExecuted, 'legacy_fallback'];
     return legacy;
@@ -569,11 +801,12 @@ async function renderHPCGoT(source, profile, useMax = false) {
   return {
     mmdSource,
     enhanced: true,
-    provider: compResult.provider,
+    provider: survivors[0]?.provider || compResultA.provider,
     stagesExecuted,
     facts,
     plan,
     hpcScore,
+    stateCount,
   };
 }
 
@@ -661,11 +894,27 @@ async function renderMaxUpgrade(source, profile) {
   }
 
   // Step 2: Call Max model with architect-grade composition prompt
+  const rt = _rt();
+  if (rt) rt.addStage(_activeRunId, 'max_composition');
   const maxUserPrompt = buildMaxCompositionUserPrompt(
     baseline.mmdSource, facts, plan, source,
   );
+  const maxCallStart = Date.now();
   const maxResult = await provider.inferMax('max_composition', { userPrompt: maxUserPrompt });
   const stagesExecuted = [...baselineStages, 'max_composition'];
+
+  if (rt) {
+    const maxContextEst = rmBridge.estimateContextSize('max_composition', maxUserPrompt);
+    rt.recordAgentCall(_activeRunId, {
+      stage: 'max_composition', model: maxResult.model, provider: maxResult.provider,
+      promptText: maxUserPrompt, outputText: maxResult.output || '',
+      latencyMs: maxResult.latencyMs || (Date.now() - maxCallStart),
+      success: !!maxResult.output, outputType: 'text',
+      actionTag: maxResult.actionTag || null,
+      contextEst: maxContextEst,
+    });
+    if (maxResult.rateEvents) for (const re of maxResult.rateEvents) rt.recordRateEvent(_activeRunId, re);
+  }
 
   if (!maxResult.output) {
     logger.warn('max.no_output', { provider: maxResult.provider });
@@ -726,6 +975,50 @@ async function renderMaxUpgrade(source, profile) {
 
 // ---- Decompose-and-render for complex inputs --------------------------------
 
+function _extractMmdLabels(mmdSource) {
+  const labels = new Set();
+  // Match node labels: id["label"], id("label"), id(["label"]), id["label"], id{label}
+  const labelPatterns = [
+    /\w+\s*\["([^"]+)"\]/g,
+    /\w+\s*\("([^"]+)"\)/g,
+    /\w+\s*\(\["([^"]+)"\]\)/g,
+    /\w+\s*\{"([^"]+)"\}/g,
+    /\w+\s*\[([^\]"]+)\]/g,
+    /\w+\s*\(([^)"]+)\)/g,
+  ];
+  for (const re of labelPatterns) {
+    let m;
+    while ((m = re.exec(mmdSource)) !== null) {
+      const label = m[1].trim();
+      if (label.length > 1 && label.length < 80) labels.add(label.toLowerCase());
+    }
+  }
+  // Also extract subgraph titles: subgraph Title or subgraph id["Title"]
+  const sgRe = /subgraph\s+(?:\w+\s*\["([^"]+)"\]|([^\n[]+))/g;
+  let sgm;
+  while ((sgm = sgRe.exec(mmdSource)) !== null) {
+    const title = (sgm[1] || sgm[2] || '').trim();
+    if (title.length > 1 && title.length < 80) labels.add(title.toLowerCase());
+  }
+  return labels;
+}
+
+function _fuzzyEntityMatch(entityName, labelSet) {
+  const en = entityName.toLowerCase();
+  if (labelSet.has(en)) return true;
+  // Check if any label contains the entity name or vice versa (min 4 chars to avoid spurious matches)
+  for (const label of labelSet) {
+    if (en.length >= 4 && label.includes(en)) return true;
+    if (label.length >= 4 && en.includes(label)) return true;
+    // Word-boundary match: split entity and label into words, check overlap
+    const eWords = en.split(/[\s_\-/]+/).filter(w => w.length >= 3);
+    const lWords = label.split(/[\s_\-/]+/).filter(w => w.length >= 3);
+    const overlap = eWords.filter(w => lWords.some(lw => lw.includes(w) || w.includes(lw)));
+    if (eWords.length > 0 && overlap.length / eWords.length >= 0.5) return true;
+  }
+  return false;
+}
+
 function _scoreSubView(mmdSource, parentShadow) {
   const mmdMetrics = require('./mermaid-validator').validate(mmdSource);
   const nodeCount = mmdMetrics.stats?.nodeCount || 0;
@@ -733,9 +1026,9 @@ function _scoreSubView(mmdSource, parentShadow) {
 
   const compilability = mmdMetrics.valid ? 1.0 : 0.0;
 
-  const mmdLower = mmdSource.toLowerCase();
-  const parentEntityNames = (parentShadow?.entities || []).map(e => e.name.toLowerCase());
-  const coveredCount = parentEntityNames.filter(n => mmdLower.includes(n)).length;
+  const labelSet = _extractMmdLabels(mmdSource);
+  const parentEntityNames = (parentShadow?.entities || []).map(e => e.name);
+  const coveredCount = parentEntityNames.filter(n => _fuzzyEntityMatch(n, labelSet)).length;
   const entityCoverage = parentEntityNames.length > 0
     ? Math.min(1.0, coveredCount / parentEntityNames.length)
     : 0.5;
@@ -749,6 +1042,25 @@ function _scoreSubView(mmdSource, parentShadow) {
   return { compilability, entityCoverage, edgeDensity, composite, nodeCount, edgeCount };
 }
 
+const PROSE_LABEL_RE = /\[["']?([^"'\]]+)["']?\]/g;
+const VERB_PHRASE_RE = /^(redirects?\s+to|goes?\s+to|sends?\s+to|connects?\s+to|routes?\s+to|flows?\s+to|returns?\s+|checks?\s+|validates?\s+|stores?\s+in|reads?\s+from|writes?\s+to)\b/i;
+
+function _checkForProseFragments(mmdSource) {
+  const fragments = [];
+  let match;
+  const re = new RegExp(PROSE_LABEL_RE.source, 'g');
+  while ((match = re.exec(mmdSource)) !== null) {
+    const label = match[1].trim();
+    const words = label.split(/\s+/);
+    if (words.length > 10) {
+      fragments.push(label.slice(0, 40));
+    } else if (VERB_PHRASE_RE.test(label) && words.length <= 4) {
+      fragments.push(label);
+    }
+  }
+  return { clean: fragments.length === 0, fragments };
+}
+
 function _extractLineNumber(errorStr) {
   if (!errorStr) return null;
   const m = errorStr.match(/(?:Parse error|Error) on line (\d+)/i);
@@ -757,11 +1069,36 @@ function _extractLineNumber(errorStr) {
 
 async function decomposeAndRender(source, profile, useMax = false) {
   const stagesExecuted = [];
-  const { buildDecomposeUserPrompt, buildRepairFromTraceUserPrompt } = require('./axiom-prompts');
+  const fsp = require('node:fs/promises');
+  const nodePath = require('node:path');
+  const PROJECT_ROOT = nodePath.resolve(__dirname, '..', '..');
+  const {
+    buildDecomposeUserPrompt, buildRepairFromTraceUserPrompt,
+    buildMergeCompositionUserPrompt,
+  } = require('./axiom-prompts');
+  const inferFn = useMax ? provider.inferMax : provider.infer;
+  const rt = _rt();
+
+  _audit('decompose:start', { useMax });
+  if (rt) rt.addStage(_activeRunId, 'decompose');
 
   const decomposePrompt = buildDecomposeUserPrompt(source, profile);
+  const decompCallStart = Date.now();
   const decomposeResult = await provider.infer('decompose', { userPrompt: decomposePrompt });
   stagesExecuted.push('decompose');
+
+  if (rt) {
+    const decompContextEst = rmBridge.estimateContextSize('decompose', decomposePrompt);
+    rt.recordAgentCall(_activeRunId, {
+      stage: 'decompose', model: decomposeResult.model, provider: decomposeResult.provider,
+      promptText: decomposePrompt, outputText: decomposeResult.output || '',
+      latencyMs: decomposeResult.latencyMs || (Date.now() - decompCallStart),
+      success: !!decomposeResult.output, outputType: 'json',
+      actionTag: decomposeResult.actionTag || null,
+      contextEst: decompContextEst,
+    });
+    if (decomposeResult.rateEvents) for (const re of decomposeResult.rateEvents) rt.recordRateEvent(_activeRunId, re);
+  }
 
   let subViews = null;
   if (decomposeResult.output) {
@@ -782,16 +1119,15 @@ async function decomposeAndRender(source, profile, useMax = false) {
 
   logger.info('decompose.success', { viewCount: subViews.length, provider: decomposeResult.provider });
 
-  const results = [];
-  for (const view of subViews.slice(0, 4)) {
+  async function _renderSubView(view, idx) {
     const viewDesc = view.viewDescription || view.description || '';
-    if (!viewDesc) continue;
+    if (!viewDesc) return null;
 
     const viewProfile = analyze(viewDesc, 'idea');
     const prep = await renderPrepare(viewDesc, viewProfile, useMax);
-    stagesExecuted.push(`render_subview:${view.viewName || 'unnamed'}`);
 
-    const outputDir = require('node:path').join(require('node:path').resolve(__dirname, '..', '..'), 'flows', '_tmp_subview_' + Date.now());
+    const viewSlug = (view.viewName || `subview-${idx}`).replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+    const outputDir = nodePath.join(PROJECT_ROOT, 'flows', '_tmp_subview_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6));
     const compileOut = await compileWithRetry(prep.mmdSource, outputDir, 'subview');
 
     if (!compileOut.result.ok) {
@@ -800,29 +1136,29 @@ async function decomposeAndRender(source, profile, useMax = false) {
       const lineNumber = _extractLineNumber(errorStr);
 
       const tracePrompt = buildRepairFromTraceUserPrompt(
-        prep.mmdSource,
-        errorStr,
-        viewShadow,
-        viewDesc,
+        prep.mmdSource, errorStr, viewShadow, viewDesc,
         { lineNumber, priorAttempts: compileOut.attempts, deterministicChanges: compileOut.repairChanges },
       );
       const repairResult = await provider.infer('repair_from_trace', { userPrompt: tracePrompt });
-      stagesExecuted.push('repair_from_trace');
 
       if (repairResult.output) {
         const repairedCompile = await compileWithRetry(repairResult.output, outputDir, 'subview');
         if (repairedCompile.result.ok) {
           const repairedScore = _scoreSubView(repairedCompile.mmdSource, profile.shadow);
-          results.push({ mmdSource: repairedCompile.mmdSource, score: repairedScore.composite, scoreFactors: repairedScore, viewName: view.viewName, compileResult: repairedCompile.result });
-          continue;
+          return { mmdSource: repairedCompile.mmdSource, score: repairedScore.composite, scoreFactors: repairedScore, viewName: view.viewName, viewSlug, outputDir, compileResult: repairedCompile.result, stages: [`render_subview:${view.viewName || 'unnamed'}`, 'repair_from_trace'] };
         }
       }
-      results.push({ mmdSource: prep.mmdSource, score: 0.0, scoreFactors: null, viewName: view.viewName, compileResult: compileOut.result });
-    } else {
-      const viewScore = _scoreSubView(compileOut.mmdSource, profile.shadow);
-      results.push({ mmdSource: compileOut.mmdSource, score: viewScore.composite, scoreFactors: viewScore, viewName: view.viewName, compileResult: compileOut.result });
+      return { mmdSource: prep.mmdSource, score: 0.0, scoreFactors: null, viewName: view.viewName, viewSlug, outputDir, compileResult: compileOut.result, stages: [`render_subview:${view.viewName || 'unnamed'}`] };
     }
+
+    const viewScore = _scoreSubView(compileOut.mmdSource, profile.shadow);
+    return { mmdSource: compileOut.mmdSource, score: viewScore.composite, scoreFactors: viewScore, viewName: view.viewName, viewSlug, outputDir, compileResult: compileOut.result, stages: [`render_subview:${view.viewName || 'unnamed'}`] };
   }
+
+  const viewTasks = subViews.slice(0, 6).map((v, i) => _renderSubView(v, i));
+  const settled = await Promise.all(viewTasks);
+  const results = settled.filter(Boolean);
+  for (const r of results) stagesExecuted.push(...r.stages);
 
   if (results.length === 0) {
     logger.warn('decompose.no_results', { reason: 'all sub-views failed' });
@@ -830,12 +1166,125 @@ async function decomposeAndRender(source, profile, useMax = false) {
   }
 
   results.sort((a, b) => b.score - a.score);
-  const best = results[0];
 
-  logger.info('decompose.selected', {
+  logger.info('decompose.subviews_complete', {
+    count: results.length,
+    scores: results.map(r => ({ name: r.viewName, score: r.score })),
+  });
+
+  const subviewMmds = [];
+  for (const r of results) {
+    if (r.mmdSource) {
+      subviewMmds.push({ viewName: r.viewName || r.viewSlug, mmdSource: r.mmdSource, score: r.score, outputDir: r.outputDir });
+      try {
+        await fsp.writeFile(nodePath.join(r.outputDir, 'subview.mmd'), r.mmdSource, 'utf8');
+      } catch { /* best effort */ }
+
+      if (rt) {
+        rt.addSubview(_activeRunId, {
+          viewName: r.viewName || r.viewSlug,
+          viewDescription: '',
+          mmdSource: r.mmdSource,
+          score: r.scoreFactors || null,
+          compileResult: r.compileResult ? { ok: r.compileResult.ok, attempts: 1 } : null,
+          retained: r.score > 0,
+          mergeEligible: r.compileResult?.ok && r.score >= (getGotConfig().pruneThreshold * 0.7),
+        });
+      }
+    }
+  }
+
+  // ---- MERGE STEP: combine all subview .mmd into one unified diagram ----
+  if (subviewMmds.length >= 2) {
+    _audit('decompose:merge_start', { subviewCount: subviewMmds.length });
+    stagesExecuted.push('merge_composition');
+
+    if (rt) rt.addStage(_activeRunId, 'merge_composition');
+    const mergePrompt = buildMergeCompositionUserPrompt(subviewMmds, source);
+    const mergeCallStart = Date.now();
+    const mergeResult = await inferFn('merge_composition', { userPrompt: mergePrompt });
+
+    let mergeCallId = null;
+    if (rt) {
+      const mergeContextEst = rmBridge.estimateContextSize('merge_composition', mergePrompt);
+      mergeCallId = rt.recordAgentCall(_activeRunId, {
+        stage: 'merge_composition', model: mergeResult.model, provider: mergeResult.provider,
+        promptText: mergePrompt, outputText: mergeResult.output || '',
+        latencyMs: mergeResult.latencyMs || (Date.now() - mergeCallStart),
+        success: !!mergeResult.output, outputType: 'text',
+        actionTag: mergeResult.actionTag || null,
+        contextEst: mergeContextEst,
+      });
+      if (mergeResult.rateEvents) for (const re of mergeResult.rateEvents) rt.recordRateEvent(_activeRunId, re);
+    }
+
+    if (mergeResult.output) {
+      const contract = _enforceMmdContract(mergeResult.output);
+      if (contract.mmd) {
+        const mergeScore = _scoreSubView(contract.mmd, profile.shadow);
+        const bestSingleScore = results[0].score;
+
+        logger.info('decompose.merge_scored', {
+          mergeScore: mergeScore.composite,
+          bestSingleScore,
+          nodeCount: mergeScore.nodeCount,
+          edgeCount: mergeScore.edgeCount,
+          provider: mergeResult.provider,
+        });
+
+        // Accept merge if it covers at least as many entities as the best single subview
+        // OR if it has more nodes (broader coverage of the full architecture)
+        if (mergeScore.composite >= bestSingleScore * 0.85 || mergeScore.nodeCount > results[0].scoreFactors?.nodeCount) {
+          _audit('decompose:merge_accepted', { score: mergeScore.composite, nodes: mergeScore.nodeCount });
+          stagesExecuted.push('merge_accepted');
+
+          if (rt) {
+            rt.recordMerge(_activeRunId, {
+              strategy: 'llm_synthesis',
+              inputSubviewIds: subviewMmds.map((_, i) => `subview_${i}`),
+              agentCallId: mergeCallId,
+              preMergeBestScore: bestSingleScore,
+              postMergeScore: mergeScore.composite,
+              accepted: true,
+            });
+          }
+
+          return {
+            mmdSource: contract.mmd,
+            enhanced: true,
+            provider: mergeResult.provider,
+            stagesExecuted,
+            subviews: subviewMmds,
+          };
+        }
+
+        if (rt) {
+          rt.recordMerge(_activeRunId, {
+            strategy: 'llm_synthesis',
+            inputSubviewIds: subviewMmds.map((_, i) => `subview_${i}`),
+            agentCallId: mergeCallId,
+            preMergeBestScore: bestSingleScore,
+            postMergeScore: mergeScore.composite,
+            accepted: false,
+            rejectionReason: 'score_below_threshold',
+          });
+        }
+
+        _audit('decompose:merge_rejected', { reason: 'score_below_threshold', mergeScore: mergeScore.composite, bestSingleScore });
+        logger.info('decompose.merge_rejected', { reason: 'score_below_threshold', mergeScore: mergeScore.composite, bestSingleScore });
+      } else {
+        logger.warn('decompose.merge_contract_failed', { violations: contract.violations });
+      }
+    } else {
+      logger.warn('decompose.merge_no_output', { provider: mergeResult.provider });
+    }
+  }
+
+  // Fallback: if merge fails or only one subview, return the best single one
+  const best = results[0];
+  logger.info('decompose.selected_single', {
     viewName: best.viewName,
     score: best.score,
-    factors: best.scoreFactors,
     candidateCount: results.length,
   });
 
@@ -844,6 +1293,7 @@ async function decomposeAndRender(source, profile, useMax = false) {
     enhanced: true,
     provider: decomposeResult.provider,
     stagesExecuted,
+    subviews: subviewMmds,
   };
 }
 
@@ -1091,8 +1541,10 @@ function buildResult(mmdSource, contentState, enhanced, enhanceMeta, stagesExecu
     logger.info('deterministic.repair', { changes: repairResult.changes });
   }
 
+  // Both classify and validate are synchronous pure functions — run inline
   const diagramType = classify(mmdSource);
   const validation = validate(mmdSource);
+  _audit('render:validate', { valid: validation.valid, diagramType, warnings: validation.warnings.length });
 
   const diagramSelection = (contentState === 'text' && originalSource)
     ? selectDiagramType(originalSource)
@@ -1140,4 +1592,6 @@ module.exports = {
   extractFencedMermaid,
   bestEffortExtract,
   RouterError,
+  _setAuditEmitter,
+  _setRunId,
 };

@@ -26,6 +26,7 @@
   const stateBadge = document.getElementById('content-state-badge');
   const chkEnhance = document.getElementById('chk-enhance');
   const inputHint = document.getElementById('input-hint');
+  const nextActionChip = document.getElementById('next-action-chip');
   const resultPng = document.getElementById('result-png');
   const resultSvg = document.getElementById('result-svg');
   const flipCardEl = document.getElementById('flip-card');
@@ -40,8 +41,32 @@
   let pzBack = null;
 
   const sidebar = new window.MermaidSidebar(sidebarList, (item) => {
-    showResult(item.paths, item.name);
+    showResult(item.paths, item.name, item.run_id);
   });
+
+  // Run details panel
+  const runDetailsEl = document.getElementById('run-details');
+  const btnBackToMain = document.getElementById('btn-back-to-main');
+  let _mainPaths = null;
+  const runDetails = runDetailsEl
+    ? new window.MermaidRunDetails(runDetailsEl, (sv) => {
+        if (sv.png || sv.svg) {
+          _mainPaths = currentPaths;
+          showResult({ png: sv.png, svg: sv.svg }, 'subview');
+          if (btnBackToMain) btnBackToMain.hidden = false;
+        }
+      })
+    : null;
+
+  if (btnBackToMain) {
+    btnBackToMain.addEventListener('click', () => {
+      if (_mainPaths) {
+        showResult(_mainPaths, currentDiagramName);
+        _mainPaths = null;
+      }
+      btnBackToMain.hidden = true;
+    });
+  }
 
   // ---- Max mode ----
   const btnMax = document.getElementById('btn-max');
@@ -70,6 +95,9 @@
   let renderEffect = null;
   let renderEffectLoader = null;
   let loadingHideTimer = null;
+  let profileHint = '';
+  let agentState = 'idle';
+  let notesDirty = false;
 
   const COPILOT_API_BASE = '/api/copilot';
 
@@ -111,12 +139,97 @@
     hybrid: 'mixed input',
   };
 
+  const AGENT_MODE_LABELS = {
+    thinking: 'Thinking',
+    'code-review': 'Code Review',
+    'optimize-mmd': 'Optimize',
+  };
+
+  function getAgentModeLabel(modeId) {
+    return AGENT_MODE_LABELS[modeId] || (modeId ? modeId.replace(/-/g, ' ') : 'Agent');
+  }
+
+  function syncUiGuidance() {
+    const source = input.value || '';
+    const hasInput = source.trim().length > 0;
+    const hasName = !!diagramNameInput?.value?.trim();
+    const hasResult = !!currentPaths;
+    const activeMode = MODES[currentMode] || MODES.idea;
+    let hint = activeMode.hint;
+    let nextAction = '';
+    let tone = 'ready';
+
+    if (isLoading) {
+      hint = loadingText.textContent || 'Compiling diagram...';
+      nextAction = 'Next: wait for the current render';
+      tone = 'busy';
+    } else if (agentState === 'running') {
+      hint = `${getAgentModeLabel(selectedAgentMode)} agent is building a preview from your prompt.`;
+      nextAction = 'Next: wait for the preview';
+      tone = 'busy';
+    } else if (agentState === 'awaiting_notes') {
+      hint = notesDirty
+        ? 'Preview ready. Your notes will steer the final Max pass.'
+        : 'Preview ready. Add notes for the final pass or keep the current draft.';
+      nextAction = notesDirty ? 'Next: enhance with notes' : 'Next: render as is or add notes';
+      tone = 'ready';
+    } else if (agentState === 'finalizing') {
+      hint = 'Applying the final pass and compiling the diagram.';
+      nextAction = 'Next: wait for the final result';
+      tone = 'busy';
+    } else if (agentModeActive && selectedAgentMode) {
+      hint = hasInput
+        ? `Agent: ${getAgentModeLabel(selectedAgentMode)} mode. Run the agent when the prompt is ready.`
+        : `Agent: ${getAgentModeLabel(selectedAgentMode)} mode. Enter the architecture prompt to begin.`;
+      nextAction = hasInput ? 'Next: run agent' : (hasName ? 'Next: describe the architecture' : 'Next: enter prompt');
+      tone = 'ready';
+    } else if (!hasInput) {
+      if (currentMode === 'idea') {
+        hint = hasName ? 'Describe the system, actors, and flow direction.' : activeMode.hint;
+        nextAction = hasName ? 'Next: describe the architecture' : 'Next: enter an idea';
+      } else if (currentMode === 'md') {
+        nextAction = 'Next: paste or upload a markdown spec';
+      } else {
+        nextAction = 'Next: paste Mermaid source or upload .mmd';
+      }
+    } else if (hasResult) {
+      hint = currentMode === 'idea'
+        ? 'Diagram rendered. Refine the prompt, rerender, or inspect the result.'
+        : 'Compiled output is ready. Refine the source or download the bundle.';
+      nextAction = currentMode === 'idea'
+        ? 'Next: refine prompt or rerender'
+        : 'Next: update source or download';
+      tone = 'result';
+    } else {
+      if (currentMode === 'idea' && profileHint) {
+        hint = profileHint;
+      }
+      nextAction = currentMode === 'idea'
+        ? 'Next: render or press Cmd/Ctrl+Enter to enhance'
+        : 'Next: render the current source';
+    }
+
+    inputHint.textContent = hint;
+
+    if (nextActionChip) {
+      nextActionChip.textContent = nextAction;
+      nextActionChip.dataset.tone = tone;
+      nextActionChip.classList.toggle('is-visible', !!nextAction);
+    }
+
+    if (btnAgentCommit) {
+      btnAgentCommit.textContent = notesDirty ? 'Enhance with notes' : 'Render as is';
+      btnAgentCommit.disabled = agentState !== 'awaiting_notes';
+    }
+
+    input.setAttribute('aria-busy', isLoading || agentState === 'running' || agentState === 'finalizing' ? 'true' : 'false');
+  }
+
   // ---- Mode selector ----
   function setMode(mode) {
     currentMode = mode;
     const cfg = MODES[mode];
     input.placeholder = cfg.placeholder;
-    inputHint.textContent = cfg.hint;
     chkEnhance.checked = cfg.enhanceDefault;
 
     if (cfg.showUpload) {
@@ -144,6 +257,8 @@
       copilot.destroy();
       copilot = null;
     }
+
+    syncUiGuidance();
   }
 
   document.querySelectorAll('.mode-btn').forEach(btn => {
@@ -201,14 +316,22 @@
         loadingHideTimer = null;
       }, 220);
     }
+
+    syncUiGuidance();
   }
 
-  function showResult(paths, name) {
+  function showResult(paths, name, runId) {
     currentPaths = paths;
     currentDiagramName = name || 'diagram';
     const ts = Date.now();
     resultSection.hidden = false;
     flipCard.showFront();
+
+    if (runDetails && runId) {
+      runDetails.show(runId);
+    } else if (runDetails && !runId) {
+      runDetails.hide();
+    }
 
     // ---- PNG (front face) ----
     // Destroy old PanZoom before swapping src so the RAF loop doesn't
@@ -236,6 +359,7 @@
 
     resultSection.classList.add('is-revealing');
     window.setTimeout(() => resultSection.classList.remove('is-revealing'), 220);
+    syncUiGuidance();
   }
 
   async function ensureRenderEffect() {
@@ -286,14 +410,115 @@
     } else {
       stateBadge.classList.remove('visible');
     }
+
+    syncUiGuidance();
   }
 
   // ---- Profile-driven hints ----
   function _onProfileUpdate(profile) {
-    if (!profile) return;
-    if (currentMode === 'idea' && profile.hint) {
-      inputHint.textContent = profile.hint;
+    profileHint = currentMode === 'idea' && profile?.hint ? profile.hint : '';
+    syncUiGuidance();
+  }
+
+  // ---- Text transition animation (render path) ----
+  // Mirrors the agent's _animateDraftUpdate: word-by-word reveal with
+  // orange / indigo / pink highlighting for preserved words.
+  const _TRANSITION_COLORS = ['#e8820c', '#4f46e5', '#db2777'];
+  let _renderAnimating = false;
+
+  function _tokenize(text) {
+    return text.split(/(\s+)/).filter(t => t.trim());
+  }
+
+  function _simpleHash(str) {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+    return h;
+  }
+
+  function _frame() { return new Promise(r => requestAnimationFrame(r)); }
+  function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  async function animateRenderTransition(oldText, newText) {
+    if (_renderAnimating || !newText) return;
+    // Respect reduced-motion: just swap the text immediately.
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      input.value = newText;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return;
     }
+    _renderAnimating = true;
+
+    const textarea = input;
+    const oldWords = _tokenize(oldText || '');
+    const newWords = _tokenize(newText);
+
+    const oldSet = new Set(oldWords.map(w => w.toLowerCase()));
+    const classified = newWords.map(w => ({
+      word: w,
+      preserved: oldSet.has(w.toLowerCase()),
+    }));
+
+    // Create animation overlay on the textarea wrapper
+    const wrap = textarea.closest('.copilot-wrap') || textarea.parentElement;
+    const overlay = document.createElement('div');
+    overlay.className = 'render-typing-overlay';
+    overlay.style.cssText = [
+      'position:absolute; inset:0; padding:14px;',
+      'font-family:var(--font-mono); font-size:0.82rem; line-height:1.6;',
+      'white-space:pre-wrap; word-wrap:break-word; overflow:hidden;',
+      'z-index:5; pointer-events:none; border-radius:var(--radius);',
+      'background:var(--surface);',
+    ].join(' ');
+    wrap.style.position = 'relative';
+    textarea.style.opacity = '0';
+    wrap.appendChild(overlay);
+
+    // Reveal words in batches
+    const BATCH = 8;
+    const DELAY = 12;
+
+    for (let i = 0; i < classified.length; i += BATCH) {
+      const batch = classified.slice(i, i + BATCH);
+      for (const item of batch) {
+        const span = document.createElement('span');
+        span.textContent = item.word + ' ';
+        if (item.preserved) {
+          const color = _TRANSITION_COLORS[Math.abs(_simpleHash(item.word)) % _TRANSITION_COLORS.length];
+          span.style.cssText = `color:${color}; font-weight:600; opacity:0; transition:opacity 0.15s, color 0.4s;`;
+        } else {
+          span.style.cssText = 'color:#9ca3af; opacity:0; transition:opacity 0.12s, color 0.5s;';
+        }
+        overlay.appendChild(span);
+      }
+
+      await _frame();
+      const spans = overlay.querySelectorAll('span');
+      for (let j = Math.max(0, i); j < Math.min(spans.length, i + BATCH); j++) {
+        spans[j].style.opacity = '1';
+      }
+      if (DELAY > 0) await _sleep(DELAY);
+    }
+
+    // Settle: transition all words to the default text color
+    await _sleep(120);
+    overlay.querySelectorAll('span').forEach(s => {
+      s.style.color = 'var(--text)';
+      s.style.fontWeight = 'normal';
+    });
+
+    await _sleep(250);
+
+    // Swap: set real textarea content and dissolve overlay
+    textarea.value = newText;
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    textarea.style.opacity = '1';
+    overlay.style.transition = 'opacity 0.15s';
+    overlay.style.opacity = '0';
+    await _sleep(160);
+    overlay.remove();
+
+    _renderAnimating = false;
   }
 
   // ---- Fullscreen ----
@@ -357,7 +582,7 @@
 
   // ---- Render ----
   async function render() {
-    if (isLoading) return;
+    if (isLoading || _renderAnimating) return;
     const source = input.value.trim();
     if (!source) {
       showError('Please enter a diagram description or paste Mermaid source.');
@@ -390,10 +615,18 @@
         return;
       }
 
-      showResult(data.paths, data.diagram_name);
+      // If the server enhanced text/md → mermaid, animate the transition
+      const shouldAnimate = data.enhanced && data.compiled_source
+        && data.content_state !== 'mmd';
+      if (shouldAnimate) {
+        setLoading(false);
+        await animateRenderTransition(source, data.compiled_source);
+      }
 
-      // Tell copilot to suppress suggestions for this exact text
-      if (copilot) copilot.setRenderedHash(source);
+      showResult(data.paths, data.diagram_name, data.run_id);
+
+      const finalText = shouldAnimate ? data.compiled_source : source;
+      if (copilot) copilot.setRenderedHash(finalText);
 
       sidebar.add({
         name: data.diagram_name,
@@ -402,6 +635,7 @@
         timestamp: new Date().toLocaleString(),
         source: source,
         contentState: data.content_state,
+        run_id: data.run_id || null,
       });
 
     } catch (err) {
@@ -431,6 +665,7 @@
   });
 
   input.addEventListener('input', updateBadges);
+  diagramNameInput?.addEventListener('input', syncUiGuidance);
 
   btnNewDiagram.addEventListener('click', () => {
     input.value = '';
@@ -452,7 +687,10 @@
       }
       // After naming, focus the main input for content
       input.focus();
+      syncUiGuidance();
     });
+
+    syncUiGuidance();
   });
 
   btnFlip.addEventListener('click', () => flipCard.toggle());
@@ -478,6 +716,14 @@
   // ---- Agent mode logic ----
 
   function setAgentMode(modeId) {
+    if (!modeId && agent && agent.running) {
+      agent.stopAndRestore();
+      agentState = 'idle';
+      notesDirty = false;
+      input.readOnly = false;
+      setLoading(false);
+    }
+
     selectedAgentMode = modeId;
     agentModeActive = !!modeId;
 
@@ -493,18 +739,15 @@
     if (agentModeActive) {
       btnRender.hidden = true;
       btnAgentRun.hidden = false;
-      inputHint.textContent = `Agent: ${modeId} mode · type your prompt, then press Run Agent`;
     } else {
       btnRender.hidden = false;
       btnAgentRun.hidden = true;
       agentPanel.hidden = true;
-      if (currentMode === 'idea') {
-        inputHint.textContent = MODES.idea.hint;
-      }
     }
 
     // Close dropdown
     agentDropdown.hidden = true;
+    syncUiGuidance();
   }
 
   if (btnAgentToggle) {
@@ -570,20 +813,28 @@
         }
       },
       onComplete: () => {
+        agentState = 'idle';
         btnAgentRun.textContent = 'Run Agent';
         btnAgentRun.classList.remove('is-stopping');
         btnAgentRun.disabled = false;
         input.readOnly = false;
+        syncUiGuidance();
       },
       onError: (msg) => {
+        agentState = 'idle';
+        notesDirty = false;
         showError(msg);
         btnAgentRun.textContent = 'Run Agent';
         btnAgentRun.classList.remove('is-stopping');
         btnAgentRun.disabled = false;
         input.readOnly = false;
+        setLoading(false);
+        syncUiGuidance();
       },
       onStateChange: (state) => {
+        agentState = state;
         if (state === 'running') {
+          notesDirty = false;
           btnAgentRun.textContent = 'Stop Agent';
           btnAgentRun.classList.add('is-stopping');
           btnAgentRun.disabled = false;
@@ -592,6 +843,7 @@
           input.readOnly = false;
           btnAgentRun.hidden = true;
         } else if (state === 'finalizing') {
+          notesDirty = false;
           input.readOnly = true;
           btnAgentRun.hidden = true;
           setLoading(true, 'text');
@@ -603,6 +855,8 @@
           input.readOnly = false;
           setLoading(false);
         }
+
+        syncUiGuidance();
       },
     });
   }
@@ -613,12 +867,15 @@
 
       if (agent && agent.running) {
         agent.stopAndRestore();
+        agentState = 'idle';
+        notesDirty = false;
         btnAgentRun.textContent = 'Run Agent';
         btnAgentRun.classList.remove('is-stopping');
         btnAgentRun.disabled = false;
         btnAgentRun.hidden = false;
         input.readOnly = false;
         setLoading(false);
+        syncUiGuidance();
         return;
       }
 
@@ -626,7 +883,7 @@
       _createAgent();
       input.readOnly = true;
       hideError();
-      agent.run(selectedAgentMode);
+      agent.run(selectedAgentMode, diagramNameInput?.value?.trim() || undefined);
     });
   }
 
@@ -639,17 +896,21 @@
 
   if (agentNotesInput) {
     agentNotesInput.addEventListener('input', () => {
-      if (!btnAgentCommit) return;
-      btnAgentCommit.textContent = agentNotesInput.value.trim() ? 'Enhance' : 'Render as is';
+      notesDirty = !!agentNotesInput.value.trim();
+      syncUiGuidance();
     });
   }
 
   if (btnAgentStop) {
     btnAgentStop.addEventListener('click', () => {
       if (agent) {
-        agent.stop();
+        agent.stopAndRestore();
+        agentState = 'idle';
+        notesDirty = false;
         btnAgentRun.disabled = false;
         input.readOnly = false;
+        setLoading(false);
+        syncUiGuidance();
       }
     });
   }
@@ -677,6 +938,7 @@
 
   // ---- Init ----
   setMode('idea');
+  updateBadges();
 
   // Check if Max mode is available from the provider chain
   fetch('/api/copilot/health')
@@ -692,10 +954,14 @@
     .then(r => r.json())
     .then(data => {
       if (data.success && data.diagrams) {
+        const serverNames = new Set(data.diagrams.map(d => d.name));
+        // Prune stale localStorage entries that no longer exist on server
+        sidebar.reconcile(serverNames);
+        // Merge server diagrams into sidebar (newest first)
         data.diagrams.forEach(d => {
           sidebar.add({
             name: d.name,
-            type: '',
+            type: d.diagram_type || '',
             paths: d.paths,
             timestamp: d.created_at ? new Date(d.created_at).toLocaleString() : '',
           });

@@ -12,6 +12,7 @@
  */
 function slugify(input) {
   return input
+    .replace(/\\n/g, ' ')       // Mermaid \n line breaks → spaces
     .toLowerCase()
     .replace(/[^\w\s-]/g, '')   // strip non-word chars (keeps hyphens)
     .replace(/[\s_]+/g, '-')    // spaces/underscores → hyphens
@@ -46,15 +47,16 @@ function deriveDiagramName(source, userProvidedName) {
   // Try to extract a subgraph title or first node label
   const subgraphMatch = source.match(/subgraph\s+\w+\["?([^"\]]+)"?\]/);
   if (subgraphMatch) {
-    const slug = slugify(subgraphMatch[1]);
-    if (slug.length >= 3 && slug.length <= 80) return slug;
+    const slug = slugify(subgraphMatch[1]).slice(0, 50);
+    if (slug.length >= 3) return slug;
   }
 
-  // Try first node with a label
+  // Try first node with a label (take first line only to avoid multi-line labels)
   const nodeMatch = source.match(/\w+\[["']?([^"'\]]+)["']?\]/);
   if (nodeMatch) {
-    const slug = slugify(nodeMatch[1]);
-    if (slug.length >= 3 && slug.length <= 80) return slug;
+    const firstLine = nodeMatch[1].split(/\\n/)[0].trim();
+    const slug = slugify(firstLine).slice(0, 50);
+    if (slug.length >= 3) return slug;
   }
 
   const summary = summarize(source, 3);

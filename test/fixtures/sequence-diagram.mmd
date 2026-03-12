@@ -1,7 +1,47 @@
-sequenceDiagram
-  participant A as Alice
-  participant B as Bob
-  A->>B: Hello Bob
-  B-->>A: Hi Alice
-  A->>B: How are you?
-  B-->>A: Good thanks!
+%% Compiled Mermaid source for: layer
+%% Generated: 2026-03-11T10:04:40.583Z
+%% Compile attempts: 1
+%% Max mode: true
+
+flowchart TB
+    subgraph SG0["Layer"]
+        Precisioninservice["precision in service"]
+        BrowserClient(["Browser Client"])
+        TotheAPI["to the API"]
+        APIGateway["API Gateway"]
+        Pointforclient(["point for client"])
+        AuthService["Auth Service"]
+        RedisCache[("Redis Cache")]
+        Managesservice["Manages service"]
+        OrderService["Order Service"]
+        InventoryService["Inventory Service"]
+        PaymentService["Payment Service"]
+        NGINX[("NGINX")]
+        Redis[("Redis")]
+        Envoy[("Envoy")]
+        Stripe[("Stripe")]
+        Kafka[("Kafka")]
+        Browser(["Browser"])
+        Client(["Client"])
+        Customer(["customer"])
+        User(["user"])
+        SendingaPOST["sending a POST"]
+        Handlingauthentication[", handling authentication"]
+        SendsaPOST["sends a POST"]
+        TotheAPI["to the **API"]
+        Gatewayroutesthe["**Gateway** routes the"]
+        TotheOrder["to the **Order"]
+        AndPaymentService["and **Payment Service**"]
+        Theeventto["the event to"]
+        Upto100["up to 100"]
+        Persessionwith["per session with"]
+        ErrorRecovery["Error Recovery"]
+    end
+    SendingaPOST -->|"request"| TotheAPI
+    Pointforclient -->|"requests"| Handlingauthentication
+    SendsaPOST -->|"request"| TotheAPI
+    Gatewayroutesthe -->|"request"| TotheOrder
+    AndPaymentService -->|"consume"| Theeventto
+    Upto100 -->|"requests"| Persessionwith
+    SendingaPOST -.->|"Failure Handling:"| ErrorRecovery
+    InventoryService -.->|"- If a saga compensation is re"| ErrorRecovery

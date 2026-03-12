@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Mermaid-GPT</title>
+  <title>MERMATE</title>
   <link rel="icon" type="image/png" href="/mermate-icon.png">
   <link rel="apple-touch-icon" href="/mermate-icon.png">
   <meta property="og:image" content="/mermate-icon.png">
@@ -21,7 +21,7 @@
   <!-- Sidebar -->
   <aside id="sidebar" class="sidebar" role="navigation" aria-label="Diagram history">
     <div class="sidebar-header">
-      <h1 class="sidebar-title">Mermaid-GPT</h1>
+      <h1 class="sidebar-title">MERMATE</h1>
       <button id="btn-new-diagram" class="btn btn-new" aria-label="Create new diagram">+ New Diagram</button>
     </div>
     <nav id="sidebar-list" class="sidebar-list" aria-label="Previous diagrams"></nav>
@@ -98,6 +98,7 @@ Type /talk to speak your idea"
 
       <div class="input-controls">
         <span id="input-hint" class="input-hint">Type an idea and the system will generate a diagram</span>
+        <span id="next-action-chip" class="next-action-chip" aria-live="polite"></span>
         <span id="content-state-badge" class="state-badge" aria-live="polite"></span>
         <span id="diagram-type-badge" class="type-badge" aria-live="polite"></span>
 
@@ -208,7 +209,10 @@ Type /talk to speak your idea"
         <button id="btn-flip" class="btn btn-secondary" aria-label="Flip card">Flip View</button>
         <button id="btn-reset-zoom" class="btn btn-secondary" aria-label="Reset zoom">Reset Zoom</button>
         <button id="btn-download" class="btn btn-secondary" aria-label="Download PNG + SVG as ZIP">Download</button>
+        <button id="btn-back-to-main" class="btn btn-secondary" hidden aria-label="Back to main diagram">Back to Main</button>
       </div>
+      <!-- Run Details + Subview Gallery -->
+      <div id="run-details" class="run-details" hidden></div>
     </section>
 
     <!-- Loading overlay -->
@@ -237,6 +241,7 @@ Type /talk to speak your idea"
   <script src="/js/mermaid-gpt-sidebar.js"></script>
   <script src="/js/mermaid-gpt-copilot.js"></script>
   <script src="/js/mermaid-gpt-agent.js"></script>
+  <script src="/js/mermaid-gpt-run-details.js"></script>
   <script src="/js/mermaid-gpt-speech.js"></script>
   <script src="/js/mermaid-gpt-app.js"></script>
 </body>

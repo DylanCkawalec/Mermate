@@ -1,7 +1,13 @@
-stateDiagram-v2
-  [*] --> Idle
-  Idle --> Processing : submit
-  Processing --> Success : ok
-  Processing --> Error : fail
-  Error --> Idle : retry
-  Success --> [*]
+The architecture represents a complex distributed system with several key components and processes, each responsible for specific tasks and interactions. The system is designed to handle distributed transactions, event sourcing, conflict-free replicated data types (CRDTs), and consensus mechanisms.
+
+1. **Saga Orchestrator**: This component manages distributed transactions using the Saga pattern. It starts in the `Idle` state and transitions to `CommandReceived` upon receiving a command. The `LocalTransaction` state handles the execution of local transactions. If a downstream failure occurs, it triggers `CompensationTriggered`, leading to `RollingBack` and potentially `SagaFailed`. If all steps succeed, it transitions to `TxCommitted` and then `SagaComplete`.
+
+2. **Circuit Breaker**: This component ensures system resilience by managing the state of external service calls. It starts in the `Closed` state and transitions to `Open` if the failure count exceeds a threshold. After a `probe_timeout`, it moves to `HalfOpen` to test if the service has recovered. Successful probes return it to `Closed`, while failed probes keep it `Open`.
+
+3. **Event Store**: This component handles event sourcing. It begins in the `Appending` state, where events are stored. If the event count exceeds 100, it transitions to `Snapshotting` to create a snapshot of the current state. The `Projecting` state updates the read model, which becomes `ReadModelReady`. A `rewind_command` can trigger `Replaying` to reprocess events.
+
+4. **CRDT Replication**: This component manages data replication using CRDTs. It starts with `LocalWrite`, updates the `VectorClock`, and broadcasts changes via `GossipBroadcast`. Concurrent writes may lead to `MergeConflict`, resolved by `LWWResolution` (Last Write Wins), eventually reaching `Converged`.
+
+5. **Consensus Raft**: This component ensures strong consistency using the Raft consensus algorithm. It starts as a `Follower`, can become a `Candidate` during an `election_timeout`, and transitions to `Leader` upon receiving quorum votes. The `Leader` commits logs with `majority ack` and applies them to the `ApplyStateMachine`.
+
+The system's flow begins with the `Idle` state, where a `command_dispatch` triggers the `SagaOrchestrator`. The orchestrator makes a `remote_call` to the `CircuitBreaker`, which emits results to the `EventStore`. The `EventStore` performs `cross_region_sync` with `CRDTReplication`, which requires `strong_consistency` from `ConsensusRaft`. Once committed, the system returns to `Idle`. This architecture ensures robust handling of distributed transactions, fault tolerance, and data consistency across regions.

@@ -12,6 +12,7 @@ archs/*
 
 # Ignore outputs and temp artifacts
 prompt-example.md
+runs/
 
 # Ignore experiment outputs
 mermate-arch-GoT.txt

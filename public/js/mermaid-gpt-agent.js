@@ -39,10 +39,11 @@ window.MermaidAgent = class MermaidAgent {
 
   // ---- Phase 1: Run through planning, refinement, preview ----
 
-  async run(mode) {
+  async run(mode, diagramName) {
     if (this._running) return;
     this._running = true;
     this._mode = mode;
+    this._userDiagramName = diagramName || null;
 
     const prompt = this.input.value.trim();
     if (!prompt) {
@@ -71,6 +72,7 @@ window.MermaidAgent = class MermaidAgent {
     try {
       await this._streamSSE('/api/agent/run', {
         prompt, mode, current_text: prompt,
+        diagram_name: this._userDiagramName || undefined,
       });
     } catch (err) {
       if (err.name !== 'AbortError') {
@@ -99,7 +101,7 @@ window.MermaidAgent = class MermaidAgent {
         current_text: this._draftText,
         mode: this._mode,
         user_notes: notes,
-        diagram_name: this._previewDiagramName,
+        diagram_name: this._userDiagramName || this._previewDiagramName,
       });
     } catch (err) {
       if (err.name !== 'AbortError') {
@@ -167,33 +169,67 @@ window.MermaidAgent = class MermaidAgent {
 
   async _handleEvent(event) {
     switch (event.type) {
-      case 'stage':
-        this._markPreviousLogDone();
-        this._addLog(event.message, 'active');
+      // ---- Primary display path: narration events from terminal-narrator ----
+      // These are the high-quality, compressed terminal messages. They replace
+      // the noisy raw stage/thinking dump as the primary visible output.
+      case 'narration':
+        this._addNarrationLog(event.message, event.source, event.eventType);
         break;
 
+      // ---- Stage events: used for state tracking only when no narration ----
+      // Still shown if narration is not active (e.g., first event before
+      // the narrator has wired up), but suppressed once narration is flowing.
+      case 'stage':
+        if (!this._narratorActive) {
+          this._markPreviousLogDone();
+          this._addLog(event.message, 'active');
+        }
+        if (event.stage === 'ingest' || event.stage === 'planning') {
+          this._narratorActive = false; // reset at run start
+        }
+        break;
+
+      // ---- Thinking events: shown as expert badges in the audit expand ----
+      case 'thinking':
+        this._narratorActive = true; // narrator is now flowing
+        this._addThinkingLog(event.role, event.summary, event.domain);
+        break;
+
+      // ---- Heartbeat / telemetry / audit: hidden from visible terminal ----
+      case 'heartbeat':
+      case 'telemetry':
+      case 'audit_summary':
+        break;
+
+      // ---- Analysis: append to expandable audit detail only ----
       case 'analysis':
-        this._addLog(`Analysis: maturity=${event.maturity}, quality=${event.quality}, entities=${event.entities}`, 'done');
+        this._auditDetail = this._auditDetail || [];
+        this._auditDetail.push(`quality=${event.quality} · completeness=${event.completeness} · maturity=${event.maturity}`);
         break;
 
       case 'draft_update':
         await this._animateDraftUpdate(event.original || this.input.value, event.text);
         this._draftText = event.text;
-        this._addLog(event.reason || 'Draft updated', 'done');
+        // If narrator isn't active yet, show a fallback log entry
+        if (!this._narratorActive) {
+          this._addLog(event.reason || 'Architecture updated', 'done');
+        }
         break;
 
       case 'preview_render':
         if (event.success) {
-          this._addLog(`Preview: ${event.metrics?.nodeCount || '?'} nodes, ${event.metrics?.edgeCount || '?'} edges`, 'done');
+          if (!this._narratorActive) {
+            this._addLog(`Preview: ${event.metrics?.nodeCount || '?'} nodes, ${event.metrics?.edgeCount || '?'} edges`, 'done');
+          }
           this.onPreviewRender(event);
         } else {
-          this._addLog(`Preview compile issue — you can still finalize`, 'done');
+          this._addNarrationLog('Preview compile issue — you can still finalize', 'system', 'render:failed');
         }
         break;
 
       case 'preview_ready':
         this._markPreviousLogDone();
-        this._addLog('Preview ready — add notes or finalize', 'done');
+        this._addNarrationLog('◈ Preview ready  —  add notes or finalize', 'system', 'preview_ready');
         this._draftText = event.draft_text || this.input.value;
         this._previewDiagramName = event.diagram_name || null;
         this._showNotesUI();
@@ -202,25 +238,29 @@ window.MermaidAgent = class MermaidAgent {
 
       case 'final_render':
         if (event.success) {
-          this._addLog(`Max render: ${event.metrics?.nodeCount || '?'} nodes, ${event.metrics?.subgraphCount || 0} subgraphs`, 'done');
+          this._addNarrationLog(
+            `✓ Final render complete  —  ${event.metrics?.nodeCount || '?'} nodes, ${event.metrics?.subgraphCount || 0} subgraphs`,
+            'system', 'render:complete',
+          );
           this.onRenderResult(event);
         } else {
-          this._addLog(`Render failed: ${event.error || 'unknown'}`, 'done');
+          this._addNarrationLog(`✗ Render failed  —  ${(event.error || 'unknown').slice(0, 45)}`, 'system', 'render:failed');
           this.onError(event.error || 'Render failed — try a simpler description or check your model connection');
         }
         break;
 
       case 'done':
         this._markPreviousLogDone();
-        this._addLog('Agent complete', 'done');
+        this._addNarrationLog('✓ Agent workflow complete', 'system', 'done');
         this._running = false;
+        this._narratorActive = false;
         this.onComplete(event.final_text);
         this.onStateChange('idle');
         break;
 
       case 'error':
         this._markPreviousLogDone();
-        this._addLog(`Error: ${event.message}`, 'done');
+        this._addNarrationLog(`✗ ${event.message}`, 'system', 'sys:error');
         this.onError(event.message);
         break;
     }
@@ -349,6 +389,82 @@ window.MermaidAgent = class MermaidAgent {
     if (state === 'active') {
       void this._attachThinkingEffect(dot);
     }
+  }
+
+  /**
+   * Add a narration log entry — the primary visible terminal output.
+   * Narration entries are the distilled, premium terminal messages from
+   * the terminal-narrator service or the system itself.
+   *
+   * source: 'template' | 'oss' | 'system'
+   * eventType: the audit event type that triggered this narration
+   */
+  _addNarrationLog(message, source = 'system', eventType = '') {
+    if (!message) return;
+
+    // Collapse any active thinking entries
+    this.panelLog.querySelectorAll('.agent-log-entry.thinking').forEach(e => {
+      e.classList.remove('thinking');
+      e.classList.add('done');
+    });
+    this._markPreviousLogDone();
+
+    const entry = document.createElement('div');
+    const isComplete = message.startsWith('✓') || eventType === 'done' || eventType === 'render:complete';
+    const isError    = message.startsWith('✗') || eventType === 'sys:error' || eventType === 'render:failed';
+    const isWait     = eventType === 'preview_ready';
+
+    entry.className = [
+      'agent-log-entry',
+      isComplete ? 'narration-complete' : isError ? 'narration-error' : isWait ? 'narration-wait' : 'narration',
+    ].join(' ');
+
+    const dot = document.createElement('span');
+    dot.className = 'agent-log-dot';
+
+    // Source badge for OSS-summarized messages
+    const sourceBadge = source === 'oss' ? (() => {
+      const b = document.createElement('span');
+      b.className = 'narration-source-badge';
+      b.textContent = 'oss';
+      return b;
+    })() : null;
+
+    const text = document.createElement('span');
+    text.className = 'agent-log-text narration-text';
+    text.textContent = message;
+
+    entry.append(dot, ...(sourceBadge ? [sourceBadge] : []), text);
+    this.panelLog.appendChild(entry);
+    this.panelLog.scrollTop = this.panelLog.scrollHeight;
+  }
+
+  _addThinkingLog(role, summary, domain) {
+    this.panelLog.querySelectorAll('.agent-log-entry.thinking').forEach(e => {
+      e.classList.remove('thinking');
+      e.classList.add('done');
+    });
+
+    const entry = document.createElement('div');
+    entry.className = 'agent-log-entry thinking';
+
+    const dot = document.createElement('span');
+    dot.className = 'agent-log-dot';
+
+    const badge = document.createElement('span');
+    badge.className = 'agent-role-badge';
+    const displayName = (role || 'default')
+      .replace(/^Doctor_/, 'Dr. ')
+      .replace(/_/g, ' ');
+    badge.textContent = displayName;
+
+    const text = document.createElement('span');
+    text.className = 'agent-log-text';
+    text.textContent = summary || '';
+
+    entry.append(dot, badge, text);
+    this.panelLog.appendChild(entry);
+    this.panelLog.scrollTop = this.panelLog.scrollHeight;
   }
 
   _markPreviousLogDone() {

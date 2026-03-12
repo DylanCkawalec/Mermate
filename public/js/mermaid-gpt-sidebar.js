@@ -161,14 +161,23 @@ window.MermaidSidebar = class MermaidSidebar {
     inp.addEventListener('blur', () => commit());
   }
 
+  _humanize(slug) {
+    if (!slug) return 'Untitled';
+    return slug
+      .replace(/-/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase())
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
   render() {
     this.listEl.innerHTML = '';
     this.items.forEach((item, idx) => {
       const btn = document.createElement('button');
       btn.className = 'sidebar-item' + (idx === this.activeIndex ? ' active' : '') + (item._pending ? ' pending' : '');
-      const displayName = item.name || 'Untitled';
+      const displayName = this._humanize(item.name);
       btn.innerHTML = `
-        <span class="sidebar-item-name">${this._esc(displayName)}</span>
+        <span class="sidebar-item-name" title="${this._esc(item.name)}">${this._esc(displayName)}</span>
         <span class="sidebar-item-meta">${item._pending ? 'new · awaiting content' : (item.type ? item.type + ' · ' : '') + (item.timestamp || '')}</span>
         <span class="sidebar-item-actions">
           <button class="btn-rename" aria-label="Rename ${this._esc(item.name)}" title="Rename">
@@ -211,6 +220,24 @@ window.MermaidSidebar = class MermaidSidebar {
 
       this.listEl.appendChild(btn);
     });
+  }
+
+  /**
+   * Remove localStorage entries whose paths no longer exist on the server.
+   * Called after fetching the server's diagram list so stale entries don't linger.
+   */
+  reconcile(serverNames) {
+    const before = this.items.length;
+    this.items = this.items.filter(i => {
+      if (i._pending) return true;
+      if (!i.paths) return false;
+      return serverNames.has(i.name);
+    });
+    if (this.items.length !== before) {
+      this.activeIndex = Math.min(this.activeIndex, this.items.length - 1);
+      this._save();
+      this.render();
+    }
   }
 
   setActive(name) {

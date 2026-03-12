@@ -178,8 +178,11 @@ function isLikelyValid(source) {
 
 // ---- HPC-GoT Deterministic Invariant Validation --------------------------------
 
-const PROSE_WORD_LIMIT = 6;
-const EDGE_LABEL_WORD_LIMIT = 6;
+const { getConfig: getGotConfig } = require('./got-config');
+
+const _gotCfg = () => getGotConfig();
+const PROSE_WORD_LIMIT = () => _gotCfg().proseWordLimit;
+const EDGE_LABEL_WORD_LIMIT = () => _gotCfg().edgeLabelWordLimit;
 
 /**
  * Normalize a name for fuzzy matching: lowercase, strip non-alphanumeric, collapse whitespace.
@@ -306,7 +309,7 @@ function validateInvariants(mmdSource, facts, plan) {
     const lines = node.label.split('\\n');
     for (const line of lines) {
       const wordCount = line.trim().split(/\s+/).length;
-      if (wordCount > PROSE_WORD_LIMIT * 2) {
+      if (wordCount > PROSE_WORD_LIMIT() * 2) {
         trace.proseFragments.push(`Node ${node.id}: "${line.substring(0, 60)}..."`);
       }
     }
@@ -316,7 +319,7 @@ function validateInvariants(mmdSource, facts, plan) {
   const edgeLabels = extractEdgeLabels(mmdSource);
   for (const label of edgeLabels) {
     const wordCount = label.split(/\s+/).length;
-    if (wordCount > EDGE_LABEL_WORD_LIMIT) {
+    if (wordCount > EDGE_LABEL_WORD_LIMIT()) {
       trace.longLabels.push(`"${label.substring(0, 40)}" (${wordCount} words)`);
     }
   }
@@ -376,7 +379,8 @@ function computeHPCScore(mmdSource, facts) {
   // IC = average of entity coverage and relationship coverage
   const ic = (ec + rc) / 2;
 
-  const score = +(0.5 * sv + 0.5 * ic).toFixed(3);
+  const cfg = getGotConfig();
+  const score = +(cfg.scoreStructuralWeight * sv + cfg.scoreInvariantWeight * ic).toFixed(3);
 
   return {
     score,
