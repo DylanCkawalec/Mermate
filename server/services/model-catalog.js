@@ -62,23 +62,29 @@ const Tier = Object.freeze({
   LOCAL:        'local-llm',
 });
 
+const _tierCache = new Map();
+
 function classifyTier(model) {
   if (!model) return Tier.WORKER;
+  const cached = _tierCache.get(model);
+  if (cached) return cached;
 
   const orchModel  = process.env.MERMATE_ORCHESTRATOR_MODEL || process.env.MERMATE_AI_MAX_MODEL || 'gpt-4o';
   const workModel  = process.env.MERMATE_WORKER_MODEL       || process.env.MERMATE_AI_MODEL     || 'gpt-4o';
   const fastModel  = process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-4o-mini';
   const localModel = process.env.LOCAL_LLM_MODEL || process.env.MERMATE_OLLAMA_MODEL || 'gpt-oss:20b';
 
-  if (model === orchModel && orchModel !== workModel) return Tier.ORCHESTRATOR;
-  if (model === workModel)  return Tier.WORKER;
-  if (model === fastModel)  return Tier.FAST;
-  if (model === localModel || model === 'enhancer') return Tier.LOCAL;
+  let tier = Tier.WORKER;
+  if (model === orchModel && orchModel !== workModel) tier = Tier.ORCHESTRATOR;
+  else if (model === workModel) tier = Tier.WORKER;
+  else if (model === fastModel) tier = Tier.FAST;
+  else if (model === localModel || model === 'enhancer') tier = Tier.LOCAL;
+  else if (/^gpt-5\.[3-9]|^gpt-5$|^o[1-9]/.test(model)) tier = Tier.ORCHESTRATOR;
+  else if (/^gpt-5\.[0-2]|^gpt-4o$/.test(model)) tier = Tier.WORKER;
+  else if (/mini|nano/.test(model)) tier = Tier.FAST;
 
-  if (/^gpt-5\.[3-9]|^gpt-5$|^o[1-9]/.test(model)) return Tier.ORCHESTRATOR;
-  if (/^gpt-5\.[0-2]|^gpt-4o$/.test(model)) return Tier.WORKER;
-  if (/mini|nano/.test(model)) return Tier.FAST;
-  return Tier.WORKER;
+  _tierCache.set(model, tier);
+  return tier;
 }
 
 // ---- Pipeline Stage Taxonomy -----------------------------------------------
@@ -99,6 +105,12 @@ const Stage = Object.freeze({
   COPILOT_SUGGEST:   'copilot:suggest',
   COPILOT_ENHANCE:   'copilot:enhance',
   NARRATE_SUMMARY:   'narrate:summary',
+  COMPOSE_TLA:       'compose:tla',
+  REPAIR_TLA:        'repair:tla',
+  VALIDATE_TLA:      'validate:tla',
+  COMPOSE_TS:        'compose:ts',
+  REPAIR_TS:         'repair:ts',
+  VALIDATE_TS:       'validate:ts',
 });
 
 const STAGE_LEGACY_MAP = Object.freeze({
@@ -114,6 +126,12 @@ const STAGE_LEGACY_MAP = Object.freeze({
   render_prepare:    Stage.RENDER_PREPARE,
   copilot_suggest:   Stage.COPILOT_SUGGEST,
   copilot_enhance:   Stage.COPILOT_ENHANCE,
+  compose_tla:       Stage.COMPOSE_TLA,
+  repair_tla:        Stage.REPAIR_TLA,
+  validate_tla:      Stage.VALIDATE_TLA,
+  compose_ts:        Stage.COMPOSE_TS,
+  repair_ts:         Stage.REPAIR_TS,
+  validate_ts:       Stage.VALIDATE_TS,
 });
 
 function canonicalStage(legacyName) {
@@ -137,6 +155,12 @@ const CONTEXT_PROFILE = Object.freeze({
   [Stage.COPILOT_SUGGEST]: { avgIn: 500,   avgOut: 100   },
   [Stage.COPILOT_ENHANCE]: { avgIn: 3000,  avgOut: 6000  },
   [Stage.NARRATE_SUMMARY]: { avgIn: 800,   avgOut: 200   },
+  [Stage.COMPOSE_TLA]:     { avgIn: 4000,  avgOut: 6000  },
+  [Stage.REPAIR_TLA]:      { avgIn: 5000,  avgOut: 5000  },
+  [Stage.VALIDATE_TLA]:    { avgIn: 2500,  avgOut: 1000  },
+  [Stage.COMPOSE_TS]:      { avgIn: 6000,  avgOut: 9000  },
+  [Stage.REPAIR_TS]:       { avgIn: 7000,  avgOut: 7000  },
+  [Stage.VALIDATE_TS]:     { avgIn: 2500,  avgOut: 1500  },
 });
 
 const MAX_CONTEXT_WINDOW = 128000;
@@ -177,6 +201,12 @@ const STAGE_PRIORITY = Object.freeze({
   [Stage.REPAIR_TRACE]:    Priority.NORMAL,
   [Stage.COPILOT_SUGGEST]: Priority.LOW,
   [Stage.NARRATE_SUMMARY]: Priority.BACKGROUND,
+  [Stage.COMPOSE_TLA]:     Priority.HIGH,
+  [Stage.REPAIR_TLA]:      Priority.NORMAL,
+  [Stage.VALIDATE_TLA]:    Priority.NORMAL,
+  [Stage.COMPOSE_TS]:      Priority.HIGH,
+  [Stage.REPAIR_TS]:       Priority.NORMAL,
+  [Stage.VALIDATE_TS]:     Priority.NORMAL,
 });
 
 const PRIORITY_LABELS = ['CRITICAL', 'HIGH', 'NORMAL', 'LOW', 'BACKGROUND'];

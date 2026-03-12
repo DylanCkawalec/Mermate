@@ -459,6 +459,14 @@ async function finalize(runId, status = 'completed') {
   m.warnings = _runCompletenessCheck(m);
   m.totals = _computeTotals(m);
 
+  // Compute structural signature for the final artifact
+  if (m.final_artifact?.mmd_source) {
+    try {
+      const sigExtractor = require('./structural-signature');
+      m.structural_signature = sigExtractor.extract(m.final_artifact.mmd_source);
+    } catch { /* signature extraction is advisory */ }
+  }
+
   // Snapshot rate-master metrics at finalization (only if already initialized)
   try {
     const rmBridge = require('./rate-master-bridge');
@@ -485,6 +493,14 @@ async function finalize(runId, status = 'completed') {
 
   await _atomicWrite(path.join(RUNS_DIR, `${m.run_id}.json`), m);
   _activeRuns.delete(runId);
+
+  // Non-blocking meta-cognition audit (fire-and-forget)
+  if (status === 'completed') {
+    try {
+      const metaBridge = require('./meta-gateway-bridge');
+      metaBridge.auditRun(runId).catch(() => {});
+    } catch { /* meta-gateway is optional */ }
+  }
 
   logger.info('run_tracker.finalized', {
     runId: runId.slice(0, 8),

@@ -1,19 +1,22 @@
-%% Compiled Mermaid source for: domain
-%% Generated: 2026-03-11T10:06:39.613Z
-%% Compile attempts: 1
-%% Max mode: true
+gantt
+  title Release Cycle — Q1 2026
+  dateFormat YYYY-MM-DD
+  excludes weekends
 
-flowchart TB
-    subgraph SG0["Domain"]
-        Docker[("Docker")]
-        Anomaliesaredetected["anomalies are detected,"]
-        Operationsteamfor["operations team for"]
-        ErrorRecovery["Error Recovery"]
-    end
-    subgraph SG1["Cluster"]
-        ComputeCluster["Compute Cluster"]
-        Beginsaftercluster["Begins after cluster"]
-    end
-    Anomaliesaredetected -->|"alert"| Operationsteamfor
-    Anomaliesaredetected -.->|"This lifecycle is structured i"| ErrorRecovery
-    Docker -.->|"Failure path: If artifacts are"| ErrorRecovery
+  section Planning
+    Requirements gathering :done, req, 2026-01-06, 10d
+    Architecture review    :done, arch, after req, 5d
+
+  section Development
+    Core engine            :active, core, 2026-01-27, 15d
+    API layer              :api, after core, 10d
+    Frontend integration   :fe, after api, 10d
+
+  section Validation
+    Unit tests             :test, after core, 20d
+    Integration tests      :integ, after fe, 7d
+    Performance benchmarks :perf, after integ, 5d
+
+  section Release
+    Staging deploy         :stage, after perf, 3d
+    Production rollout     :prod, after stage, 2d

@@ -190,10 +190,12 @@ router.post('/copilot/enhance', async (req, res) => {
   if (stage === 'copilot_suggest') {
     const activeLine = req.body?.active_line || '';
     const suggestUserPrompt = `Stage: copilot_suggest\n\nFull text: ${sourceText}\n\nActive line: ${activeLine}\n\nReturn valid JSON only.`;
+    const _suggestStart = Date.now();
     const result = await provider.infer('copilot_suggest', {
       systemPrompt: prompt.system,
       userPrompt: suggestUserPrompt,
     });
+    logger.info('copilot.suggest.timing', { ms: Date.now() - _suggestStart, provider: result.provider, hasOutput: !!result.output });
 
     if (result.output) {
       try {
@@ -211,10 +213,12 @@ router.post('/copilot/enhance', async (req, res) => {
 
   if (stage === 'copilot_enhance') {
     const enhanceUserPrompt = `Stage: copilot_enhance\nEnhance mode: ${req.body?.enhance_mode || 'full'}\n\nFull text: ${sourceText}\n\nSelected text: ${req.body?.selected_text || ''}\n\nReturn valid JSON only.`;
+    const _enhanceStart = Date.now();
     const result = await provider.infer('copilot_enhance', {
       systemPrompt: prompt.system,
       userPrompt: enhanceUserPrompt,
     });
+    logger.info('copilot.enhance.timing', { ms: Date.now() - _enhanceStart, provider: result.provider, hasOutput: !!result.output, noOp: result.noOp });
 
     if (result.output && !result.noOp) {
       try {
@@ -435,12 +439,12 @@ router.post('/render', async (req, res) => {
     // 3. Derive name
     const diagramName = deriveDiagramName(mmdSource, diagram_name);
 
-    // 4. Archive original source
-    const archivePaths = await archive(source, diagramName, diagramType);
-
-    // 5. Compile with retry loop (deterministic repair -> model-assisted repair)
+    // 4+5. Archive and compile in parallel — they write to different directories
     const outputDir = path.join(FLOWS_DIR, diagramName);
-    const compileOutcome = await compileWithRetry(mmdSource, outputDir, diagramName);
+    const [archivePaths, compileOutcome] = await Promise.all([
+      archive(source, diagramName, diagramType),
+      compileWithRetry(mmdSource, outputDir, diagramName),
+    ]);
 
     if (!compileOutcome.result.ok) {
       if (runId) await runTracker.finalize(runId, 'failed').catch(() => {});
@@ -461,65 +465,64 @@ router.post('/render', async (req, res) => {
       });
     }
 
-    // 6. Post-render: archive compiled Mermaid and compute quality metrics
+    // 6. Post-render: archive compiled + organize subviews + copy .md (all in parallel)
     const compiledAt = new Date().toISOString();
     const finalMmd = compileOutcome.mmdSource;
     const finalDiagramType = require('../services/mermaid-classifier').classify(finalMmd);
 
-    const compiledArchivePath = await archiveCompiled(finalMmd, diagramName, {
-      provider: enhanceMeta?.provider || null,
-      attempts: compileOutcome.attempts,
-      maxMode: useMax,
-    });
-
-    // 6b. Organize subview artifacts: move _tmp_ subview dirs into the diagram folder
-    //     and copy the archived .md into the diagram folder for co-location
-    const subviewPaths = [];
-    if (routeResult.subviews && routeResult.subviews.length > 0) {
+    const _organizeSubviews = async () => {
+      const paths = [];
+      if (!routeResult.subviews || routeResult.subviews.length === 0) return paths;
       const subviewsDir = path.join(outputDir, 'subviews');
       await fsp.mkdir(subviewsDir, { recursive: true }).catch(() => {});
 
-      for (let i = 0; i < routeResult.subviews.length; i++) {
-        const sv = routeResult.subviews[i];
+      await Promise.all(routeResult.subviews.map(async (sv, i) => {
         const svSlug = (sv.viewName || `subview-${i}`).replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase().slice(0, 40);
         const svDir = path.join(subviewsDir, svSlug);
         await fsp.mkdir(svDir, { recursive: true }).catch(() => {});
 
-        // Write the subview .mmd
         const mmdPath = path.join(svDir, `${svSlug}.mmd`);
         await fsp.writeFile(mmdPath, sv.mmdSource, 'utf8').catch(() => {});
 
-        // Move rendered PNG/SVG from the _tmp_ dir into the organized subview folder
         if (sv.outputDir) {
-          for (const ext of ['png', 'svg', 'mmd']) {
+          await Promise.all(['png', 'svg', 'mmd'].map(ext => {
             const srcFile = path.join(sv.outputDir, `subview.${ext}`);
             const destFile = path.join(svDir, `${svSlug}.${ext === 'mmd' ? 'compiled.mmd' : ext}`);
-            await fsp.copyFile(srcFile, destFile).catch(() => {});
-          }
-          // Remove the _tmp_ directory after moving its contents
+            return fsp.copyFile(srcFile, destFile).catch(() => {});
+          }));
           await fsp.rm(sv.outputDir, { recursive: true, force: true }).catch(() => {});
         }
 
-        subviewPaths.push({
+        paths.push({
           name: sv.viewName || svSlug,
           mmd: `/flows/${diagramName}/subviews/${svSlug}/${svSlug}.mmd`,
           png: `/flows/${diagramName}/subviews/${svSlug}/${svSlug}.png`,
           svg: `/flows/${diagramName}/subviews/${svSlug}/${svSlug}.svg`,
         });
+      }));
+
+      if (paths.length > 0) {
+        logger.info('render.subviews_organized', { diagramName, subviewCount: paths.length });
       }
+      return paths;
+    };
 
-      logger.info('render.subviews_organized', {
-        diagramName,
-        subviewCount: subviewPaths.length,
-      });
-    }
-
-    // 6c. Copy the archived .md into the diagram folder for co-located reference
-    if (archivePaths.mdPath) {
+    const _copyMd = async () => {
+      if (!archivePaths.mdPath) return;
       const mdSourcePath = path.join(PROJECT_ROOT, archivePaths.mdPath);
       const mdDestPath = path.join(outputDir, `${diagramName}.md`);
       await fsp.copyFile(mdSourcePath, mdDestPath).catch(() => {});
-    }
+    };
+
+    const [compiledArchivePath, subviewPaths] = await Promise.all([
+      archiveCompiled(finalMmd, diagramName, {
+        provider: enhanceMeta?.provider || null,
+        attempts: compileOutcome.attempts,
+        maxMode: useMax,
+      }),
+      _organizeSubviews(),
+      _copyMd(),
+    ]);
 
     const postRenderValidation = validateMmd(finalMmd);
     const mmdMetrics = {
@@ -634,6 +637,12 @@ router.post('/render', async (req, res) => {
       },
       run_id: runId || undefined,
       run_json_path: runId ? `/runs/${runId}.json` : undefined,
+      progressionUpdate: runId ? {
+        stage: 'mmd',
+        unlockedStages: ['idea', 'md', 'mmd', 'tla'],
+        nextRecommended: 'tla',
+        confidence: postRenderValidation.valid ? 0.95 : 0.5,
+      } : undefined,
     });
   } catch (err) {
     if (runId) await runTracker.finalize(runId, 'failed').catch(() => {});

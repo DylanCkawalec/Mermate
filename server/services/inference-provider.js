@@ -63,6 +63,9 @@ const STAGE_MODEL_MAP = Object.freeze({
   max_composition:     MODELS.orchestrator, // final quality — gpt-5.4
   merge_composition:   MODELS.orchestrator, // merge all subviews into mega-diagram — gpt-5.4
   repair_from_trace:   MODELS.fast,         // error-trace repair — gpt-4.1-mini
+  compose_ts:          MODELS.worker,       // runtime synthesis — gpt-5.2
+  repair_ts:           MODELS.fast,         // compile/test repair — gpt-4.1-mini
+  validate_ts:         MODELS.fast,         // validator commentary — gpt-4.1-mini
 });
 
 // P5: Per-stage token caps — right-size output budget to reduce waste
@@ -79,6 +82,9 @@ const STAGE_TOKEN_CAP = Object.freeze({
   max_composition:     16384,
   merge_composition:   16384,
   repair_from_trace:   4096,
+  compose_ts:          16384,
+  repair_ts:           8192,
+  validate_ts:         4096,
 });
 
 // ---- Health cache ---------------------------------------------------------
@@ -436,14 +442,21 @@ async function infer(stage, context = {}) {
   const stageModel = STAGE_MODEL_MAP[stage] || PREMIUM_MODEL;
   const stageTokenCap = STAGE_TOKEN_CAP[stage] || undefined;
 
-  // Parallel health pre-check — eliminates sequential provider probing
-  const [premiumOk, ollamaOk, enhancerOk] = await Promise.all([
-    _checkHealth('premium'),
-    _checkHealth('ollama'),
-    _checkHealth('enhancer'),
-  ]);
-
   const preferLocal = stage === 'copilot_suggest' || stage === 'copilot_enhance';
+
+  // Lazy health checks — skip network probes for providers we won't need
+  const premiumOk = await _checkHealth('premium');
+  let ollamaOk, enhancerOk;
+  if (premiumOk && !preferLocal) {
+    // Premium is first in chain and available — defer local checks until needed
+    ollamaOk = false;
+    enhancerOk = false;
+  } else {
+    [ollamaOk, enhancerOk] = await Promise.all([
+      _checkHealth('ollama'),
+      _checkHealth('enhancer'),
+    ]);
+  }
 
   const providers = [
     { name: 'premium',  ok: premiumOk,  call: () => _callPremium(systemPrompt, userPrompt, stageModel, undefined, stageTokenCap, rateEvents, stage), isPremium: true },
@@ -456,7 +469,17 @@ async function infer(stage, context = {}) {
     ? [providers[1], providers[2], providers[0]]
     : providers;
 
+  let _localChecked = ollamaOk || enhancerOk;
+
   for (const prov of chain) {
+    // Lazy fallback: if premium exhausted without result, check local providers on demand
+    if (!prov.ok && !prov.isPremium && !_localChecked) {
+      _localChecked = true;
+      [ollamaOk, enhancerOk] = await Promise.all([_checkHealth('ollama'), _checkHealth('enhancer')]);
+      providers[1].ok = ollamaOk;
+      providers[2].ok = enhancerOk;
+      if (!prov.ok) prov.ok = prov.name === 'ollama' ? ollamaOk : enhancerOk;
+    }
     if (!prov.ok) continue;
 
     logger.info('provider.route', { provider: prov.name, stage, tier: prov.isPremium ? catalog.classifyTier(stageModel) : catalog.Tier.LOCAL });
@@ -469,6 +492,13 @@ async function infer(stage, context = {}) {
 
     if (!output || !output.trim()) {
       logger.warn('provider.empty', { provider: prov.name, stage, ms: latencyMs });
+      // On premium failure, trigger lazy local check for remaining chain items
+      if (prov.isPremium && !_localChecked) {
+        _localChecked = true;
+        [ollamaOk, enhancerOk] = await Promise.all([_checkHealth('ollama'), _checkHealth('enhancer')]);
+        providers[1].ok = ollamaOk;
+        providers[2].ok = enhancerOk;
+      }
       continue;
     }
 

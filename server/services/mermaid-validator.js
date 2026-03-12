@@ -400,4 +400,55 @@ function computeHPCScore(mmdSource, facts) {
   };
 }
 
-module.exports = { validate, isLikelyValid, validateInvariants, computeHPCScore };
+// ---- Graph-Theoretic Structural Validation (L1–L3) -------------------------
+
+const structuralSig = require('./structural-signature');
+
+/**
+ * Deep structural validation using graph-theoretic properties.
+ * Complements L0 parse validation with L1 (graph), L2 (flow), L3 (boundary).
+ *
+ * @param {string} mmdSource
+ * @returns {{ properties: object, issues: string[], score: number }}
+ */
+function validateGraphProperties(mmdSource) {
+  const sig = structuralSig.extract(mmdSource);
+  const issues = [];
+
+  // L1: Graph validity
+  if (!sig.isFullyConnected && sig.connectedComponents > 1) {
+    issues.push(`L1:disconnected — ${sig.connectedComponents} disconnected components`);
+  }
+  if (sig.orphanedNodes > 0) {
+    issues.push(`L1:orphaned — ${sig.orphanedNodes} nodes with no edges`);
+  }
+
+  // L2: Flow validity
+  if (sig.unreachableNodes > 0) {
+    issues.push(`L2:unreachable — ${sig.unreachableNodes} nodes unreachable from any entry point`);
+  }
+  if (sig.entryPoints === 0 && sig.nodeCount > 1) {
+    issues.push(`L2:no_entry — no clear entry points (all nodes have incoming edges)`);
+  }
+  if (sig.terminalNodes === 0 && sig.nodeCount > 1 && !sig.hasCycles) {
+    issues.push(`L2:no_terminal — no terminal nodes (all nodes have outgoing edges but no cycles)`);
+  }
+
+  // L3: Boundary & failure path validity
+  if (sig.boundaryCrossings > 0 && sig.boundarySymmetry < 0.3) {
+    issues.push(`L3:asymmetric_boundaries — boundary symmetry ${(sig.boundarySymmetry * 100).toFixed(0)}% (many one-way cross-boundary flows)`);
+  }
+  if (sig.nodeCount >= 10 && !sig.hasExplicitFailurePaths) {
+    issues.push(`L3:no_failure_paths — no explicit error/failure/retry nodes in a ${sig.nodeCount}-node architecture`);
+  }
+  if (sig.crossCuttingCount >= 3) {
+    issues.push(`L3:cross_cutting — ${sig.crossCuttingCount} cross-cutting hubs detected (may need pattern extraction)`);
+  }
+
+  // Score: 1.0 = clean, degrade by 0.1 per issue category
+  const score = Math.max(0, +(1.0 - issues.length * 0.1).toFixed(2));
+
+  return { properties: sig, issues, score };
+}
+
+module.exports = { validate, isLikelyValid, validateInvariants, computeHPCScore, validateGraphProperties };

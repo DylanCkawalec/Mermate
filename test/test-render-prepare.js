@@ -1,6 +1,9 @@
 'use strict';
 
-const { describe, it } = require('node:test');
+if (!process.env.MERMATE_INFER_TIMEOUT) process.env.MERMATE_INFER_TIMEOUT = '15000';
+if (!process.env.MERMATE_MAX_INFER_TIMEOUT) process.env.MERMATE_MAX_INFER_TIMEOUT = '15000';
+
+const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { renderPrepare } = require('../server/services/input-router');
 const { analyze } = require('../server/services/input-analyzer');
@@ -8,6 +11,7 @@ const { buildRenderPrepareUserPrompt, buildModelRepairUserPrompt } = require('..
 const { selectDiagramType } = require('../server/services/diagram-selector');
 
 describe('renderPrepare', () => {
+  after(() => { try { require('../server/services/rate-master-bridge').destroy(); } catch { /* ok */ } });
 
   it('produces valid Mermaid from plain text via local fallback', async () => {
     const source = 'A user logs in via the browser, the API gateway validates JWT, then routes to the user service which reads from PostgreSQL.';

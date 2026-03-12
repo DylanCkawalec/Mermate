@@ -12,11 +12,13 @@ const {
   buildCompositionUserPrompt, buildSemanticRepairUserPrompt,
   buildMaxCompositionUserPrompt,
 } = require('./axiom-prompts');
-const { validateInvariants, computeHPCScore } = require('./mermaid-validator');
+const { validateInvariants, computeHPCScore, validateGraphProperties } = require('./mermaid-validator');
 const provider = require('./inference-provider');
 const enhancerBridge = require('./gpt-enhancer-bridge');
 const rmBridge = require('./rate-master-bridge');
 const catalog = require('./model-catalog');
+const { Phase, createPhaseTracker } = require('./compiler-phases');
+const structuralSig = require('./structural-signature');
 const logger = require('../utils/logger');
 
 // ---- Local text-to-mmd fallback (no enhancer required) ----------------------
@@ -326,6 +328,8 @@ async function renderPrepare(source, profile, useMax = false) {
   const stagesExecuted = [];
   const userPrompt = buildRenderPrepareUserPrompt(source, profile);
   const rt = _rt();
+  const phases = createPhaseTracker(_auditEmit, _activeRunId);
+  phases.enter(Phase.ANALYZE);
 
   const inferFn = useMax ? provider.inferMax : provider.infer;
   const callStart = Date.now();
@@ -486,11 +490,15 @@ async function renderHPCGoT(source, profile, useMax = false) {
   const inferFn = useMax ? provider.inferMax : provider.infer;
   const gotCfg = getGotConfig();
   const rt = _rt();
+  const phases = createPhaseTracker(_auditEmit, _activeRunId);
 
   let stateCount = 1;
   _audit('got:root_init', { stateBudget: gotCfg.stateBudget, depth: gotCfg.maxDepth });
 
-  // ---- Stage 1: Typed Architecture Fact Extraction ---
+  // ════════════════════════════════════════════════════════════════════════
+  // Phase: ANALYZE — extract facts, build diagram plan
+  // ════════════════════════════════════════════════════════════════════════
+  phases.enter(Phase.ANALYZE, { useMax });
   _audit('render:hpc_stage1', { stage: 'fact_extraction', useMax });
   if (rt) rt.addStage(_activeRunId, 'fact_extraction');
   const factUserPrompt = buildFactExtractionUserPrompt(source, profile);
@@ -651,7 +659,11 @@ async function renderHPCGoT(source, profile, useMax = false) {
   const candidateA = _cleanComposition(compResultA.output);
   const candidateB = _cleanComposition(compResultB.output);
 
-  // Score both candidates
+  // ════════════════════════════════════════════════════════════════════════
+  // Phase: VALIDATE — score branches via HPC (structural + invariant)
+  // ════════════════════════════════════════════════════════════════════════
+  phases.enter(Phase.VALIDATE);
+
   const scoreA = candidateA ? computeHPCScore(candidateA, facts) : { score: 0, sv: 0, ic: 0 };
   const scoreB = candidateB ? computeHPCScore(candidateB, facts) : { score: 0, sv: 0, ic: 0 };
   _audit('got:validate', { branchA: scoreA.score, branchB: scoreB.score });
@@ -674,6 +686,11 @@ async function renderHPCGoT(source, profile, useMax = false) {
     });
   }
 
+  // ════════════════════════════════════════════════════════════════════════
+  // Phase: SELECT — prune below threshold, pick best survivor
+  // ════════════════════════════════════════════════════════════════════════
+  phases.enter(Phase.SELECT);
+
   const softTau = gotCfg.pruneThreshold * 0.7;
   const survivors = [];
   if (candidateA && scoreA.score >= softTau) survivors.push({ mmd: candidateA, score: scoreA, provider: compResultA.provider, label: 'A' });
@@ -690,7 +707,11 @@ async function renderHPCGoT(source, profile, useMax = false) {
   let mmdSource = survivors[0].mmd;
   let hpcScore = survivors[0].score;
 
-  // ---- Merge: if 2 survivors, try combining compatible elements from runner-up ---
+  // ════════════════════════════════════════════════════════════════════════
+  // Phase: MERGE — terminal merge of surviving branches
+  // ════════════════════════════════════════════════════════════════════════
+  phases.enter(Phase.MERGE, { survivorCount: survivors.length });
+
   if (survivors.length >= 2 && gotCfg.mergeEnabled) {
     _audit('got:merge_eval', { candidateCount: survivors.length });
 
@@ -798,6 +819,17 @@ async function renderHPCGoT(source, profile, useMax = false) {
     return legacy;
   }
 
+  // ════════════════════════════════════════════════════════════════════════
+  // Phase: OUTPUT — compute structural signature, assemble protocol result
+  // ════════════════════════════════════════════════════════════════════════
+  phases.enter(Phase.OUTPUT);
+
+  // Structural signature: first-class compiler artifact
+  let signature = null;
+  try { signature = structuralSig.extract(mmdSource); } catch { /* advisory */ }
+
+  const phaseSummary = phases.summary();
+
   return {
     mmdSource,
     enhanced: true,
@@ -807,6 +839,8 @@ async function renderHPCGoT(source, profile, useMax = false) {
     plan,
     hpcScore,
     stateCount,
+    structuralSignature: signature,
+    phaseSummary,
   };
 }
 
@@ -1173,12 +1207,11 @@ async function decomposeAndRender(source, profile, useMax = false) {
   });
 
   const subviewMmds = [];
+  const _writeOps = [];
   for (const r of results) {
     if (r.mmdSource) {
       subviewMmds.push({ viewName: r.viewName || r.viewSlug, mmdSource: r.mmdSource, score: r.score, outputDir: r.outputDir });
-      try {
-        await fsp.writeFile(nodePath.join(r.outputDir, 'subview.mmd'), r.mmdSource, 'utf8');
-      } catch { /* best effort */ }
+      _writeOps.push(fsp.writeFile(nodePath.join(r.outputDir, 'subview.mmd'), r.mmdSource, 'utf8').catch(() => {}));
 
       if (rt) {
         rt.addSubview(_activeRunId, {
@@ -1193,6 +1226,7 @@ async function decomposeAndRender(source, profile, useMax = false) {
       }
     }
   }
+  if (_writeOps.length > 0) await Promise.all(_writeOps);
 
   // ---- MERGE STEP: combine all subview .mmd into one unified diagram ----
   if (subviewMmds.length >= 2) {
@@ -1533,7 +1567,7 @@ async function route(source, options = {}) {
 }
 
 function buildResult(mmdSource, contentState, enhanced, enhanceMeta, stagesExecuted, startMs, originalSource) {
-  // Run deterministic repairer before validation/classification
+  // ── VALIDATE: deterministic repair + L0 parse + classify ──
   const repairResult = deterministicRepair(mmdSource);
   if (repairResult.changes.length > 0) {
     mmdSource = repairResult.source;
@@ -1541,7 +1575,6 @@ function buildResult(mmdSource, contentState, enhanced, enhanceMeta, stagesExecu
     logger.info('deterministic.repair', { changes: repairResult.changes });
   }
 
-  // Both classify and validate are synchronous pure functions — run inline
   const diagramType = classify(mmdSource);
   const validation = validate(mmdSource);
   _audit('render:validate', { valid: validation.valid, diagramType, warnings: validation.warnings.length });
@@ -1551,15 +1584,27 @@ function buildResult(mmdSource, contentState, enhanced, enhanceMeta, stagesExecu
     : null;
 
   if (validation.warnings.length > 0) {
-    logger.info('mmd.validation.warnings', {
-      warnings: validation.warnings.map(w => w.message),
-    });
+    logger.info('mmd.validation.warnings', { warnings: validation.warnings.map(w => w.message) });
   }
   if (!validation.valid) {
-    logger.warn('mmd.validation.errors', {
-      errors: validation.errors.map(e => e.message),
-    });
+    logger.warn('mmd.validation.errors', { errors: validation.errors.map(e => e.message) });
   }
+
+  // ── OUTPUT: structural signature + graph-theoretic validation ──
+  let graphValidation = null;
+  let signature = null;
+  try {
+    signature = structuralSig.extract(mmdSource);
+    graphValidation = validateGraphProperties(mmdSource);
+    if (graphValidation.issues.length > 0) {
+      logger.info('compiler.output.graph', {
+        score: graphValidation.score,
+        issues: graphValidation.issues,
+        complexity: signature.complexityClass,
+        hash: signature.topologyHash,
+      });
+    }
+  } catch { /* structural analysis is advisory */ }
 
   return {
     mmdSource,
@@ -1571,6 +1616,8 @@ function buildResult(mmdSource, contentState, enhanced, enhanceMeta, stagesExecu
     totalEnhanceMs: Date.now() - startMs,
     validation,
     diagramSelection,
+    graphValidation,
+    structuralSignature: signature,
   };
 }
 

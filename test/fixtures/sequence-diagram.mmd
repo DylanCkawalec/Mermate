@@ -1,47 +1,22 @@
-%% Compiled Mermaid source for: layer
-%% Generated: 2026-03-11T10:04:40.583Z
-%% Compile attempts: 1
-%% Max mode: true
+sequenceDiagram
+  participant Browser
+  participant Gateway
+  participant Auth
+  participant UserSvc
+  participant DB
 
-flowchart TB
-    subgraph SG0["Layer"]
-        Precisioninservice["precision in service"]
-        BrowserClient(["Browser Client"])
-        TotheAPI["to the API"]
-        APIGateway["API Gateway"]
-        Pointforclient(["point for client"])
-        AuthService["Auth Service"]
-        RedisCache[("Redis Cache")]
-        Managesservice["Manages service"]
-        OrderService["Order Service"]
-        InventoryService["Inventory Service"]
-        PaymentService["Payment Service"]
-        NGINX[("NGINX")]
-        Redis[("Redis")]
-        Envoy[("Envoy")]
-        Stripe[("Stripe")]
-        Kafka[("Kafka")]
-        Browser(["Browser"])
-        Client(["Client"])
-        Customer(["customer"])
-        User(["user"])
-        SendingaPOST["sending a POST"]
-        Handlingauthentication[", handling authentication"]
-        SendsaPOST["sends a POST"]
-        TotheAPI["to the **API"]
-        Gatewayroutesthe["**Gateway** routes the"]
-        TotheOrder["to the **Order"]
-        AndPaymentService["and **Payment Service**"]
-        Theeventto["the event to"]
-        Upto100["up to 100"]
-        Persessionwith["per session with"]
-        ErrorRecovery["Error Recovery"]
-    end
-    SendingaPOST -->|"request"| TotheAPI
-    Pointforclient -->|"requests"| Handlingauthentication
-    SendsaPOST -->|"request"| TotheAPI
-    Gatewayroutesthe -->|"request"| TotheOrder
-    AndPaymentService -->|"consume"| Theeventto
-    Upto100 -->|"requests"| Persessionwith
-    SendingaPOST -.->|"Failure Handling:"| ErrorRecovery
-    InventoryService -.->|"- If a saga compensation is re"| ErrorRecovery
+  Browser->>Gateway: POST /login (credentials)
+  Gateway->>Auth: validate(token)
+  Auth->>DB: SELECT user WHERE email = ?
+  DB-->>Auth: user row
+  Auth-->>Gateway: JWT
+  Gateway-->>Browser: 200 OK + JWT
+
+  Browser->>Gateway: GET /profile (JWT)
+  Gateway->>Auth: verify(JWT)
+  Auth-->>Gateway: valid
+  Gateway->>UserSvc: getProfile(userId)
+  UserSvc->>DB: SELECT * FROM profiles
+  DB-->>UserSvc: profile
+  UserSvc-->>Gateway: profile JSON
+  Gateway-->>Browser: 200 OK + profile

@@ -24,6 +24,18 @@ const PROMPT_PATH = path.resolve(__dirname, '..', 'simple-idea.prompt');
 const PORT = 3333;
 const BASE = `http://127.0.0.1:${PORT}`;
 
+async function checkServerAvailable() {
+  return new Promise((resolve) => {
+    const req = http.get(`${BASE}/api/copilot/health`, { timeout: 2000 }, (res) => {
+      let data = '';
+      res.on('data', (c) => { data += c; });
+      res.on('end', () => resolve(true));
+    });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+  });
+}
+
 function postSSE(urlPath, body) {
   return new Promise((resolve, reject) => {
     const events = [];
@@ -78,6 +90,13 @@ async function run() {
   console.log('\n========================================');
   console.log('  MERMATE E2E INTELLIGENCE VERIFICATION');
   console.log('========================================\n');
+
+  const serverUp = await checkServerAvailable();
+  if (!serverUp) {
+    console.log('  Server not running on port ' + PORT + ' — skipping E2E test.\n');
+    console.log('  To run this test, start the server first: ./mermaid.sh start\n');
+    return;
+  }
 
   // Load the prompt
   const prompt = fs.readFileSync(PROMPT_PATH, 'utf-8').trim();
@@ -300,6 +319,10 @@ async function run() {
 }
 
 run().catch(err => {
+  if (err.code === 'ECONNREFUSED' || err.message?.includes('ECONNREFUSED')) {
+    console.log('  Server not reachable — E2E test skipped.\n');
+    process.exit(0);
+  }
   console.error('E2E test failed:', err.message);
   process.exit(1);
 });

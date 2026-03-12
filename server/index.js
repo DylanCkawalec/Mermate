@@ -73,9 +73,13 @@ roleRegistry.getRoles();
 const renderRouter = require('./routes/render');
 const agentRouter = require('./routes/agent');
 const transcribeRouter = require('./routes/transcribe');
+const tlaRouter = require('./routes/tla');
+const tsRouter = require('./routes/ts');
 app.use('/api', renderRouter);
 app.use('/api', agentRouter);
 app.use('/api', transcribeRouter);
+app.use('/api', tlaRouter);
+app.use('/api', tsRouter);
 
 // Run retention cleanup on startup (non-blocking)
 const runTracker = require('./services/run-tracker');
@@ -87,6 +91,26 @@ app.get('/api/rate-master/metrics', (_req, res) => {
   const metrics = rmBridge.getMetrics();
   if (!metrics) return res.json({ success: true, available: false, message: 'rate-master not initialized' });
   return res.json({ success: true, available: true, metrics });
+});
+
+// Meta-cognition gateway endpoints + CRON
+const metaBridge = require('./services/meta-gateway-bridge');
+app.get('/api/meta/health', async (_req, res) => {
+  const available = await metaBridge.isAvailable();
+  res.json({ success: true, available });
+});
+app.post('/api/meta/refine', async (req, res) => {
+  const { stage, msg, seed_prompt } = req.body || {};
+  const result = await metaBridge.refinePrompt(stage || 'unknown', msg || '', seed_prompt || '');
+  res.json({ success: true, ...result });
+});
+app.post('/api/meta/audit', async (req, res) => {
+  const result = await metaBridge.auditRun(req.body?.run_id || '');
+  res.json({ success: true, audit: result });
+});
+app.post('/api/meta/cron', async (_req, res) => {
+  const result = await metaBridge.cronOptimize();
+  res.json({ success: true, ...result });
 });
 
 // Start server only when run directly (not imported by tests)
@@ -111,8 +135,18 @@ if (require.main === module) {
 
   server.listen(PORT);
 
-  process.on('SIGTERM', () => { rmBridge.destroy(); server.close(() => process.exit(0)); });
-  process.on('SIGINT',  () => { rmBridge.destroy(); server.close(() => process.exit(0)); });
+  // Meta-cognition CRON: audit runs + optimize prompts every 5 minutes
+  const META_CRON_MS = parseInt(process.env.META_CRON_INTERVAL_MS || '300000', 10);
+  let _metaCronTimer = null;
+  if (process.env.META_GATEWAY_ENABLED !== 'false') {
+    _metaCronTimer = setInterval(() => {
+      metaBridge.cronOptimize().catch(() => {});
+    }, META_CRON_MS);
+    if (_metaCronTimer.unref) _metaCronTimer.unref();
+  }
+
+  process.on('SIGTERM', () => { if (_metaCronTimer) clearInterval(_metaCronTimer); rmBridge.destroy(); server.close(() => process.exit(0)); });
+  process.on('SIGINT',  () => { if (_metaCronTimer) clearInterval(_metaCronTimer); rmBridge.destroy(); server.close(() => process.exit(0)); });
 }
 
 module.exports = app;

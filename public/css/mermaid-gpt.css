@@ -255,6 +255,19 @@ body {
   box-shadow: 0 1px 2px rgba(0,0,0,0.05);
 }
 
+.mode-btn[hidden] {
+  display: none !important;
+}
+
+.mode-btn.stage-reveal {
+  animation: stage-reveal 0.35s ease;
+}
+
+@keyframes stage-reveal {
+  from { opacity: 0; transform: scale(0.85); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
 .mode-icon {
   width: 13px;
   height: 13px;
@@ -265,6 +278,35 @@ body {
 .mode-icon svg {
   width: 100%;
   height: 100%;
+}
+
+.stage-badge {
+  font-size: 0.58rem;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 999px;
+  margin-left: 3px;
+  letter-spacing: 0.02em;
+}
+
+.stage-badge[hidden] { display: none; }
+
+.stage-badge.stage-pass {
+  background: #16a34a22;
+  color: #22c55e;
+  border: 1px solid #22c55e44;
+}
+
+.stage-badge.stage-warn {
+  background: #eab30822;
+  color: #eab308;
+  border: 1px solid #eab30844;
+}
+
+.stage-badge.stage-fail {
+  background: #dc262622;
+  color: #ef4444;
+  border: 1px solid #ef444444;
 }
 
 /* ==========================================================================
@@ -985,6 +1027,21 @@ body {
   cursor: not-allowed;
 }
 
+.render-icon {
+  width: 13px;
+  height: 13px;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.render-icon svg {
+  width: 100%;
+  height: 100%;
+  stroke: currentColor;
+  fill: none;
+}
+
 .btn-new {
   width: 100%;
   background: var(--accent);
@@ -1222,6 +1279,7 @@ body {
 .result-controls {
   display: flex;
   gap: 6px;
+  flex-wrap: wrap;
 }
 
 .result-section.is-revealing {
@@ -1697,6 +1755,140 @@ body {
   background: rgba(0,0,0,0.5);
   padding: 1px 4px;
   border-radius: 3px;
+}
+
+/* ==========================================================================
+   Artifact Results Container (TLA+ / TypeScript — tab-driven)
+   ========================================================================== */
+
+.artifact-results {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.artifact-results[hidden] {
+  display: none;
+}
+
+/* ==========================================================================
+   TLA+ Verification Panel
+   ========================================================================== */
+
+.btn-accent {
+  background: var(--accent, #3b82f6);
+  color: #fff;
+  border: none;
+  font-weight: 600;
+}
+.btn-accent:hover { opacity: 0.9; }
+.btn-accent:disabled { opacity: 0.5; cursor: wait; }
+
+.tla-results {
+  margin-top: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 16px;
+  background: var(--surface-card, #1a1a2e);
+}
+
+.tla-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.tla-header h3 { margin: 0; font-size: 15px; }
+.btn-close {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.btn-close:hover { color: var(--text-primary); }
+
+.tla-status { margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+.tla-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.tla-pass { background: #16a34a22; color: #22c55e; border: 1px solid #22c55e44; }
+.tla-fail { background: #dc262622; color: #ef4444; border: 1px solid #ef444444; }
+.tla-warn { background: #eab30822; color: #eab308; border: 1px solid #eab30844; }
+.tla-skip { background: #64748b22; color: #94a3b8; border: 1px solid #94a3b844; }
+.tla-muted { color: var(--text-secondary); font-size: 13px; }
+
+.tla-panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.tla-panel {
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 10px;
+  overflow: auto;
+}
+.tla-panel h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.tla-source {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+#ts-traces {
+  max-height: 220px;
+}
+
+.tla-inv-item {
+  padding: 4px 0;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tla-violation {
+  padding: 8px;
+  margin-bottom: 8px;
+  border: 1px solid #ef444444;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.tla-trace { margin-top: 6px; }
+.tla-trace-step {
+  padding: 3px 0;
+  font-size: 12px;
+  font-family: 'SF Mono', monospace;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.tla-trace-step:last-child { border-bottom: none; }
+
+.tla-metrics {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 /* ==========================================================================

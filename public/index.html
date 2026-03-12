@@ -46,6 +46,16 @@
             <span class="mode-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="5 4 2 8 5 12"/><polyline points="11 4 14 8 11 12"/><line x1="9" y1="2" x2="7" y2="14"/></svg></span>
             <span class="mode-label">Mermaid</span>
           </button>
+          <button class="mode-btn" data-mode="tla" role="radio" aria-checked="false" hidden>
+            <span class="mode-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5l5.5 3v7L8 14.5 2.5 11.5v-7z"/><path d="M8 7v4"/><circle cx="8" cy="5" r="1"/></svg></span>
+            <span class="mode-label">TLA+</span>
+            <span class="stage-badge" data-stage="tla" hidden></span>
+          </button>
+          <button class="mode-btn" data-mode="ts" role="radio" aria-checked="false" hidden>
+            <span class="mode-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M6 6h4M8 6v5"/></svg></span>
+            <span class="mode-label">TypeScript</span>
+            <span class="stage-badge" data-stage="ts" hidden></span>
+          </button>
         </div>
 
         <!-- File upload -->
@@ -140,6 +150,7 @@ Type /talk to speak your idea"
         </label>
         <button id="btn-max" class="btn-max" aria-label="Toggle Max mode for strongest architecture output" title="Max: use strongest premium model for architect-grade output">Max</button>
         <button id="btn-render" class="btn btn-render" aria-label="Render diagram">
+          <span id="render-icon" class="render-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5a4.5 4.5 0 0 1 2.25 8.4v1.85a1.25 1.25 0 0 1-1.25 1.25h-2a1.25 1.25 0 0 1-1.25-1.25V9.9A4.5 4.5 0 0 1 8 1.5z"/></svg></span>
           Render
           <span class="kbd">&#8984;&#9166;</span>
         </button>
@@ -213,6 +224,61 @@ Type /talk to speak your idea"
       </div>
       <!-- Run Details + Subview Gallery -->
       <div id="run-details" class="run-details" hidden></div>
+    </section>
+
+    <!-- Artifact Results (TLA+ / TypeScript) — driven by tab selection, outside diagram result-section -->
+    <section id="artifact-results" class="artifact-results" hidden>
+      <!-- TLA+ Verification Results -->
+      <div id="tla-results" class="tla-results" hidden>
+        <div class="tla-header">
+          <h3>TLA+ Formal Verification</h3>
+        </div>
+        <div id="tla-status" class="tla-status"></div>
+        <div class="tla-panels">
+          <div class="tla-panel">
+            <h4>Specification</h4>
+            <pre id="tla-source" class="tla-source"></pre>
+          </div>
+          <div class="tla-panel">
+            <h4>Invariant Check</h4>
+            <div id="tla-invariants" class="tla-invariants"></div>
+          </div>
+          <div id="tla-violations-panel" class="tla-panel" hidden>
+            <h4>Violation Trace</h4>
+            <div id="tla-violations" class="tla-violations"></div>
+          </div>
+        </div>
+        <div id="tla-metrics" class="tla-metrics"></div>
+      </div>
+      <!-- TypeScriptRuntime Results -->
+      <div id="ts-results" class="tla-results" hidden>
+        <div class="tla-header">
+          <h3>TypeScriptRuntime Compilation</h3>
+        </div>
+        <div id="ts-status" class="tla-status"></div>
+        <div class="tla-panels">
+          <div class="tla-panel">
+            <h4>Compile</h4>
+            <div id="ts-compile" class="tla-metrics"></div>
+          </div>
+          <div class="tla-panel">
+            <h4>Harness</h4>
+            <div id="ts-tests" class="tla-metrics"></div>
+          </div>
+          <div class="tla-panel">
+            <h4>Coverage</h4>
+            <div id="ts-coverage" class="tla-metrics"></div>
+          </div>
+          <div class="tla-panel">
+            <h4>Failure Traces</h4>
+            <pre id="ts-traces" class="tla-source"></pre>
+          </div>
+        </div>
+        <div class="tla-panel">
+          <h4>Generated Runtime Source</h4>
+          <pre id="ts-source" class="tla-source"></pre>
+        </div>
+      </div>
     </section>
 
     <!-- Loading overlay -->

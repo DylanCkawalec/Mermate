@@ -218,20 +218,27 @@ router.post('/agent/run', async (req, res) => {
   const auditId = auditTracker.createRun(runId, `agent:${mode}`);
 
   const gotConfig = require('../services/got-config').getConfig();
-  const parentRunId = await runTracker.create({
-    mode,
-    maxMode: true,
-    enhance: true,
-    userInput: prompt.slice(0, 5000),
-    userDiagramName: userDiagramName,
-    inputMode: 'idea',
-    gotConfig,
-    models: {
-      orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || 'gpt-4o',
-      worker: process.env.MERMATE_WORKER_MODEL || 'gpt-4o',
-      fast: process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-4o-mini',
-    },
-  }).catch(() => null);
+  const startText = current_text || prompt;
+
+  // Parallel init: run tracker creation + mode prompt load + analysis all concurrently
+  const [parentRunId, modePromptSkeleton, profile] = await Promise.all([
+    runTracker.create({
+      mode,
+      maxMode: true,
+      enhance: true,
+      userInput: prompt.slice(0, 5000),
+      userDiagramName: userDiagramName,
+      inputMode: 'idea',
+      gotConfig,
+      models: {
+        orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || 'gpt-4o',
+        worker: process.env.MERMATE_WORKER_MODEL || 'gpt-4o',
+        fast: process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-4o-mini',
+      },
+    }).catch(() => null),
+    _loadModePrompt(mode),
+    Promise.resolve(analyze(startText, 'idea')),
+  ]);
 
   // Wire narrator: emits 'narration' events from audit stream → SSE
   const stopNarrator = narrator.watchRun(auditId, runId, sendEvent, auditTracker);
@@ -239,14 +246,6 @@ router.post('/agent/run', async (req, res) => {
   try {
     auditTracker.emit(auditId, 'agent:stage_enter', { stage: 'ingest' });
     sendEvent('stage', { stage: 'ingest', message: 'Reading prompt and mode configuration...' });
-
-    const startText = current_text || prompt;
-
-    // Parallel init: I/O-bound mode prompt load runs alongside sync analysis
-    const [modePromptSkeleton, profile] = await Promise.all([
-      _loadModePrompt(mode),
-      Promise.resolve(analyze(startText, 'idea')),
-    ]);
     const modeRoles = _selectRolesForMode(mode);
 
     // ---- Planning ----
@@ -628,6 +627,7 @@ router.post('/agent/finalize', async (req, res) => {
       auditTracker.emit(finalizeAuditId, 'agent:stage_enter', { stage: 'incorporating_notes' });
       sendEvent('stage', { stage: 'incorporating_notes', message: 'Applying your notes to the architecture...' });
 
+      const _noteStart = Date.now();
       const noteResult = await provider.infer('copilot_enhance', {
         userPrompt: [
           '[CURRENT ARCHITECTURE DRAFT]', draftText, '',
@@ -636,6 +636,7 @@ router.post('/agent/finalize', async (req, res) => {
           'Preserve existing structure. Focus only on what the user asked to change.',
         ].join('\n'),
       });
+      logger.info('agent.notes.timing', { ms: Date.now() - _noteStart, provider: noteResult.provider, hasOutput: !!noteResult.output, noOp: noteResult.noOp });
 
       if (noteResult.output && noteResult.output.trim() !== draftText.trim()) {
         const prevDraft = draftText;

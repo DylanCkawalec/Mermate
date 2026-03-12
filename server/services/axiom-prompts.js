@@ -103,7 +103,12 @@ DIAGRAM TYPE SELECTION (evaluate in priority order, first match wins):
  * @param {string} stage - text_to_md, md_to_mmd, validate_mmd, repair
  * @returns {{ system: string, outputFormat: string, temperature: number }}
  */
+const _promptCache = new Map();
+
 function buildPrompt(stage) {
+  const cached = _promptCache.get(stage);
+  if (cached) return cached;
+
   let axioms = '';
   let task = '';
 
@@ -167,41 +172,18 @@ function buildPrompt(stage) {
       task = `TASK: Repair the malformed or mixed input into valid Mermaid source. Separate prose from diagram syntax. Reconstruct the diagram from all available signals. Add a valid directive if missing. Fix structural defects. Preserve all user-mentioned entities and relationships.`;
       break;
 
-    case 'render_prepare':
-      return buildRenderPreparePrompt();
-
-    case 'fact_extraction':
-      return buildFactExtractionPrompt();
-
-    case 'diagram_plan':
-      return buildDiagramPlanPrompt();
-
-    case 'composition':
-      return buildCompositionPrompt();
-
-    case 'semantic_repair':
-      return buildSemanticRepairPrompt();
-
-    case 'max_composition':
-      return buildMaxCompositionPrompt();
-
-    case 'merge_composition':
-      return buildMergeCompositionPrompt();
-
-    case 'decompose':
-      return buildDecomposePrompt();
-
-    case 'repair_from_trace':
-      return buildRepairFromTracePrompt();
-
-    case 'model_repair':
-      return buildModelRepairPrompt();
-
-    case 'copilot_suggest':
-      return buildCopilotSuggestPrompt();
-
-    case 'copilot_enhance':
-      return buildCopilotEnhancePrompt('full');
+    case 'render_prepare':      { const r = buildRenderPreparePrompt();      _promptCache.set(stage, r); return r; }
+    case 'fact_extraction':     { const r = buildFactExtractionPrompt();     _promptCache.set(stage, r); return r; }
+    case 'diagram_plan':        { const r = buildDiagramPlanPrompt();        _promptCache.set(stage, r); return r; }
+    case 'composition':         { const r = buildCompositionPrompt();        _promptCache.set(stage, r); return r; }
+    case 'semantic_repair':     { const r = buildSemanticRepairPrompt();     _promptCache.set(stage, r); return r; }
+    case 'max_composition':     { const r = buildMaxCompositionPrompt();     _promptCache.set(stage, r); return r; }
+    case 'merge_composition':   { const r = buildMergeCompositionPrompt();   _promptCache.set(stage, r); return r; }
+    case 'decompose':           { const r = buildDecomposePrompt();          _promptCache.set(stage, r); return r; }
+    case 'repair_from_trace':   { const r = buildRepairFromTracePrompt();    _promptCache.set(stage, r); return r; }
+    case 'model_repair':        { const r = buildModelRepairPrompt();        _promptCache.set(stage, r); return r; }
+    case 'copilot_suggest':     { const r = buildCopilotSuggestPrompt();     _promptCache.set(stage, r); return r; }
+    case 'copilot_enhance':     { const r = buildCopilotEnhancePrompt('full'); _promptCache.set(stage, r); return r; }
 
     default:
       axioms = [AXIOMS_MERMAID_SYNTAX, AXIOMS_PRESERVATION].join('\n');

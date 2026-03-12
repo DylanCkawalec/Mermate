@@ -145,6 +145,12 @@ const EVENT_TEMPLATES = {
   'sys:recovery':   (e) => `  ✓ Recovered  —  ${e.stage || 'stage'} resumed`,
   'sys:error':      (e) => `  ✗ Error  —  ${(e.message || '').slice(0, 50)}`,
 
+  'compiler:phase': (e) => {
+    const idx = e.index != null ? `${e.index + 1}/7` : '';
+    const label = e.label || e.phase || '';
+    return `  ▹ Phase ${idx}  —  ${label}`;
+  },
+
   'rm:action_tag':  (e) => {
     const tag = e.tag || `[${e.stage}]`;
     const ctx = e.ctxPct != null ? `${e.ctxPct}% ctx` : (e.contextUtilization != null ? `${e.contextUtilization}% ctx` : '');
@@ -192,6 +198,7 @@ async function _tryOssSummary(events) {
   if (!compactEvents.trim()) return null;
 
   try {
+    const _narrateStart = Date.now();
     const result = await prov.infer('copilot_enhance', {
       systemPrompt: [
         'You are a terminal narrator for an AI architecture system.',
@@ -205,6 +212,8 @@ async function _tryOssSummary(events) {
       ].join('\n'),
       userPrompt: `Events:\n${compactEvents}\n\nSummarize in one terminal line:`,
     });
+    const _narrateMs = Date.now() - _narrateStart;
+    if (_narrateMs > 100) logger.info('narrator.oss.timing', { ms: _narrateMs, provider: result.provider, hasOutput: !!result.output });
     if (result.output && !result.noOp) {
       return result.output.trim().slice(0, 90);
     }
