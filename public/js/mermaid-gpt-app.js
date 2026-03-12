@@ -605,7 +605,263 @@
       });
     }
 
+    // MERMATE reveal notification
+    _playRenderReveal({
+      stage: 'mmd',
+      isFinal: !!runId,
+      diagramName: data.diagram_name || diagramName,
+      metrics: data.mmd_metrics || null,
+      paths: data.paths || null,
+    });
+
     syncUiGuidance();
+  }
+
+  // ============================================================
+  //  MERMATE Reveal System — stage-aware notification pod
+  //  · Small, bottom-center, non-blocking
+  //  · 6x video speed → plays in < 1 second
+  //  · Stage-colored glow (yellow → cyan → indigo → violet → emerald)
+  //  · Subtitle message at bottom — click to copy
+  //  · Click video → focus result section
+  //  · Click anywhere outside pod → dismiss
+  //  · Raindrop sound on mount
+  // ============================================================
+
+  let _revealActive = false;
+
+  const _STAGE_CFG = {
+    idea:  { color: '#fbbf24', rgb: '251,191,36',   label: 'STAGE 1 · IDEA'      },
+    md:    { color: '#38bdf8', rgb: '56,189,248',   label: 'STAGE 2 · MARKDOWN'  },
+    mmd:   { color: '#818cf8', rgb: '129,140,248',  label: 'STAGE 3 · DIAGRAM'   },
+    tla:   { color: '#a78bfa', rgb: '167,139,250',  label: 'STAGE 4 · TLA+'      },
+    ts:    { color: '#34d399', rgb: '52,211,153',   label: 'STAGE 5 · TYPESCRIPT' },
+    final: { color: '#f59e0b', rgb: '245,158,11',   label: '✦ COMPLETE'          },
+  };
+
+  function _buildRevealMessage({ stage, isFinal, diagramName, metrics }) {
+    const name = diagramName ? `"${diagramName}"` : 'architecture';
+    if (isFinal && stage === 'ts') {
+      return `✦ ${name} COMPLETE ✦ — All stages verified. Runtime compiled. Full architecture stack live.`;
+    }
+    if (isFinal && stage === 'tla') {
+      const v = metrics?.variableCount ?? '?';
+      const inv = metrics?.invariantCount ?? '?';
+      return `★ ${name} formally verified · ${v} variables · ${inv} invariants — Generate TypeScript next?`;
+    }
+    if (stage === 'mmd' || isFinal) {
+      const n = metrics?.nodeCount ?? '?';
+      const e = metrics?.edgeCount ?? '?';
+      return `★ ${name} rendered · ${n} nodes · ${e} edges — Open TLA+ to verify behavior, or Render as is.`;
+    }
+    const cfg = _STAGE_CFG[stage];
+    return `${cfg?.label ?? 'MERMATE'} · ${name} updated — continue to next stage.`;
+  }
+
+  function _playRaindropSound() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 2400;
+      osc.connect(lp);
+      lp.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(1800, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(320, ctx.currentTime + 0.28);
+      gain.gain.setValueAtTime(0.07, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.32);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.35);
+    } catch { /* audio not available */ }
+  }
+
+  function _playRenderReveal({ stage = 'mmd', isFinal = false, diagramName = '', metrics = null, paths = null } = {}) {
+    if (_revealActive) return;
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    _revealActive = true;
+
+    const cfg = _STAGE_CFG[isFinal && stage === 'ts' ? 'final' : stage] || _STAGE_CFG.mmd;
+    const message = _buildRevealMessage({ stage, isFinal, diagramName, metrics });
+
+    // Raindrop sound
+    _playRaindropSound();
+
+    // ---- Inject keyframe styles (once) ----
+    if (!document.getElementById('_rmRevealStyles')) {
+      const s = document.createElement('style');
+      s.id = '_rmRevealStyles';
+      s.textContent = `
+        @keyframes _rmGlowPulse {
+          0%,100% { box-shadow: 0 0 12px 2px rgba(var(--rm-rgb),0.45), 0 0 40px 8px rgba(var(--rm-rgb),0.12), 0 8px 32px rgba(0,0,0,0.6); }
+          50%     { box-shadow: 0 0 22px 5px rgba(var(--rm-rgb),0.70), 0 0 70px 18px rgba(var(--rm-rgb),0.22), 0 8px 32px rgba(0,0,0,0.6); }
+        }
+        @keyframes _rmSparkle {
+          0%   { transform:scale(0) rotate(0deg);   opacity:0; }
+          50%  { transform:scale(1.3) rotate(180deg); opacity:1; }
+          100% { transform:scale(0) rotate(360deg); opacity:0; }
+        }
+        @keyframes _rmMsgSlide {
+          from { transform:translateY(8px); opacity:0; }
+          to   { transform:translateY(0);   opacity:1; }
+        }
+        @keyframes _rmBorderSpin {
+          to { background-position: 200% center; }
+        }
+      `;
+      document.head.appendChild(s);
+    }
+
+    // ---- Backdrop (click-away to dismiss) ----
+    const backdrop = document.createElement('div');
+    backdrop.style.cssText = [
+      'position:fixed;inset:0;z-index:9990;',
+      'cursor:pointer;',
+    ].join('');
+    backdrop.addEventListener('click', () => dismiss(), { once: true });
+    document.body.appendChild(backdrop);
+
+    // ---- Pod wrapper (bottom-center, small) ----
+    const pod = document.createElement('div');
+    pod.style.cssText = [
+      'position:fixed;bottom:28px;left:50%;z-index:9999;',
+      'transform:translateX(-50%) translateY(20px) scale(0.93);',
+      'width:360px;',
+      'border-radius:18px;overflow:hidden;',
+      `border:1.5px solid rgba(${cfg.rgb},0.35);`,
+      `--rm-rgb:${cfg.rgb};`,
+      'background:rgba(5,10,28,0.82);',
+      'backdrop-filter:blur(28px) saturate(1.5);',
+      '-webkit-backdrop-filter:blur(28px) saturate(1.5);',
+      'animation:_rmGlowPulse 2.2s ease-in-out infinite;',
+      'opacity:0;',
+      'transition:transform 0.5s cubic-bezier(0.34,1.56,0.64,1), opacity 0.4s ease;',
+      'pointer-events:all;',
+      'cursor:pointer;',
+    ].join('');
+
+    // Top pill label
+    const pill = document.createElement('div');
+    pill.style.cssText = [
+      'position:absolute;top:9px;left:50%;transform:translateX(-50%);z-index:20;',
+      `background:rgba(${cfg.rgb},0.15);`,
+      `border:1px solid rgba(${cfg.rgb},0.35);`,
+      `color:${cfg.color};`,
+      'font-size:9px;font-weight:700;letter-spacing:0.14em;font-family:monospace;',
+      'padding:3px 10px;border-radius:999px;white-space:nowrap;',
+    ].join('');
+    pill.textContent = cfg.label;
+    pod.appendChild(pill);
+
+    // Stage dot
+    const dot = document.createElement('div');
+    dot.style.cssText = `position:absolute;top:10px;right:12px;z-index:20;width:7px;height:7px;border-radius:50%;background:${cfg.color};box-shadow:0 0 8px 2px rgba(${cfg.rgb},0.8);animation:_rmGlowPulse 1.6s ease-in-out infinite;`;
+    pod.appendChild(dot);
+
+    // Video (16:9 ratio inside pod)
+    const videoWrap = document.createElement('div');
+    videoWrap.style.cssText = 'position:relative;width:100%;aspect-ratio:16/9;overflow:hidden;cursor:pointer;';
+
+    const video = document.createElement('video');
+    video.src = '/MERMATE_VIDEO.mp4';
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'auto';
+    video.playbackRate = 6;   // <-- 6x speed: plays in < 1 second
+    video.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
+    videoWrap.appendChild(video);
+
+    // Sparkles around video
+    const sparkleColors = [cfg.color, 'rgba(167,139,250,0.9)', '#f9a8d4'];
+    [['-8px','-8px'],['-8px','auto','auto','-8px'],['auto','-8px','auto','auto']].forEach((pos, i) => {
+      const sp = document.createElement('div');
+      const [top,right,bottom,left] = pos;
+      sp.style.cssText = `position:absolute;${top!=='auto'?`top:${top};`:''}${right!=='auto'?`right:${right};`:''}${bottom!=='auto'?`bottom:${bottom};`:''}${left!=='auto'?`left:${left};`:''}z-index:15;pointer-events:none;animation:_rmSparkle ${1.8+i*0.4}s ease-in-out infinite ${i*300}ms;`;
+      sp.innerHTML = `<svg width="10" height="10" viewBox="0 0 20 20" fill="${sparkleColors[i]}"><path d="M10 0 L11.8 8.2 L20 10 L11.8 11.8 L10 20 L8.2 11.8 L0 10 L8.2 8.2 Z"/></svg>`;
+      videoWrap.appendChild(sp);
+    });
+
+    // Click video → jump to result section
+    video.addEventListener('click', (e) => {
+      e.stopPropagation();
+      dismiss();
+      const rs = document.getElementById('result-section');
+      if (rs) {
+        rs.hidden = false;
+        rs.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    });
+
+    pod.appendChild(videoWrap);
+
+    // Message subtitle bar
+    const msgBar = document.createElement('div');
+    msgBar.style.cssText = [
+      `background:rgba(${cfg.rgb},0.08);`,
+      `border-top:1px solid rgba(${cfg.rgb},0.2);`,
+      'padding:10px 14px;',
+      'cursor:pointer;',
+      'display:flex;align-items:center;gap:8px;',
+      'animation:_rmMsgSlide 0.5s ease 0.3s both;',
+    ].join('');
+
+    const msgText = document.createElement('span');
+    msgText.style.cssText = `font-size:11px;color:rgba(255,255,255,0.82);font-family:monospace;line-height:1.4;flex:1;`;
+    msgText.textContent = message;
+    msgBar.appendChild(msgText);
+
+    const copyBtn = document.createElement('span');
+    copyBtn.style.cssText = `font-size:9px;color:rgba(${cfg.rgb},0.7);font-family:monospace;letter-spacing:0.08em;white-space:nowrap;border:1px solid rgba(${cfg.rgb},0.3);padding:2px 6px;border-radius:4px;flex-shrink:0;transition:all 0.15s;`;
+    copyBtn.textContent = 'COPY';
+    msgBar.appendChild(copyBtn);
+
+    // Click message → copy to clipboard
+    msgBar.addEventListener('click', (e) => {
+      e.stopPropagation();
+      navigator.clipboard?.writeText(message).then(() => {
+        copyBtn.textContent = '✓ COPIED';
+        copyBtn.style.color = cfg.color;
+        setTimeout(() => { copyBtn.textContent = 'COPY'; copyBtn.style.color = ''; }, 1800);
+      }).catch(() => {});
+    });
+
+    pod.appendChild(msgBar);
+
+    // Click pod itself (not video/msg) → dismiss
+    pod.addEventListener('click', (e) => {
+      if (e.target === pod) dismiss();
+    });
+
+    document.body.appendChild(pod);
+
+    // Animate in
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      pod.style.opacity = '1';
+      pod.style.transform = 'translateX(-50%) translateY(0) scale(1)';
+    }));
+
+    function dismiss() {
+      backdrop.remove();
+      pod.style.opacity = '0';
+      pod.style.transform = 'translateX(-50%) translateY(16px) scale(0.94)';
+      pod.style.transition = 'transform 0.35s ease, opacity 0.3s ease';
+      setTimeout(() => { pod.remove(); _revealActive = false; }, 360);
+    }
+
+    // Start video at 6x — catches 'canplay' in case not ready yet
+    const tryPlay = () => {
+      video.playbackRate = 6;
+      video.play().catch(() => dismiss());
+    };
+    video.readyState >= 3 ? tryPlay() : video.addEventListener('canplay', tryPlay, { once: true });
+    video.addEventListener('ended', dismiss, { once: true });
+
+    // Safety: auto-dismiss after 3 seconds regardless
+    const safetyTimer = setTimeout(dismiss, 3000);
+    video.addEventListener('ended', () => clearTimeout(safetyTimer), { once: true });
   }
 
   async function ensureRenderEffect() {

@@ -64,10 +64,12 @@ app.use('/vendor/three', express.static(path.join(PROJECT_ROOT, 'node_modules', 
 // Initialize foundation layer (read-only metadata + controller config)
 const gotConfig = require('./services/got-config');
 const roleRegistry = require('./services/role-registry');
+const agentLoader = require('./services/agent-loader');
 
 // Eagerly load so any env parse errors surface at startup, not at first request
 gotConfig.getConfig();
 roleRegistry.getRoles();
+agentLoader.loadAgents().catch(() => {});
 
 // API routes
 const renderRouter = require('./routes/render');
@@ -83,7 +85,15 @@ app.use('/api', tsRouter);
 
 // Run retention cleanup on startup (non-blocking)
 const runTracker = require('./services/run-tracker');
+const runExporter = require('./services/run-exporter');
 runTracker.cleanup().catch(() => {});
+runExporter.cleanup().catch(() => {});
+
+// Agent definitions endpoint
+app.get('/api/agents', async (_req, res) => {
+  const agents = agentLoader.getAllAgents();
+  res.json({ success: true, count: agents.length, agents: agents.map(a => ({ name: a.agent, role: a.role, stage: a.stage, priority: a.priority, domain: a.domain })) });
+});
 
 // Rate-master metrics endpoint
 const rmBridge = require('./services/rate-master-bridge');

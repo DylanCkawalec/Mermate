@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../src/client/styles.css"],
+  "sourcesContent": ["@tailwind base;\n@tailwind components;\n@tailwind utilities;\n\n:root {\n  --bg: #0f172a;\n  --surface: #1e293b;\n  --text: #f8fafc;\n  --primary: #3b82f6;\n}\n\nbody {\n  background-color: var(--bg);\n  color: var(--text);\n}\n"],
+  "mappings": ";AAAA,UAAU;AACV,UAAU;AACV,UAAU;AAEV;AACE,QAAM;AACN,aAAW;AACX,UAAQ;AACR,aAAW;AACb;AAEA;AACE,oBAAkB,IAAI;AACtB,SAAO,IAAI;AACb;",
+  "names": []
+}

@@ -310,10 +310,41 @@ router.post('/render', async (req, res) => {
       maxMode: useMax,
     });
 
-    // 2. Choose pipeline based on content state and profile recommendation
+    // 2. Pre-extract typed facts for ALL provider-backed renders.
+    // This ensures every run JSON has facts for downstream TLA+/TS stages,
+    // regardless of which pipeline (HPC-GoT, decompose, renderPrepare) runs.
     let routeResult;
     const isTextOrMd = profile.contentState === 'text' || profile.contentState === 'md';
     const shouldUseProvider = isTextOrMd && enhance;
+
+    if (shouldUseProvider && profile.shadow?.entities?.length >= 2) {
+      const { buildFactExtractionUserPrompt } = require('../services/axiom-prompts');
+      const factUserPrompt = buildFactExtractionUserPrompt(source, profile);
+      const _factStart = Date.now();
+      const factResult = await provider.infer('fact_extraction', { userPrompt: factUserPrompt });
+      const _factMs = Date.now() - _factStart;
+
+      if (factResult.output && !factResult.noOp) {
+        try {
+          let parsed = factResult.output.trim();
+          if (parsed.startsWith('```')) parsed = parsed.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+          const facts = JSON.parse(parsed);
+          if (facts?.entities?.length > 0) {
+            runTracker.recordAgentCall(runId, {
+              stage: 'fact_extraction', model: factResult.model, provider: factResult.provider,
+              promptText: factUserPrompt, outputText: factResult.output,
+              latencyMs: factResult.latencyMs || _factMs, success: true, outputType: 'json',
+            });
+            logger.info('render.facts_extracted', {
+              entities: facts.entities.length,
+              relationships: (facts.relationships || []).length,
+              failurePaths: (facts.failurePaths || []).length,
+              ms: _factMs,
+            });
+          }
+        } catch { /* parse failed — facts will be extracted by HPC-GoT if applicable */ }
+      }
+    }
 
     if (shouldUseProvider) {
       // ---- Provider-backed render: HPC-GoT bounded pipeline ----

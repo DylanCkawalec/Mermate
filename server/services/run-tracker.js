@@ -494,12 +494,10 @@ async function finalize(runId, status = 'completed') {
   await _atomicWrite(path.join(RUNS_DIR, `${m.run_id}.json`), m);
   _activeRuns.delete(runId);
 
-  // Non-blocking meta-cognition audit (fire-and-forget)
+  // Non-blocking post-finalization hooks (fire-and-forget)
   if (status === 'completed') {
-    try {
-      const metaBridge = require('./meta-gateway-bridge');
-      metaBridge.auditRun(runId).catch(() => {});
-    } catch { /* meta-gateway is optional */ }
+    try { require('./meta-gateway-bridge').auditRun(runId).catch(() => {}); } catch { /* optional */ }
+    try { require('./run-exporter').exportRun(runId, m).catch(() => {}); } catch { /* optional */ }
   }
 
   logger.info('run_tracker.finalized', {

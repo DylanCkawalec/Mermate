@@ -78,10 +78,10 @@ router.post('/render/tla', async (req, res) => {
       return res.status(404).json({ success: false, error: `Run ${run_id} not found` });
     }
 
-    // Extract facts and plan from agent_calls
+    // Extract facts and plan from agent_calls (HPC-GoT path)
     let facts = null;
     let plan = null;
-    let originalInput = runData.user_request?.input || '';
+    let originalInput = runData.request?.user_input || runData.user_request?.input || '';
 
     for (const call of (runData.agent_calls || [])) {
       if (call.stage === 'fact_extraction' && call.success) {
@@ -92,11 +92,60 @@ router.post('/render/tla', async (req, res) => {
       }
     }
 
+    // If facts not found in agent_calls (e.g. decompose pipeline), extract them now
     if (!facts || !facts.entities || facts.entities.length === 0) {
-      return res.status(422).json({
-        success: false,
-        error: 'Run does not contain typed facts. TLA+ requires an HPC-GoT render with fact extraction.',
+      if (!originalInput) {
+        return res.status(422).json({
+          success: false,
+          error: 'Run does not contain typed facts or original input for extraction.',
+        });
+      }
+
+      logger.info('tla.extracting_facts', { run_id: run_id.slice(0, 8), reason: 'not found in agent_calls' });
+      const { buildPrompt } = require('../services/axiom-prompts');
+      const { buildFactExtractionUserPrompt } = require('../services/axiom-prompts');
+      const { analyze } = require('../services/input-analyzer');
+
+      const profile = analyze(originalInput, 'idea');
+      const factPrompt = buildPrompt('fact_extraction');
+      const factUserPrompt = buildFactExtractionUserPrompt(originalInput, profile);
+      const factResult = await provider.infer('fact_extraction', {
+        systemPrompt: factPrompt.system,
+        userPrompt: factUserPrompt,
       });
+
+      if (factResult.output && !factResult.noOp) {
+        try {
+          let parsed = factResult.output.trim();
+          if (parsed.startsWith('```')) parsed = parsed.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+          facts = JSON.parse(parsed);
+        } catch { /* parse failed */ }
+      }
+
+      if (!facts || !facts.entities || facts.entities.length === 0) {
+        return res.status(422).json({
+          success: false,
+          error: 'Could not extract typed facts from the original input.',
+        });
+      }
+
+      // Also extract plan if possible
+      if (!plan) {
+        const planPrompt = buildPrompt('diagram_plan');
+        const { buildDiagramPlanUserPrompt } = require('../services/axiom-prompts');
+        const planUserPrompt = buildDiagramPlanUserPrompt(facts, profile);
+        const planResult = await provider.infer('diagram_plan', {
+          systemPrompt: planPrompt.system,
+          userPrompt: planUserPrompt,
+        });
+        if (planResult.output && !planResult.noOp) {
+          try {
+            let parsed = planResult.output.trim();
+            if (parsed.startsWith('```')) parsed = parsed.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+            plan = JSON.parse(parsed);
+          } catch { /* plan extraction is optional */ }
+        }
+      }
     }
 
     const name = diagram_name || runData.user_request?.diagram_name || 'spec';

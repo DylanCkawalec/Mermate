@@ -103,12 +103,45 @@ router.post('/render/ts', async (req, res) => {
     return res.status(404).json({ success: false, error: `Run ${run_id} not found` });
   }
 
-  const { facts, plan } = _extractFactsAndPlan(runData);
+  let { facts, plan } = _extractFactsAndPlan(runData);
+
+  // On-demand fact extraction when HPC-GoT path wasn't used (e.g. decompose pipeline)
   if (!facts || !facts.entities || facts.entities.length === 0) {
-    return res.status(422).json({
-      success: false,
-      error: 'Run does not contain typed facts. TypeScriptRuntime requires HPC-GoT fact extraction.',
+    const originalInput = runData.request?.user_input || '';
+    if (!originalInput) {
+      return res.status(422).json({
+        success: false,
+        error: 'Run does not contain typed facts or original input for extraction.',
+      });
+    }
+
+    logger.info('ts.extracting_facts', { run_id: run_id.slice(0, 8), reason: 'not found in agent_calls' });
+    const { buildPrompt } = require('../services/axiom-prompts');
+    const { buildFactExtractionUserPrompt } = require('../services/axiom-prompts');
+    const { analyze } = require('../services/input-analyzer');
+
+    const profile = analyze(originalInput, 'idea');
+    const factPrompt = buildPrompt('fact_extraction');
+    const factUserPrompt = buildFactExtractionUserPrompt(originalInput, profile);
+    const factResult = await provider.infer('fact_extraction', {
+      systemPrompt: factPrompt.system,
+      userPrompt: factUserPrompt,
     });
+
+    if (factResult.output && !factResult.noOp) {
+      try {
+        let parsed = factResult.output.trim();
+        if (parsed.startsWith('```')) parsed = parsed.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+        facts = JSON.parse(parsed);
+      } catch { /* parse failed */ }
+    }
+
+    if (!facts || !facts.entities || facts.entities.length === 0) {
+      return res.status(422).json({
+        success: false,
+        error: 'Could not extract typed facts from the original input.',
+      });
+    }
   }
 
   if (!runData.tla_artifacts?.tla || !runData.tla_artifacts?.cfg) {
