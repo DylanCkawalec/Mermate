@@ -118,6 +118,8 @@
     input.placeholder = cfg.placeholder;
     inputHint.textContent = cfg.hint;
     chkEnhance.checked = cfg.enhanceDefault;
+    const _btnEnh = document.getElementById('btn-enhance');
+    if (_btnEnh) _btnEnh.classList.toggle('active', chkEnhance.checked);
 
     if (cfg.showUpload) {
       btnUpload.classList.add('visible');
@@ -126,7 +128,7 @@
       btnUpload.classList.remove('visible');
     }
 
-    document.querySelectorAll('.mode-btn').forEach(btn => {
+    document.querySelectorAll('.sidebar-mode-btn').forEach(btn => {
       const isActive = btn.dataset.mode === mode;
       btn.classList.toggle('active', isActive);
       btn.setAttribute('aria-checked', isActive ? 'true' : 'false');
@@ -146,9 +148,18 @@
     }
   }
 
-  document.querySelectorAll('.mode-btn').forEach(btn => {
+  document.querySelectorAll('.sidebar-mode-btn').forEach(btn => {
     btn.addEventListener('click', () => setMode(btn.dataset.mode));
   });
+
+  // ---- Enhance toggle button ----
+  const btnEnhance = document.getElementById('btn-enhance');
+  if (btnEnhance) {
+    btnEnhance.addEventListener('click', () => {
+      chkEnhance.checked = !chkEnhance.checked;
+      btnEnhance.classList.toggle('active', chkEnhance.checked);
+    });
+  }
 
   // ---- File upload ----
   btnUpload.addEventListener('click', () => fileUpload.click());
