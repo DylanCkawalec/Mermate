@@ -101,12 +101,13 @@ body {
 }
 
 .sidebar-header {
-  padding: 24px 16px 20px;
-  border-bottom: none;
+  height: 50px;
+  padding: 0 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .sidebar-logo {
@@ -327,21 +328,34 @@ body {
   height: 100vh;
   overflow-y: auto;
   position: relative;
-  padding: 80px 28px 24px;
+  padding: 24px 28px 24px;
   gap: 24px;
 }
 
-/* Floating + button (top right) */
-.btn-new-float {
-  position: fixed;
-  top: 12px;
-  right: 16px;
+/* Sticky top bar */
+.top-bar {
+  position: sticky;
+  top: 0;
   z-index: 100;
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: space-between;
   height: 50px;
-  padding: 0 22px 0 16px;
+  padding: 0 28px;
+  margin: 0 -28px;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* New Diagram button (inside top bar) */
+.btn-new-float {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 18px 0 14px;
   border: none;
   border-radius: 9999px;
   background: #0066FF;
@@ -352,6 +366,7 @@ body {
   cursor: pointer;
   transition: all var(--transition);
   box-shadow: 0 2px 12px rgba(0, 102, 255, 0.3);
+  flex-shrink: 0;
 }
 
 .btn-new-float:hover {
@@ -360,8 +375,8 @@ body {
 }
 
 .btn-new-float svg {
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
   flex-shrink: 0;
 }
 
@@ -374,13 +389,15 @@ body {
   gap: 4px;
   background: #111111;
   border-radius: 9999px;
-  padding: 3px;
+  padding: 4px;
+  height: 50px;
   width: fit-content;
+  align-items: center;
 }
 
 .mode-btn {
   padding: 0 12px;
-  height: 40px;
+  height: 42px;
   border: none;
   background: transparent;
   border-radius: 9999px;
@@ -490,7 +507,7 @@ body {
   height: 50px;
   padding: 0 20px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 9999px;
   background: transparent;
   font-family: var(--font-sans);
   font-size: 14px;
@@ -552,7 +569,7 @@ body {
 
 .diagram-name-input {
   width: 100%;
-  height: 50px;
+  height: 40px;
   padding: 0 20px;
   border: 1px solid var(--border);
   border-radius: 9999px;
@@ -1747,6 +1764,10 @@ body {
    ========================================================================== */
 
 .delete-dialog {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   border: 1px solid var(--border);
   border-radius: var(--radius-box);
   padding: 24px;
@@ -2395,6 +2416,7 @@ body {
 .landing-logo {
   width: 260px;
   height: auto;
+  filter: brightness(0) invert(1);
 }
 
 .landing-title {
