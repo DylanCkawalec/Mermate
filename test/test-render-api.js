@@ -49,6 +49,7 @@ describe('POST /api/render', () => {
   });
 
   after(() => {
+    try { require('../server/services/rate-master-bridge').destroy(); } catch { /* ok */ }
     return new Promise((resolve) => {
       server.close(resolve);
     });
@@ -76,6 +77,16 @@ describe('POST /api/render', () => {
     const svgStat = await fsp.stat(svgPath);
     assert.ok(pngStat.size > 2048);
     assert.ok(svgStat.size > 500);
+
+    // Verify progressionUpdate payload for 5-tab orchestrator
+    if (res.body.run_id) {
+      assert.ok(res.body.progressionUpdate, 'progressionUpdate must be present when run_id exists');
+      assert.equal(res.body.progressionUpdate.stage, 'mmd');
+      assert.ok(Array.isArray(res.body.progressionUpdate.unlockedStages));
+      assert.ok(res.body.progressionUpdate.unlockedStages.includes('tla'), 'TLA+ must be unlocked after Mermaid render');
+      assert.equal(typeof res.body.progressionUpdate.confidence, 'number');
+      assert.ok(res.body.progressionUpdate.confidence > 0 && res.body.progressionUpdate.confidence <= 1);
+    }
   });
 
   it('returns 400 for missing mermaid_source', async () => {

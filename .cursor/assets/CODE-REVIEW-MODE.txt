@@ -84,6 +84,19 @@ Return:
 14. Final artifact summary
 15. Final verdict on whether the architecture faithfully matches the real system
 
+## System capabilities (active in pipeline)
+The system has the following capabilities that operate automatically during inference:
+- **Multi-role planning:** Up to 3 domain-expert agents reason concurrently on architecture recovery. The best plan wins by combined quality + completeness score.
+- **Graduated refinement:** Refinement pressure is gated by quantitative scoring — heavy rewrite below 0.5, targeted gap-fill between 0.5-0.7, skip above 0.7.
+- **2-branch composition:** The render pipeline generates two structurally competing Mermaid compositions in parallel (TB/boundary vs LR/data-flow), scores both, and keeps the stronger candidate.
+- **GoT-style merge:** If both branches survive pruning, compatible entities from the runner-up are merged into the winner.
+- **Per-stage model routing:** Extraction tasks use fast models; composition uses worker models.
+- **Render audit events:** Granular events emitted through the full render pipeline. For code review, these audit traces themselves are architecture evidence — the model can reference which GoT stages fired to validate its own extraction.
+- **Parallel sub-view decompose:** Complex codebases produce multiple views rendered concurrently.
+- **State budget enforcement:** GoT controller state count tracked against budget (default 40).
+
+Leverage these capabilities: use the render audit events to verify that your architecture extraction triggered fact extraction, planning, and composition stages. If the parallel sub-view decompose fires, treat each view as a separate architectural concern.
+
 ## Judgment standard
 Do not settle for a generic box-and-arrow view.
 The final architecture must be:

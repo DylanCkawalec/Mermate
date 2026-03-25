@@ -1,14 +1,47 @@
 classDiagram
-  class Animal {
-    +String name
-    +int age
-    +makeSound()
+  class Order {
+    +String orderId
+    +String customerId
+    +OrderStatus status
+    +Money totalAmount
+    +create() Order
+    +addLine(line) void
+    +confirm() void
+    +cancel() void
   }
-  class Dog {
-    +fetch()
+
+  class OrderLine {
+    +String sku
+    +int quantity
+    +Money unitPrice
+    +lineTotal() Money
   }
-  class Cat {
-    +purr()
+
+  class Money {
+    +BigDecimal amount
+    +String currency
+    +add(other) Money
+    +subtract(other) Money
+    +isPositive() bool
   }
-  Animal <|-- Dog
-  Animal <|-- Cat
+
+  class Customer {
+    +String customerId
+    +String email
+    +Address shippingAddress
+    +Money creditLimit
+    +canPlaceOrder(amount) bool
+  }
+
+  class Repository~T~ {
+    <<interface>>
+    +find(id) T
+    +save(entity) void
+    +delete(id) void
+  }
+
+  Order "1" *-- "many" OrderLine : contains
+  Order --> Money : totalAmount
+  OrderLine --> Money : unitPrice
+  Order --> Customer : placedBy
+  Repository~Order~ ..> Order : manages

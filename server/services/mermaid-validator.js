@@ -178,8 +178,11 @@ function isLikelyValid(source) {
 
 // ---- HPC-GoT Deterministic Invariant Validation --------------------------------
 
-const PROSE_WORD_LIMIT = 6;
-const EDGE_LABEL_WORD_LIMIT = 6;
+const { getConfig: getGotConfig } = require('./got-config');
+
+const _gotCfg = () => getGotConfig();
+const PROSE_WORD_LIMIT = () => _gotCfg().proseWordLimit;
+const EDGE_LABEL_WORD_LIMIT = () => _gotCfg().edgeLabelWordLimit;
 
 /**
  * Normalize a name for fuzzy matching: lowercase, strip non-alphanumeric, collapse whitespace.
@@ -306,7 +309,7 @@ function validateInvariants(mmdSource, facts, plan) {
     const lines = node.label.split('\\n');
     for (const line of lines) {
       const wordCount = line.trim().split(/\s+/).length;
-      if (wordCount > PROSE_WORD_LIMIT * 2) {
+      if (wordCount > PROSE_WORD_LIMIT() * 2) {
         trace.proseFragments.push(`Node ${node.id}: "${line.substring(0, 60)}..."`);
       }
     }
@@ -316,7 +319,7 @@ function validateInvariants(mmdSource, facts, plan) {
   const edgeLabels = extractEdgeLabels(mmdSource);
   for (const label of edgeLabels) {
     const wordCount = label.split(/\s+/).length;
-    if (wordCount > EDGE_LABEL_WORD_LIMIT) {
+    if (wordCount > EDGE_LABEL_WORD_LIMIT()) {
       trace.longLabels.push(`"${label.substring(0, 40)}" (${wordCount} words)`);
     }
   }
@@ -376,7 +379,8 @@ function computeHPCScore(mmdSource, facts) {
   // IC = average of entity coverage and relationship coverage
   const ic = (ec + rc) / 2;
 
-  const score = +(0.5 * sv + 0.5 * ic).toFixed(3);
+  const cfg = getGotConfig();
+  const score = +(cfg.scoreStructuralWeight * sv + cfg.scoreInvariantWeight * ic).toFixed(3);
 
   return {
     score,
@@ -396,4 +400,55 @@ function computeHPCScore(mmdSource, facts) {
   };
 }
 
-module.exports = { validate, isLikelyValid, validateInvariants, computeHPCScore };
+// ---- Graph-Theoretic Structural Validation (L1–L3) -------------------------
+
+const structuralSig = require('./structural-signature');
+
+/**
+ * Deep structural validation using graph-theoretic properties.
+ * Complements L0 parse validation with L1 (graph), L2 (flow), L3 (boundary).
+ *
+ * @param {string} mmdSource
+ * @returns {{ properties: object, issues: string[], score: number }}
+ */
+function validateGraphProperties(mmdSource) {
+  const sig = structuralSig.extract(mmdSource);
+  const issues = [];
+
+  // L1: Graph validity
+  if (!sig.isFullyConnected && sig.connectedComponents > 1) {
+    issues.push(`L1:disconnected — ${sig.connectedComponents} disconnected components`);
+  }
+  if (sig.orphanedNodes > 0) {
+    issues.push(`L1:orphaned — ${sig.orphanedNodes} nodes with no edges`);
+  }
+
+  // L2: Flow validity
+  if (sig.unreachableNodes > 0) {
+    issues.push(`L2:unreachable — ${sig.unreachableNodes} nodes unreachable from any entry point`);
+  }
+  if (sig.entryPoints === 0 && sig.nodeCount > 1) {
+    issues.push(`L2:no_entry — no clear entry points (all nodes have incoming edges)`);
+  }
+  if (sig.terminalNodes === 0 && sig.nodeCount > 1 && !sig.hasCycles) {
+    issues.push(`L2:no_terminal — no terminal nodes (all nodes have outgoing edges but no cycles)`);
+  }
+
+  // L3: Boundary & failure path validity
+  if (sig.boundaryCrossings > 0 && sig.boundarySymmetry < 0.3) {
+    issues.push(`L3:asymmetric_boundaries — boundary symmetry ${(sig.boundarySymmetry * 100).toFixed(0)}% (many one-way cross-boundary flows)`);
+  }
+  if (sig.nodeCount >= 10 && !sig.hasExplicitFailurePaths) {
+    issues.push(`L3:no_failure_paths — no explicit error/failure/retry nodes in a ${sig.nodeCount}-node architecture`);
+  }
+  if (sig.crossCuttingCount >= 3) {
+    issues.push(`L3:cross_cutting — ${sig.crossCuttingCount} cross-cutting hubs detected (may need pattern extraction)`);
+  }
+
+  // Score: 1.0 = clean, degrade by 0.1 per issue category
+  const score = Math.max(0, +(1.0 - issues.length * 0.1).toFixed(2));
+
+  return { properties: sig, issues, score };
+}
+
+module.exports = { validate, isLikelyValid, validateInvariants, computeHPCScore, validateGraphProperties };

@@ -1,12 +1,59 @@
 erDiagram
-  CUSTOMER ||--o{ ORDER : places
-  ORDER ||--|{ LINE-ITEM : contains
-  PRODUCT ||--o{ LINE-ITEM : "is in"
-  CUSTOMER {
+  TENANT ||--o{ USER : has
+  TENANT ||--o{ PROJECT : owns
+  USER ||--o{ PROJECT : contributes_to
+  USER ||--o{ API_KEY : holds
+  PROJECT ||--o{ ENVIRONMENT : deploys_in
+  ENVIRONMENT ||--o{ DEPLOYMENT : runs
+  DEPLOYMENT ||--o{ LOG_ENTRY : produces
+
+  TENANT {
+    uuid id PK
     string name
-    string email
+    string plan
+    date created_at
   }
-  ORDER {
-    int id
-    date created
+
+  USER {
+    uuid id PK
+    uuid tenant_id FK
+    string email
+    string role
+  }
+
+  PROJECT {
+    uuid id PK
+    uuid tenant_id FK
+    string name
+    string repo_url
+  }
+
+  ENVIRONMENT {
+    uuid id PK
+    uuid project_id FK
+    string name
+    string region
+  }
+
+  DEPLOYMENT {
+    uuid id PK
+    uuid environment_id FK
+    string version
+    string status
+    timestamp deployed_at
+  }
+
+  LOG_ENTRY {
+    uuid id PK
+    uuid deployment_id FK
+    string level
+    text message
+    timestamp ts
+  }
+
+  API_KEY {
+    uuid id PK
+    uuid user_id FK
+    string key_hash
+    date expires_at
   }

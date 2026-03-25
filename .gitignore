@@ -12,10 +12,16 @@ archs/*
 
 # Ignore outputs and temp artifacts
 prompt-example.md
+runs/
+vendor/
+tla-dump/
 
 # Ignore experiment outputs
 mermate-arch-GoT.txt
 GoT.tex
-.env
-node_modules/
-flows/
+
+# Ignore prompts and media (no risk material)
+push-to-limit.prompt
+simple-idea.prompt
+*.mp4
+*.pdf

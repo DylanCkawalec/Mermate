@@ -158,16 +158,24 @@ async function compile(mermaidSource, outputDir, baseName) {
 
   const start = Date.now();
 
-  // Compile SVG at wide viewport for maximum detail
-  const svgResult = await runMmdc(tmpMmd, svgPath, { width: SVG_WIDTH, height: SVG_HEIGHT });
+  // Compile SVG and PNG in parallel — they read the same .mmd and write to different paths
+  const [svgResult, pngResult] = await Promise.all([
+    runMmdc(tmpMmd, svgPath, { width: SVG_WIDTH, height: SVG_HEIGHT }),
+    runMmdc(tmpMmd, pngPath, { scale: PNG_SCALE, width: PNG_WIDTH, height: PNG_HEIGHT }),
+  ]);
+
   if (!svgResult.ok) {
     logger.error('diagram.compiled', { baseName, format: 'svg', error: svgResult.stderr });
     await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     return { ok: false, error: svgResult.stderr };
   }
+  if (!pngResult.ok) {
+    logger.error('diagram.compiled', { baseName, format: 'png', error: pngResult.stderr });
+    await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    return { ok: false, error: pngResult.stderr };
+  }
 
   // Post-process SVG: ensure width="100%" for infinite scalability
-  // and preserve the viewBox for correct aspect ratio
   try {
     let svgContent = await fsp.readFile(svgPath, 'utf-8');
     svgContent = svgContent
@@ -175,21 +183,15 @@ async function compile(mermaidSource, outputDir, baseName) {
       .replace(/height="\d+(\.\d+)?%?"/, '')
       .replace(/style="max-width:\s*[\d.]+px;/, 'style="max-width: none;');
     await fsp.writeFile(svgPath, svgContent, 'utf-8');
-  } catch { /* non-fatal: SVG still works without post-processing */ }
-
-  // Compile PNG at ultra-high resolution
-  const pngResult = await runMmdc(tmpMmd, pngPath, { scale: PNG_SCALE, width: PNG_WIDTH, height: PNG_HEIGHT });
-  if (!pngResult.ok) {
-    logger.error('diagram.compiled', { baseName, format: 'png', error: pngResult.stderr });
-    await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-    return { ok: false, error: pngResult.stderr };
-  }
+  } catch { /* non-fatal */ }
 
   const durationMs = Date.now() - start;
 
-  // Validate outputs
-  const svgValidation = await validateSvg(svgPath);
-  const pngValidation = await validatePng(pngPath);
+  // Validate outputs in parallel
+  const [svgValidation, pngValidation] = await Promise.all([
+    validateSvg(svgPath),
+    validatePng(pngPath),
+  ]);
 
   logger.info('diagram.compiled', {
     baseName,

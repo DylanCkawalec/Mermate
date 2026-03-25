@@ -95,6 +95,20 @@ Return:
 11. Final artifact summary
 12. Final verdict on whether the architecture now solves the stated problem clearly
 
+## System capabilities (active in pipeline)
+The system has the following capabilities that operate automatically during inference:
+- **Multi-role planning:** Up to 3 domain-expert agents reason concurrently on the initial plan. The best plan wins by combined quality + completeness score.
+- **Graduated refinement:** Refinement pressure is gated by quantitative scoring — heavy rewrite below 0.5, targeted gap-fill between 0.5-0.7, skip above 0.7.
+- **2-branch composition:** The render pipeline generates two structurally competing Mermaid compositions in parallel (TB/boundary vs LR/data-flow), scores both, and keeps the stronger candidate.
+- **GoT-style merge:** If both composition branches survive pruning, compatible entities from the runner-up are merged into the winner when doing so does not decrease the score.
+- **Per-stage model routing:** Structured extraction tasks use fast models (gpt-4.1-mini), creative composition uses worker models (gpt-5.2), and orchestration uses the orchestrator tier (gpt-5.4).
+- **Per-stage token capping:** Each pipeline stage has an explicit max_completion_tokens budget to reduce waste.
+- **Render audit events:** The full render pipeline emits granular audit events (fact extraction, plan, composition, validation, repair) for downstream narration and debugging.
+- **Parallel sub-view decompose:** When a diagram is split into multiple views, all sub-views are rendered concurrently.
+- **State budget enforcement:** The GoT controller tracks state count against a budget (default 40) and halts branching/repair if the budget is reached.
+
+Leverage these capabilities: trust the multi-role planning for initial breadth, focus your refinement on the gaps the scorer identifies, and use the 2-branch composition to explore genuinely different layout strategies.
+
 ## Judgment standard
 The result must feel like a real architect helped shape the idea.
 Do not reward surface complexity.
