@@ -21,6 +21,16 @@
   </script>
 </head>
 <body>
+  <!-- Landing Page -->
+  <div id="landing" class="landing">
+    <div class="landing-content">
+      <img src="/mermate-logo.svg" alt="Mermate" class="landing-logo">
+      <p class="landing-title">Diagrams from ideas, instantly.</p>
+      <p class="landing-subtitle">Describe your system. Get a diagram in seconds.</p>
+      <button id="btn-landing-start" class="landing-btn">Start Your Plan</button>
+    </div>
+  </div>
+
   <!-- Sidebar -->
   <aside id="sidebar" class="sidebar" role="navigation" aria-label="Diagram history">
     <div class="sidebar-header">
@@ -233,6 +243,7 @@ Type /talk to speak your idea"
     </div>
   </dialog>
 
+  <script src="/js/landing.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3/dist/jszip.min.js"></script>
   <script src="/js/mermaid-gpt-classifier.js"></script>
   <script src="/js/mermaid-gpt-pan-zoom.js"></script>

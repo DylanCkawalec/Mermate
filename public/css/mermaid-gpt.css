@@ -953,17 +953,18 @@ body {
   opacity: 0.6;
 }
 
-.btn-agent-finalize {
+.btn.btn-agent-finalize {
   background: #ffffff;
   color: #000;
   font-weight: 700;
-  font-size: 0.68rem;
+  font-size: 14px;
   padding: 5px 12px;
   white-space: nowrap;
 }
 
-.btn-agent-finalize:hover {
+.btn.btn-agent-finalize:hover {
   background: #cccccc;
+  color: #000;
 }
 
 .btn-agent-skip {
@@ -1596,4 +1597,91 @@ body {
     flex: 1;
     justify-content: center;
   }
+}
+
+/* ==========================================================================
+   Landing Page
+   ========================================================================== */
+
+.landing {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(to top, #00CCFF, #0066FF, #001a44, #000);
+  background-size: 100% 300%;
+  background-position: 0% 100%;
+  animation: landing-drift 8s ease infinite alternate;
+  transition: opacity 0.5s ease, visibility 0.5s ease;
+}
+
+@keyframes landing-drift {
+  0%   { background-position: 0% 100%; }
+  100% { background-position: 0% 0%; }
+}
+
+.landing.fade-out {
+  opacity: 0;
+  visibility: hidden;
+}
+
+.landing-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+}
+
+.landing-logo {
+  width: 260px;
+  height: auto;
+}
+
+.landing-title {
+  font-family: var(--font-sans);
+  font-size: 1.2rem;
+  font-weight: 500;
+  color: #ffffff;
+  letter-spacing: 0.01em;
+  margin: 0;
+}
+
+.landing-subtitle {
+  font-family: var(--font-sans);
+  font-size: 0.95rem;
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.8);
+  letter-spacing: 0.01em;
+  margin: 0;
+}
+
+.landing-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 50px;
+  padding: 0 36px;
+  margin-top: 8px;
+  border: 2px solid #fff;
+  border-radius: 9999px;
+  background: #ffffff;
+  font-family: var(--font-sans);
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #000;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  transition: transform 0.2s ease, background 0.2s ease, color 0.2s ease;
+}
+
+.landing-btn:hover {
+  background: transparent;
+  color: #fff;
+  transform: scale(1.03);
+}
+
+.landing-btn:active {
+  transform: scale(0.97);
 }
