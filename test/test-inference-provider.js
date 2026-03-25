@@ -1,5 +1,9 @@
 'use strict';
 
+// Cap inference timeouts so tests don't block for 2+ minutes waiting on Ollama
+if (!process.env.MERMATE_INFER_TIMEOUT) process.env.MERMATE_INFER_TIMEOUT = '8000';
+if (!process.env.MERMATE_MAX_INFER_TIMEOUT) process.env.MERMATE_MAX_INFER_TIMEOUT = '8000';
+
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { infer, checkProviders } = require('../server/services/inference-provider');

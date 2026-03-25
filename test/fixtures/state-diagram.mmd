@@ -1,7 +1,14 @@
 stateDiagram-v2
-  [*] --> Idle
-  Idle --> Processing : submit
-  Processing --> Success : ok
-  Processing --> Error : fail
-  Error --> Idle : retry
-  Success --> [*]
+  [*] --> Pending : order created
+  Pending --> Processing : payment confirmed
+  Processing --> Shipped : fulfillment complete
+  Shipped --> Delivered : carrier confirmed
+
+  Processing --> Failed : payment declined
+  Failed --> Pending : retry payment
+
+  Shipped --> Returned : customer RMA
+  Returned --> Refunded : refund issued
+
+  Delivered --> [*]
+  Refunded --> [*]

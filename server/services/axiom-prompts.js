@@ -103,7 +103,12 @@ DIAGRAM TYPE SELECTION (evaluate in priority order, first match wins):
  * @param {string} stage - text_to_md, md_to_mmd, validate_mmd, repair
  * @returns {{ system: string, outputFormat: string, temperature: number }}
  */
+const _promptCache = new Map();
+
 function buildPrompt(stage) {
+  const cached = _promptCache.get(stage);
+  if (cached) return cached;
+
   let axioms = '';
   let task = '';
 
@@ -167,38 +172,18 @@ function buildPrompt(stage) {
       task = `TASK: Repair the malformed or mixed input into valid Mermaid source. Separate prose from diagram syntax. Reconstruct the diagram from all available signals. Add a valid directive if missing. Fix structural defects. Preserve all user-mentioned entities and relationships.`;
       break;
 
-    case 'render_prepare':
-      return buildRenderPreparePrompt();
-
-    case 'fact_extraction':
-      return buildFactExtractionPrompt();
-
-    case 'diagram_plan':
-      return buildDiagramPlanPrompt();
-
-    case 'composition':
-      return buildCompositionPrompt();
-
-    case 'semantic_repair':
-      return buildSemanticRepairPrompt();
-
-    case 'max_composition':
-      return buildMaxCompositionPrompt();
-
-    case 'decompose':
-      return buildDecomposePrompt();
-
-    case 'repair_from_trace':
-      return buildRepairFromTracePrompt();
-
-    case 'model_repair':
-      return buildModelRepairPrompt();
-
-    case 'copilot_suggest':
-      return buildCopilotSuggestPrompt();
-
-    case 'copilot_enhance':
-      return buildCopilotEnhancePrompt('full');
+    case 'render_prepare':      { const r = buildRenderPreparePrompt();      _promptCache.set(stage, r); return r; }
+    case 'fact_extraction':     { const r = buildFactExtractionPrompt();     _promptCache.set(stage, r); return r; }
+    case 'diagram_plan':        { const r = buildDiagramPlanPrompt();        _promptCache.set(stage, r); return r; }
+    case 'composition':         { const r = buildCompositionPrompt();        _promptCache.set(stage, r); return r; }
+    case 'semantic_repair':     { const r = buildSemanticRepairPrompt();     _promptCache.set(stage, r); return r; }
+    case 'max_composition':     { const r = buildMaxCompositionPrompt();     _promptCache.set(stage, r); return r; }
+    case 'merge_composition':   { const r = buildMergeCompositionPrompt();   _promptCache.set(stage, r); return r; }
+    case 'decompose':           { const r = buildDecomposePrompt();          _promptCache.set(stage, r); return r; }
+    case 'repair_from_trace':   { const r = buildRepairFromTracePrompt();    _promptCache.set(stage, r); return r; }
+    case 'model_repair':        { const r = buildModelRepairPrompt();        _promptCache.set(stage, r); return r; }
+    case 'copilot_suggest':     { const r = buildCopilotSuggestPrompt();     _promptCache.set(stage, r); return r; }
+    case 'copilot_enhance':     { const r = buildCopilotEnhancePrompt('full'); _promptCache.set(stage, r); return r; }
 
     default:
       axioms = [AXIOMS_MERMAID_SYNTAX, AXIOMS_PRESERVATION].join('\n');
@@ -913,6 +898,88 @@ function buildRepairFromTraceUserPrompt(mmdSource, compileError, shadow, origina
   return parts.join('\n');
 }
 
+function buildMergeCompositionPrompt() {
+  const system = [
+    ROLE,
+    '',
+    'You are merging multiple Mermaid sub-diagrams into one unified architecture diagram.',
+    '',
+    AXIOMS_INTERPRETATION,
+    AXIOMS_MERMAID_SYNTAX,
+    '',
+    'MERGE RULES:',
+    '- Every node from every sub-diagram MUST appear in the final output.',
+    '- Deduplicate nodes that represent the same entity (same or very similar label) — keep the richer version.',
+    '- Preserve ALL edges from every sub-diagram. If two sub-diagrams connect the same nodes, keep one edge with the most descriptive label.',
+    '- Use subgraphs to organize nodes by their original sub-view boundary or by architectural layer.',
+    '- Use classDef for color-coding different architectural layers (control, data, execution, delivery, etc.).',
+    '- Choose the BEST layout direction (TB, LR) for the merged diagram based on its shape — tall hierarchies use TB, wide pipelines use LR.',
+    '- The merged diagram must compile on the first attempt. Test every node ID, edge syntax, and subgraph boundary mentally before outputting.',
+    '',
+    OUTPUT_FORMAT,
+  ].join('\n');
+
+  return { system, outputFormat: 'text', temperature: 0.0 };
+}
+
+/**
+ * Token-budget-aware merge prompt. Includes score metadata per subview,
+ * orders by score descending, and truncates lowest-scored subviews if
+ * total input would exceed the model's context budget.
+ *
+ * @param {Array} subviewMmds - [{viewName, mmdSource, score, ...}]
+ * @param {string} originalSource
+ * @param {object} [opts]
+ * @param {number} [opts.maxInputChars] - approximate char budget (default ~350K ≈ 100K tokens)
+ * @returns {string}
+ */
+function buildMergeCompositionUserPrompt(subviewMmds, originalSource, opts = {}) {
+  const maxChars = opts.maxInputChars || 350_000;
+  const parts = [];
+  let charBudget = maxChars;
+
+  parts.push('[ORIGINAL USER INTENT]');
+  const intentSlice = originalSource.slice(0, 3000);
+  parts.push(intentSlice);
+  parts.push('');
+  charBudget -= intentSlice.length + 50;
+
+  const sorted = [...subviewMmds].sort((a, b) => (b.score || 0) - (a.score || 0));
+  const truncated = [];
+
+  for (let i = 0; i < sorted.length; i++) {
+    const sv = sorted[i];
+    const scoreLabel = typeof sv.score === 'number' ? ` (score: ${sv.score.toFixed(3)})` : '';
+    const header = `[SUB-DIAGRAM ${i + 1}/${sorted.length}: ${sv.viewName || 'unnamed'}${scoreLabel}]`;
+    const body = sv.mmdSource || '';
+
+    if (charBudget - header.length - body.length - 10 < 0) {
+      truncated.push(sv.viewName || `subview-${i}`);
+      continue;
+    }
+
+    parts.push(header);
+    parts.push(body);
+    parts.push('');
+    charBudget -= header.length + body.length + 2;
+  }
+
+  if (truncated.length > 0) {
+    parts.push(`[NOTE: ${truncated.length} lower-scored subviews omitted to fit context budget: ${truncated.join(', ')}]`);
+    parts.push('');
+  }
+
+  parts.push('[TASK]');
+  parts.push(`Merge all sub-diagrams above into ONE unified Mermaid flowchart.`);
+  parts.push('Prioritize higher-scored subviews when resolving conflicts.');
+  parts.push('Every node and edge from every included sub-diagram must be present in the final output.');
+  parts.push('Deduplicate identical entities. Organize into subgraphs by architectural layer.');
+  parts.push('Add classDef color coding. Use the best layout direction for the merged shape.');
+  parts.push('Return ONLY the complete Mermaid source code.');
+
+  return parts.join('\n');
+}
+
 module.exports = {
   buildPrompt,
   getAxiomSection,
@@ -937,6 +1004,8 @@ module.exports = {
   buildSemanticRepairUserPrompt,
   buildMaxCompositionPrompt,
   buildMaxCompositionUserPrompt,
+  buildMergeCompositionPrompt,
+  buildMergeCompositionUserPrompt,
   ENTITY_TYPES,
   EDGE_TYPES,
   NODE_SHAPES,

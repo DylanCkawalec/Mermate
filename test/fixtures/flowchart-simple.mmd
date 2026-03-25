@@ -1,5 +1,8 @@
 flowchart LR
-  A[Start] --> B{Decision}
-  B -->|Yes| C[Action]
-  B -->|No| D[End]
-  C --> D
+  Client["Browser Client"] --> LB["Load Balancer"]
+  LB --> API["API Gateway"]
+  API --> Auth["Auth Service"]
+  API --> Orders["Order Service"]
+  Auth --> DB[("PostgreSQL")]
+  Orders --> DB
+  Orders --> Cache[("Redis")]

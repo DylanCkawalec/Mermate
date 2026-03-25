@@ -1,7 +1,22 @@
 sequenceDiagram
-  participant A as Alice
-  participant B as Bob
-  A->>B: Hello Bob
-  B-->>A: Hi Alice
-  A->>B: How are you?
-  B-->>A: Good thanks!
+  participant Browser
+  participant Gateway
+  participant Auth
+  participant UserSvc
+  participant DB
+
+  Browser->>Gateway: POST /login (credentials)
+  Gateway->>Auth: validate(token)
+  Auth->>DB: SELECT user WHERE email = ?
+  DB-->>Auth: user row
+  Auth-->>Gateway: JWT
+  Gateway-->>Browser: 200 OK + JWT
+
+  Browser->>Gateway: GET /profile (JWT)
+  Gateway->>Auth: verify(JWT)
+  Auth-->>Gateway: valid
+  Gateway->>UserSvc: getProfile(userId)
+  UserSvc->>DB: SELECT * FROM profiles
+  DB-->>UserSvc: profile
+  UserSvc-->>Gateway: profile JSON
+  Gateway-->>Browser: 200 OK + profile
