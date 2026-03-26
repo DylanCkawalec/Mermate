@@ -77,6 +77,7 @@ const agentRouter = require('./routes/agent');
 const transcribeRouter = require('./routes/transcribe');
 const tlaRouter = require('./routes/tla');
 const tsRouter = require('./routes/ts');
+const tsxRouter = require('./routes/tsx');
 const searchRouter = require('./routes/search');
 const openclawRouter = require('./routes/openclaw');
 app.use('/api', renderRouter);
@@ -84,6 +85,7 @@ app.use('/api', agentRouter);
 app.use('/api', transcribeRouter);
 app.use('/api', tlaRouter);
 app.use('/api', tsRouter);
+app.use('/api', tsxRouter);
 app.use('/api', searchRouter);
 app.use('/api', openclawRouter);
 

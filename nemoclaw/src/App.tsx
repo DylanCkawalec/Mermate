@@ -99,6 +99,7 @@ type StatusPayload = {
       enhancer?: boolean
     } | null
     maxModeAvailable: boolean
+    tsxAvailable: boolean
     tlaAvailable: boolean
     tsAvailable: boolean
     agentModes: MermateAgentMode[]
@@ -109,6 +110,19 @@ type StatusPayload = {
   claude: {
     projectMcpPath: string
     projectMcpConfigured: boolean
+    projectClaudeMdPath: string
+    projectClaudeMdPresent: boolean
+    skillCatalogPath: string
+    skillCatalogPresent: boolean
+    skillBundleCount: number
+    markdownImproverIntegrated: boolean
+    skillBundles: Array<{
+      name: string
+      purpose: string
+      stages: string[]
+      supports: string[]
+      includesMarkdownImprover: boolean
+    }>
     cursorMcpPath: string
     cursorMcpDetected: boolean
     pluginMarketplaceDirectorySupported: boolean
@@ -168,6 +182,15 @@ type ArchitectPipelinePayload = {
       png_valid: boolean
     }
   }
+  tsx: {
+    success: boolean
+    paths?: Record<string, string | null>
+    metrics?: {
+      componentCount?: number
+      boundaryCount?: number
+      plannedModuleCount?: number
+    }
+  } | null
   tla: {
     success: boolean
     paths?: Record<string, string | null>
@@ -182,7 +205,7 @@ type ArchitectPipelinePayload = {
   quality: {
     passes: boolean
     score: number
-    stage: 'mmd' | 'tla' | 'ts'
+    stage: 'mmd' | 'tsx' | 'tla' | 'ts'
     issues: string[]
   }
   scaffold: {
@@ -490,6 +513,7 @@ function App() {
   const advertisedRouteModels = status?.route.models.length ?? 0
   const workspaceUrl = status?.mermate.baseUrl ?? 'http://127.0.0.1:3333'
   const mermateModeCount = status?.mermate.agentModes.length ?? 0
+  const claudeBundleCount = status?.claude.skillBundleCount ?? 0
 
   return (
     <main className="page-shell">
@@ -642,13 +666,45 @@ function App() {
                 <strong>Claude Code</strong>
                 <p>
                   {status?.claude.projectMcpConfigured
-                    ? 'Project MCP is configured'
+                    ? `Project MCP is configured${claudeBundleCount ? ` · ${claudeBundleCount} curated bundles` : ''}`
                     : status?.claude.cursorMcpDetected
-                      ? 'Cursor MCP file detected'
+                      ? `Cursor MCP file detected${claudeBundleCount ? ` · ${claudeBundleCount} curated bundles` : ''}`
                       : 'Waiting for project MCP config'}
                 </p>
               </article>
             </div>
+          </div>
+
+          <div className="panel rail-panel">
+            <div className="panel-heading">
+              <h2>Claude Bundles</h2>
+              <span className="chip ghost">
+                {claudeBundleCount} bundles
+                {status?.claude.markdownImproverIntegrated ? ' · md gate' : ''}
+              </span>
+            </div>
+            <div className="tag-grid">
+              {(status?.claude.skillBundles ?? []).length ? (
+                status?.claude.skillBundles.map((bundle) => (
+                  <span className="tag" key={bundle.name}>
+                    {bundle.name}
+                    {bundle.includesMarkdownImprover ? ' · md improver' : ''}
+                  </span>
+                ))
+              ) : (
+                <span className="empty-copy">Claude bundle catalog is still loading.</span>
+              )}
+            </div>
+            <ul className="note-list compact">
+              {(status?.claude.skillBundles ?? []).map((bundle) => (
+                <li key={bundle.name}>
+                  {bundle.name}: {bundle.purpose}
+                </li>
+              ))}
+              {status?.claude.projectClaudeMdPresent ? (
+                <li>Project memory file is present and ready for `claude-md-improver` audits.</li>
+              ) : null}
+            </ul>
           </div>
 
           <div className="panel rail-panel">
@@ -869,7 +925,8 @@ function App() {
                 <article className="result-card">
                   <strong>Formal stages</strong>
                   <p>
-                    TLA {pipelineResult.tla?.sany?.valid ? 'verified' : pipelineResult.tla ? 'failed' : 'skipped'} · TS{' '}
+                    TSX {pipelineResult.tsx?.success ? 'ready' : pipelineResult.tsx ? 'failed' : 'skipped'} · TLA{' '}
+                    {pipelineResult.tla?.sany?.valid ? 'verified' : pipelineResult.tla ? 'failed' : 'skipped'} · TS{' '}
                     {pipelineResult.ts?.success ? 'validated' : pipelineResult.ts ? 'failed' : 'skipped'}
                   </p>
                   <p className="result-copy">

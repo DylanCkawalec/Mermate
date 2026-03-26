@@ -84,9 +84,20 @@ export async function runArchitectPipeline(
     }),
   })
 
+  let tsx: MermateTsxResponse | null = null
   const effectiveIncludeTla = Boolean(request.includeTla || request.includeTs)
   let tla: MermateTlaResponse | null = null
   let ts: MermateTsResponse | null = null
+
+  if (render.run_id) {
+    tsx = await requestJson<MermateTsxResponse>(`${mermateBaseUrl}/api/render/tsx`, {
+      method: 'POST',
+      body: JSON.stringify({
+        run_id: render.run_id,
+        diagram_name: render.diagram_name,
+      }),
+    })
+  }
 
   if (effectiveIncludeTla && render.run_id) {
     tla = await requestJson<MermateTlaResponse>(`${mermateBaseUrl}/api/render/tla`, {
@@ -108,7 +119,15 @@ export async function runArchitectPipeline(
     })
   }
 
-  const quality = evaluateQualityGate(render, tla, ts, effectiveIncludeTla, Boolean(request.includeTs))
+  const quality = evaluateQualityGate(
+    render,
+    tsx,
+    tla,
+    ts,
+    Boolean(render.run_id),
+    effectiveIncludeTla,
+    Boolean(request.includeTs),
+  )
   const scaffold =
     request.scaffold && request.repoName
       ? await scaffoldProjectFromArtifacts({
@@ -116,6 +135,7 @@ export async function runArchitectPipeline(
           request,
           architect,
           render,
+          tsx,
           tla,
           ts,
           quality,
@@ -125,6 +145,7 @@ export async function runArchitectPipeline(
   return {
     architect,
     render,
+    tsx,
     tla,
     ts,
     quality,
@@ -168,23 +189,80 @@ export async function scaffoldProjectFromRunId(input: {
     run_id: input.runId,
   }
 
+  let tsx: MermateTsxResponse | null = null
+  if (runData.tsx_artifacts?.app && runData.tsx_artifacts?.spec && runData.tsx_artifacts?.style) {
+    const appPath = resolveArtifactPath(runData.tsx_artifacts.app)
+    const specPath = resolveArtifactPath(runData.tsx_artifacts.spec)
+    const stylePath = resolveArtifactPath(runData.tsx_artifacts.style)
+    const manifestPath = resolveArtifactPath(runData.tsx_artifacts.manifest)
+    if (!appPath || !specPath || !stylePath) {
+      throw new Error(`Run ${input.runId} is missing one or more TSX artifact paths`)
+    }
+    tsx = {
+      success: true,
+      markdown_source: render.paths?.architecture_md
+        ? await readArtifactText(path.join(mermateDir, render.paths.architecture_md.replace(/^\//, '')))
+        : '',
+      app_source: await readArtifactText(appPath),
+      spec_source: await readArtifactText(specPath),
+      style_source: await readArtifactText(stylePath),
+      manifest: manifestPath ? JSON.parse(await readArtifactText(manifestPath) || 'null') : null,
+      paths: runData.tsx_artifacts,
+    }
+  }
+
   let tla: MermateTlaResponse | null = null
   if (runData.tla_artifacts?.tla) {
-    const tlaPath = path.join(mermateDir, runData.tla_artifacts.tla.replace(/^\//, ''))
-    const cfgPath = path.join(mermateDir, (runData.tla_artifacts.cfg ?? '').replace(/^\//, ''))
+    const tlaPath = resolveArtifactPath(runData.tla_artifacts.tla)
+    const cfgPath = resolveArtifactPath(runData.tla_artifacts.cfg)
+    const modelingBriefPath = resolveArtifactPath(runData.specula_artifacts?.modeling_brief_md)
+    const modelingBriefJsonPath = resolveArtifactPath(runData.specula_artifacts?.modeling_brief_json)
+    const mcPath = resolveArtifactPath(runData.specula_artifacts?.mc_tla)
+    const mcCfgPath = resolveArtifactPath(runData.specula_artifacts?.mc_cfg)
+    const tracePath = resolveArtifactPath(runData.specula_artifacts?.trace_tla)
+    const traceCfgPath = resolveArtifactPath(runData.specula_artifacts?.trace_cfg)
+    const instrumentationPath = resolveArtifactPath(runData.specula_artifacts?.instrumentation_spec)
+    const validationLoopPath = resolveArtifactPath(runData.specula_artifacts?.validation_loop)
+    if (!tlaPath) {
+      throw new Error(`Run ${input.runId} is missing the base TLA artifact path`)
+    }
     tla = {
       success: true,
       tla_source: await readArtifactText(tlaPath),
       cfg_source: cfgPath ? await readArtifactText(cfgPath) : '',
       sany: { valid: true },
       paths: runData.tla_artifacts,
+      specula: {
+        modeling_brief: modelingBriefJsonPath
+          ? JSON.parse(await readArtifactText(modelingBriefJsonPath) || 'null')
+          : null,
+        modeling_brief_markdown: modelingBriefPath ? await readArtifactText(modelingBriefPath) : '',
+        mc: {
+          source: mcPath ? await readArtifactText(mcPath) : '',
+          cfg_source: mcCfgPath ? await readArtifactText(mcCfgPath) : '',
+          hunt_configs: runData.specula_artifacts?.hunt_cfgs ?? [],
+        },
+        trace_spec: {
+          source: tracePath ? await readArtifactText(tracePath) : '',
+          cfg_source: traceCfgPath ? await readArtifactText(traceCfgPath) : '',
+        },
+        instrumentation: {
+          markdown: instrumentationPath ? await readArtifactText(instrumentationPath) : '',
+        },
+        validation_loop: validationLoopPath
+          ? JSON.parse(await readArtifactText(validationLoopPath) || 'null')
+          : null,
+      },
     }
   }
 
   let ts: MermateTsResponse | null = null
   if (runData.ts_artifacts?.source) {
-    const sourcePath = path.join(mermateDir, runData.ts_artifacts.source.replace(/^\//, ''))
-    const harnessPath = path.join(mermateDir, (runData.ts_artifacts.harness ?? '').replace(/^\//, ''))
+    const sourcePath = resolveArtifactPath(runData.ts_artifacts.source)
+    const harnessPath = resolveArtifactPath(runData.ts_artifacts.harness)
+    if (!sourcePath) {
+      throw new Error(`Run ${input.runId} is missing the TypeScript artifact path`)
+    }
     ts = {
       success: Boolean(runData.ts_metrics?.success),
       ts_source: await readArtifactText(sourcePath),
@@ -202,17 +280,19 @@ export async function scaffoldProjectFromRunId(input: {
     },
     architect: input.architect,
     render,
+    tsx,
     tla,
     ts,
     quality:
       input.quality ??
-      evaluateQualityGate(render, tla, ts, Boolean(tla), Boolean(ts)),
+      evaluateQualityGate(render, tsx, tla, ts, Boolean(tsx), Boolean(tla), Boolean(ts)),
   })
 }
 
 type ArchitectPipelineResult = {
   architect: ArchitectProfile
   render: MermateRenderResponse
+  tsx: MermateTsxResponse | null
   tla: MermateTlaResponse | null
   ts: MermateTsResponse | null
   quality: QualityGate
@@ -222,7 +302,7 @@ type ArchitectPipelineResult = {
 type QualityGate = {
   passes: boolean
   score: number
-  stage: 'mmd' | 'tla' | 'ts'
+  stage: 'mmd' | 'tsx' | 'tla' | 'ts'
   issues: string[]
 }
 
@@ -266,6 +346,33 @@ type MermateTlaResponse = {
   sany?: {
     valid?: boolean
   }
+  paths?: Record<string, string | null | Record<string, string | string[] | null>>
+  specula?: {
+    modeling_brief?: unknown
+    modeling_brief_markdown?: string
+    mc?: {
+      source?: string
+      cfg_source?: string
+      hunt_configs?: Array<string | { id?: string; fileName?: string; cfgSource?: string }>
+    }
+    trace_spec?: {
+      source?: string
+      cfg_source?: string
+    }
+    instrumentation?: {
+      markdown?: string
+    }
+    validation_loop?: unknown
+  }
+}
+
+type MermateTsxResponse = {
+  success: boolean
+  markdown_source: string
+  app_source: string
+  spec_source: string
+  style_source: string
+  manifest?: unknown
   paths?: Record<string, string | null>
 }
 
@@ -307,6 +414,25 @@ type MermateRunFile = {
     harness?: string
     validation?: string
   }
+  specula_artifacts?: {
+    base_tla?: string
+    base_cfg?: string
+    modeling_brief_md?: string
+    modeling_brief_json?: string
+    mc_tla?: string
+    mc_cfg?: string
+    trace_tla?: string
+    trace_cfg?: string
+    instrumentation_spec?: string
+    validation_loop?: string
+    hunt_cfgs?: string[]
+  }
+  tsx_artifacts?: {
+    app?: string
+    spec?: string
+    style?: string
+    manifest?: string
+  }
   ts_metrics?: {
     success?: boolean
   }
@@ -314,8 +440,10 @@ type MermateRunFile = {
 
 function evaluateQualityGate(
   render: MermateRenderResponse,
+  tsx: MermateTsxResponse | null,
   tla: MermateTlaResponse | null,
   ts: MermateTsResponse | null,
+  expectedTsx: boolean,
   expectedTla: boolean,
   expectedTs: boolean,
 ): QualityGate {
@@ -330,6 +458,9 @@ function evaluateQualityGate(
   if ((render.mmd_metrics?.nodeCount ?? 0) < 2) {
     issues.push('Compiled Mermaid output is too small to qualify as a production design.')
   }
+  if (expectedTsx && !tsx?.success) {
+    issues.push('TSX scaffold stage did not complete successfully.')
+  }
   if (expectedTla && !tla?.success) {
     issues.push('TLA stage did not complete successfully.')
   }
@@ -340,7 +471,13 @@ function evaluateQualityGate(
     issues.push('TypeScript stage did not pass validation.')
   }
 
-  const stage: QualityGate['stage'] = expectedTs ? 'ts' : expectedTla ? 'tla' : 'mmd'
+  const stage: QualityGate['stage'] = expectedTs
+    ? 'ts'
+    : expectedTla
+      ? 'tla'
+      : expectedTsx
+        ? 'tsx'
+        : 'mmd'
   const score = Math.max(0, 100 - issues.length * 18)
 
   return {
@@ -356,6 +493,7 @@ async function scaffoldProjectFromArtifacts(input: {
   request: ArchitectPipelineRequest
   architect: ArchitectProfile
   render: MermateRenderResponse
+  tsx: MermateTsxResponse | null
   tla: MermateTlaResponse | null
   ts: MermateTsResponse | null
   quality: QualityGate
@@ -369,6 +507,8 @@ async function scaffoldProjectFromArtifacts(input: {
   const repoName = sanitizeRepoName(input.repoName)
   const repoRoot = path.join(desktopDeveloperDir, repoName)
   const specDir = path.join(repoRoot, 'app-spec')
+  const tsxSpecDir = path.join(specDir, 'tsx')
+  const speculaSpecDir = path.join(specDir, 'specula')
   const claudeDir = path.join(repoRoot, '.claude')
   const skillDir = path.join(claudeDir, 'skills', 'openclaw-project-builder')
   const srcDir = path.join(repoRoot, 'src')
@@ -386,15 +526,46 @@ async function scaffoldProjectFromArtifacts(input: {
   }
 
   await fsp.mkdir(specDir, { recursive: true })
+  await fsp.mkdir(tsxSpecDir, { recursive: true })
+  await fsp.mkdir(speculaSpecDir, { recursive: true })
   await fsp.mkdir(skillDir, { recursive: true })
   await fsp.mkdir(srcDir, { recursive: true })
 
+  const speculaHuntFiles = (input.tla?.specula?.mc?.hunt_configs || [])
+    .filter(
+      (
+        huntConfig,
+      ): huntConfig is { id?: string; fileName: string; cfgSource?: string } =>
+        typeof huntConfig !== 'string' &&
+        typeof huntConfig.fileName === 'string' &&
+        huntConfig.fileName.length > 0,
+    )
+    .map((huntConfig) => `app-spec/specula/${huntConfig.fileName}`)
+
   const specFiles = [
     'app-spec/idea.md',
+    'app-spec/architecture.md',
     'app-spec/architecture.mmd',
+    ...(input.tsx?.manifest ? ['app-spec/tsx/manifest.json', 'app-spec/tsx/App.tsx', 'app-spec/tsx/spec.ts', 'app-spec/tsx/index.css'] : []),
     ...(input.tla?.tla_source ? ['app-spec/spec.tla', 'app-spec/spec.cfg'] : []),
+    ...(input.tla?.specula?.modeling_brief_markdown ? [
+      'app-spec/specula/base.tla',
+      'app-spec/specula/base.cfg',
+      'app-spec/specula/modeling-brief.md',
+      ...(input.tla.specula.modeling_brief ? ['app-spec/specula/modeling-brief.json'] : []),
+      'app-spec/specula/MC.tla',
+      'app-spec/specula/MC.cfg',
+      'app-spec/specula/Trace.tla',
+      'app-spec/specula/Trace.cfg',
+      'app-spec/specula/instrumentation-spec.md',
+      'app-spec/specula/validation-loop.json',
+      'app-spec/specula/index.json',
+      ...speculaHuntFiles,
+    ] : []),
     ...(input.ts?.ts_source ? ['app-spec/runtime.ts', 'app-spec/runtime.harness.ts'] : []),
   ]
+  const transformationPath = buildTransformationPath(input)
+  const artifactTags = buildArtifactTags(input)
 
   await writeFileTracked(
     path.join(repoRoot, 'README.md'),
@@ -416,6 +587,11 @@ async function scaffoldProjectFromArtifacts(input: {
   await writeFileTracked(
     path.join(specDir, 'idea.md'),
     input.request.source.trim(),
+    files,
+  )
+  await writeFileTracked(
+    path.join(specDir, 'architecture.md'),
+    (input.tsx?.markdown_source || input.request.source).trim(),
     files,
   )
   await writeFileTracked(
@@ -456,6 +632,21 @@ async function scaffoldProjectFromArtifacts(input: {
         },
         quality: input.quality,
         architect: input.architect,
+        skill_layer: {
+          catalog: path.join(wrapperRootDir, '.agents', 'skills', 'catalog.json'),
+          bundles: ['sonnet-skills', 'anthropic-skills'],
+          markdown_memory: {
+            project_claude_md: path.join(wrapperRootDir, 'CLAUDE.md'),
+            direct_skill: path.join(wrapperRootDir, '.claude', 'skills', 'claude-md-improver', 'SKILL.md'),
+            bundle_reference: 'anthropic-skills',
+          },
+        },
+        provenance: {
+          builder: 'openclaw-desktop',
+          run_id: input.render.run_id ?? null,
+          transformation_path: transformationPath,
+        },
+        artifact_tags: artifactTags,
       },
       null,
       2,
@@ -468,6 +659,105 @@ async function scaffoldProjectFromArtifacts(input: {
   }
   if (input.tla?.cfg_source) {
     await writeFileTracked(path.join(specDir, 'spec.cfg'), input.tla.cfg_source.trim(), files)
+  }
+  if (input.tsx?.manifest) {
+    await writeFileTracked(
+      path.join(tsxSpecDir, 'manifest.json'),
+      JSON.stringify(input.tsx.manifest, null, 2),
+      files,
+    )
+    await writeFileTracked(path.join(tsxSpecDir, 'App.tsx'), input.tsx.app_source.trim(), files)
+    await writeFileTracked(path.join(tsxSpecDir, 'spec.ts'), input.tsx.spec_source.trim(), files)
+    await writeFileTracked(path.join(tsxSpecDir, 'index.css'), input.tsx.style_source.trim(), files)
+  }
+  if (input.tla?.specula?.modeling_brief_markdown) {
+    await writeFileTracked(path.join(speculaSpecDir, 'base.tla'), input.tla.tla_source.trim(), files)
+    await writeFileTracked(path.join(speculaSpecDir, 'base.cfg'), input.tla.cfg_source.trim(), files)
+    await writeFileTracked(
+      path.join(speculaSpecDir, 'modeling-brief.md'),
+      input.tla.specula.modeling_brief_markdown.trim(),
+      files,
+    )
+    if (input.tla.specula.modeling_brief) {
+      await writeFileTracked(
+        path.join(speculaSpecDir, 'modeling-brief.json'),
+        JSON.stringify(input.tla.specula.modeling_brief, null, 2),
+        files,
+      )
+    }
+  }
+  if (input.tla?.specula?.mc?.source) {
+    await writeFileTracked(path.join(speculaSpecDir, 'MC.tla'), input.tla.specula.mc.source.trim(), files)
+  }
+  if (input.tla?.specula?.mc?.cfg_source) {
+    await writeFileTracked(path.join(speculaSpecDir, 'MC.cfg'), input.tla.specula.mc.cfg_source.trim(), files)
+  }
+  if (input.tla?.specula?.mc?.hunt_configs?.length) {
+    for (const huntConfig of input.tla.specula.mc.hunt_configs) {
+      if (typeof huntConfig === 'string') {
+        continue
+      }
+      if (!huntConfig.fileName || !huntConfig.cfgSource) {
+        continue
+      }
+      await writeFileTracked(
+        path.join(speculaSpecDir, huntConfig.fileName),
+        huntConfig.cfgSource.trim(),
+        files,
+      )
+    }
+  }
+  if (input.tla?.specula?.trace_spec?.source) {
+    await writeFileTracked(path.join(speculaSpecDir, 'Trace.tla'), input.tla.specula.trace_spec.source.trim(), files)
+  }
+  if (input.tla?.specula?.trace_spec?.cfg_source) {
+    await writeFileTracked(path.join(speculaSpecDir, 'Trace.cfg'), input.tla.specula.trace_spec.cfg_source.trim(), files)
+  }
+  if (input.tla?.specula?.instrumentation?.markdown) {
+    await writeFileTracked(
+      path.join(speculaSpecDir, 'instrumentation-spec.md'),
+      input.tla.specula.instrumentation.markdown.trim(),
+      files,
+    )
+  }
+  if (input.tla?.specula?.validation_loop) {
+    await writeFileTracked(
+      path.join(speculaSpecDir, 'validation-loop.json'),
+      JSON.stringify(input.tla.specula.validation_loop, null, 2),
+      files,
+    )
+  }
+  if (input.tla?.specula?.modeling_brief_markdown) {
+    await writeFileTracked(
+      path.join(speculaSpecDir, 'index.json'),
+      JSON.stringify(
+        {
+          module_name: input.render.diagram_name,
+          run_id: input.render.run_id ?? null,
+          artifacts: {
+            base_tla: 'app-spec/specula/base.tla',
+            base_cfg: 'app-spec/specula/base.cfg',
+            modeling_brief_markdown: 'app-spec/specula/modeling-brief.md',
+            modeling_brief_json: input.tla.specula.modeling_brief ? 'app-spec/specula/modeling-brief.json' : null,
+            mc_tla: input.tla.specula.mc?.source ? 'app-spec/specula/MC.tla' : null,
+            mc_cfg: input.tla.specula.mc?.cfg_source ? 'app-spec/specula/MC.cfg' : null,
+            trace_tla: input.tla.specula.trace_spec?.source ? 'app-spec/specula/Trace.tla' : null,
+            trace_cfg: input.tla.specula.trace_spec?.cfg_source ? 'app-spec/specula/Trace.cfg' : null,
+            instrumentation_spec: input.tla.specula.instrumentation?.markdown
+              ? 'app-spec/specula/instrumentation-spec.md'
+              : null,
+            validation_loop: input.tla.specula.validation_loop ? 'app-spec/specula/validation-loop.json' : null,
+            hunt_cfgs: (input.tla.specula.mc?.hunt_configs || [])
+              .filter((huntConfig): huntConfig is { fileName?: string } => typeof huntConfig !== 'string')
+              .map((huntConfig) => `app-spec/specula/${huntConfig.fileName}`)
+              .filter(Boolean),
+          },
+        },
+        null,
+        2,
+      ),
+      files,
+    )
   }
   if (input.ts?.ts_source) {
     await writeFileTracked(path.join(specDir, 'runtime.ts'), input.ts.ts_source.trim(), files)
@@ -506,22 +796,28 @@ async function scaffoldProjectFromArtifacts(input: {
     files,
   )
   await writeFileTracked(path.join(srcDir, 'main.tsx'), buildStarterMainModule(), files)
-  await writeFileTracked(path.join(srcDir, 'spec.ts'), buildStarterSpecModule({
-    repoName,
-    repoRoot,
-    source: input.request.source.trim(),
-    architect: input.architect,
-    quality: input.quality,
-    render: input.render,
-    tla: input.tla,
-    ts: input.ts,
-    desktopPort,
-    runScriptPath,
-    desktopCommandPath,
-  }), files)
-  await writeFileTracked(path.join(srcDir, 'App.tsx'), buildStarterAppModule(), files)
-  await writeFileTracked(path.join(srcDir, 'index.css'), buildStarterIndexStyles(), files)
-  await writeFileTracked(path.join(srcDir, 'App.css'), buildStarterAppStyles(), files)
+  if (input.tsx) {
+    await writeFileTracked(path.join(srcDir, 'spec.ts'), input.tsx.spec_source.trim(), files)
+    await writeFileTracked(path.join(srcDir, 'App.tsx'), input.tsx.app_source.trim(), files)
+    await writeFileTracked(path.join(srcDir, 'index.css'), input.tsx.style_source.trim(), files)
+  } else {
+    await writeFileTracked(path.join(srcDir, 'spec.ts'), buildStarterSpecModule({
+      repoName,
+      repoRoot,
+      source: input.request.source.trim(),
+      architect: input.architect,
+      quality: input.quality,
+      render: input.render,
+      tla: input.tla,
+      ts: input.ts,
+      desktopPort,
+      runScriptPath,
+      desktopCommandPath,
+    }), files)
+    await writeFileTracked(path.join(srcDir, 'App.tsx'), buildStarterAppModule(), files)
+    await writeFileTracked(path.join(srcDir, 'index.css'), buildStarterIndexStyles(), files)
+    await writeFileTracked(path.join(srcDir, 'App.css'), buildStarterAppStyles(), files)
+  }
   await writeFileTracked(runScriptPath, buildStarterRunScript(repoName, desktopPort), files)
   await fsp.chmod(runScriptPath, 0o755)
   await writeFileTracked(desktopCommandPath, buildDesktopCommand(runScriptPath), files)
@@ -546,6 +842,316 @@ async function writeFileTracked(filePath: string, contents: string, files: strin
   files.push(filePath)
 }
 
+function buildTransformationPath(input: {
+  render: MermateRenderResponse
+  tsx: MermateTsxResponse | null
+  tla: MermateTlaResponse | null
+  ts: MermateTsResponse | null
+}): Array<Record<string, string | null>> {
+  const pathSteps: Array<Record<string, string | null>> = [
+    {
+      from: 'idea',
+      to: 'markdown',
+      producer: 'mermate',
+      primary_output: 'app-spec/architecture.md',
+      run_id: input.render.run_id ?? null,
+    },
+    {
+      from: 'markdown',
+      to: 'mmd',
+      producer: 'mermate',
+      primary_output: 'app-spec/architecture.mmd',
+      run_id: input.render.run_id ?? null,
+    },
+  ]
+
+  if (input.tsx?.success) {
+    pathSteps.push({
+      from: 'mmd',
+      to: 'tsx',
+      producer: 'mermate',
+      primary_output: 'app-spec/tsx/manifest.json',
+      run_id: input.render.run_id ?? null,
+    })
+  }
+
+  if (input.tla?.tla_source) {
+    pathSteps.push({
+      from: input.tsx?.success ? 'tsx' : 'mmd',
+      to: 'tla',
+      producer: 'mermate',
+      primary_output: 'app-spec/spec.tla',
+      run_id: input.render.run_id ?? null,
+    })
+  }
+
+  if (input.ts?.ts_source) {
+    pathSteps.push({
+      from: input.tla?.tla_source ? 'tla' : 'mmd',
+      to: 'ts',
+      producer: 'mermate',
+      primary_output: 'app-spec/runtime.ts',
+      run_id: input.render.run_id ?? null,
+    })
+  }
+
+  return pathSteps
+}
+
+function buildArtifactTags(input: {
+  render: MermateRenderResponse
+  tsx: MermateTsxResponse | null
+  tla: MermateTlaResponse | null
+  ts: MermateTsResponse | null
+}): Record<string, Record<string, string | string[] | null>> {
+  const speculaHuntConfigTags = Object.fromEntries(
+    (input.tla?.specula?.mc?.hunt_configs || [])
+      .filter(
+        (
+          huntConfig,
+        ): huntConfig is { id?: string; fileName: string; cfgSource?: string } =>
+          typeof huntConfig !== 'string' &&
+          typeof huntConfig.fileName === 'string' &&
+          huntConfig.fileName.length > 0,
+      )
+      .map((huntConfig) => [
+        `app-spec/specula/${huntConfig.fileName}`,
+        {
+          stage: 'tla',
+          artifact: 'model-check-hunt-config',
+          representation: 'cfg',
+          intent: ['verification', 'counterexample-hunting'],
+          source: 'mermate',
+          status: 'generated',
+          run_id: input.render.run_id ?? null,
+        },
+      ]),
+  )
+
+  return {
+    'app-spec/idea.md': {
+      stage: 'idea',
+      artifact: 'concept-brief',
+      representation: 'markdown',
+      intent: ['problem', 'scope'],
+      source: 'user',
+      status: 'input',
+      run_id: input.render.run_id ?? null,
+    },
+    'app-spec/architecture.md': {
+      stage: 'markdown',
+      artifact: 'architecture-brief',
+      representation: 'markdown',
+      intent: ['structure', 'behavior', 'boundary'],
+      source: 'mermate',
+      status: 'curated',
+      run_id: input.render.run_id ?? null,
+    },
+    'app-spec/architecture.mmd': {
+      stage: 'mmd',
+      artifact: 'architecture-diagram',
+      representation: 'mermaid',
+      intent: ['structure', 'boundary', 'behavior'],
+      source: 'mermate',
+      status: 'compiled',
+      run_id: input.render.run_id ?? null,
+      diagram_name: input.render.diagram_name,
+    },
+    ...(input.tsx?.success
+      ? {
+          'app-spec/tsx/manifest.json': {
+            stage: 'tsx',
+            artifact: 'tsx-scaffold-plan',
+            representation: 'json',
+            intent: ['scaffold'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+          'app-spec/tsx/App.tsx': {
+            stage: 'tsx',
+            artifact: 'tsx-shell',
+            representation: 'tsx',
+            intent: ['scaffold', 'interaction'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+          'app-spec/tsx/spec.ts': {
+            stage: 'tsx',
+            artifact: 'tsx-structure',
+            representation: 'typescript',
+            intent: ['scaffold', 'structure'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+          'app-spec/tsx/index.css': {
+            stage: 'tsx',
+            artifact: 'tsx-style-shell',
+            representation: 'css',
+            intent: ['scaffold', 'presentation'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+        }
+      : {}),
+    ...(input.tla?.tla_source
+      ? {
+          'app-spec/spec.tla': {
+            stage: 'tla',
+            artifact: 'formal-spec',
+            representation: 'tla+',
+            intent: ['behavior', 'invariant'],
+            source: 'mermate',
+            status: input.tla.sany?.valid ? 'validated' : 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+          'app-spec/spec.cfg': {
+            stage: 'tla',
+            artifact: 'model-check-config',
+            representation: 'cfg',
+            intent: ['verification'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+        }
+      : {}),
+    ...(input.tla?.specula?.modeling_brief_markdown
+      ? {
+          'app-spec/specula/base.tla': {
+            stage: 'tla',
+            artifact: 'specula-base-spec',
+            representation: 'tla+',
+            intent: ['behavior', 'invariant'],
+            source: 'mermate',
+            status: input.tla.sany?.valid ? 'validated' : 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+          'app-spec/specula/base.cfg': {
+            stage: 'tla',
+            artifact: 'specula-base-config',
+            representation: 'cfg',
+            intent: ['verification'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+          'app-spec/specula/modeling-brief.md': {
+            stage: 'tla',
+            artifact: 'modeling-brief',
+            representation: 'markdown',
+            intent: ['behavior', 'invariant'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+          ...(input.tla.specula.modeling_brief
+            ? {
+                'app-spec/specula/modeling-brief.json': {
+                  stage: 'tla',
+                  artifact: 'modeling-brief',
+                  representation: 'json',
+                  intent: ['behavior', 'invariant', 'traceability'],
+                  source: 'mermate',
+                  status: 'generated',
+                  run_id: input.render.run_id ?? null,
+                },
+              }
+            : {}),
+          'app-spec/specula/MC.tla': {
+            stage: 'tla',
+            artifact: 'model-check-spec',
+            representation: 'tla+',
+            intent: ['verification', 'counterexample-hunting'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+          'app-spec/specula/MC.cfg': {
+            stage: 'tla',
+            artifact: 'model-check-config',
+            representation: 'cfg',
+            intent: ['verification'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+          'app-spec/specula/Trace.tla': {
+            stage: 'tla',
+            artifact: 'trace-validation-spec',
+            representation: 'tla+',
+            intent: ['trace-validation'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+          'app-spec/specula/Trace.cfg': {
+            stage: 'tla',
+            artifact: 'trace-validation-config',
+            representation: 'cfg',
+            intent: ['trace-validation'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+          'app-spec/specula/instrumentation-spec.md': {
+            stage: 'tla',
+            artifact: 'instrumentation-plan',
+            representation: 'markdown',
+            intent: ['instrumentation', 'trace-validation'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+          'app-spec/specula/validation-loop.json': {
+            stage: 'tla',
+            artifact: 'validation-loop',
+            representation: 'json',
+            intent: ['trace-validation', 'model-checking'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+          'app-spec/specula/index.json': {
+            stage: 'tla',
+            artifact: 'specula-index',
+            representation: 'json',
+            intent: ['traceability', 'provenance'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+          ...speculaHuntConfigTags,
+        }
+      : {}),
+    ...(input.ts?.ts_source
+      ? {
+          'app-spec/runtime.ts': {
+            stage: 'ts',
+            artifact: 'runtime',
+            representation: 'typescript',
+            intent: ['implementation'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+          'app-spec/runtime.harness.ts': {
+            stage: 'ts',
+            artifact: 'runtime-harness',
+            representation: 'typescript',
+            intent: ['verification'],
+            source: 'mermate',
+            status: 'generated',
+            run_id: input.render.run_id ?? null,
+          },
+        }
+      : {}),
+  }
+}
+
 function buildProjectReadme(
   repoName: string,
   idea: string,
@@ -563,8 +1169,12 @@ ${idea.trim()}
 ## Spec bundle
 
 - \`app-spec/idea.md\`
+- \`app-spec/architecture.md\`
 - \`app-spec/architecture.mmd\`
+- \`app-spec/manifest.json\` as the artifact tag and provenance index
+- \`app-spec/tsx/\` for the TSX scaffold intermediate
 - \`app-spec/spec.tla\` when formal verification succeeded
+- \`app-spec/specula/\` for the modeling brief, MC spec, trace spec, and instrumentation plan
 - \`app-spec/runtime.ts\` when the TypeScript runtime stage succeeded
 - \`src/spec.ts\` for the app-facing view of the design bundle
 - \`src/App.tsx\` for the starter desktop-window UI
@@ -580,7 +1190,7 @@ ${idea.trim()}
 - \`./run.sh\` builds this starter, serves it on \`http://127.0.0.1:${desktopPort}\`, and opens it in a clean app-style browser window
 - \`~/Desktop/Launch ${repoName}.command\` points at the same launcher for one-click start
 
-Build from the spec bundle first. Avoid placeholder files, dead demos, and duplicate architecture variants.
+Build from the spec bundle first. Treat \`app-spec/manifest.json\` as the handoff index for artifact tags and provenance. Avoid placeholder files, dead demos, and duplicate architecture variants.
 `
 }
 
@@ -591,11 +1201,13 @@ You are building a production-quality application from the spec bundle in \`app-
 
 Rules:
 
-- Start from \`app-spec/idea.md\`, \`app-spec/architecture.mmd\`, and any available \`.tla\` and \`.ts\` artifacts
+- Read \`app-spec/manifest.json\` first for artifact tags, provenance, and stage order
+- Start from \`app-spec/idea.md\`, \`app-spec/architecture.md\`, \`app-spec/architecture.mmd\`, and any available TSX / TLA / runtime artifacts
 - Treat these curated files as the only allowed starting bundle: ${specFiles.join(', ')}
 - Keep only one primary implementation path
 - Do not generate junk examples, filler demos, placeholder components, or duplicate scaffolds
 - Treat the Mermate outputs as design intent, not as disposable notes
+- Preserve the \`artifact_tags\` and \`provenance.transformation_path\` contract when you update the generated repo
 - Use the local \`openclaw_desktop\` MCP server when you need the builder wrapper again
 `
 }
@@ -612,13 +1224,17 @@ Start from the files in \`app-spec/\`.
 
 Execution order:
 
-1. Read \`app-spec/idea.md\`
-2. Read \`app-spec/architecture.mmd\`
-3. If present, use \`app-spec/spec.tla\` and \`app-spec/spec.cfg\` as behavioral constraints
-4. If present, use \`app-spec/runtime.ts\` as the strongest starting runtime artifact
-5. Keep the generated starter app in \`src/\` aligned with the spec bundle
-6. Use only this curated input set: ${specFiles.join(', ')}
-7. Build one clean implementation path with no placeholder demos or junk scaffolds
+1. Read \`app-spec/manifest.json\`
+2. Read \`app-spec/idea.md\`
+3. Read \`app-spec/architecture.md\`
+4. Read \`app-spec/architecture.mmd\`
+5. If present, use \`app-spec/tsx/\` as the structured app-shell intermediate
+6. If present, use \`app-spec/spec.tla\`, \`app-spec/spec.cfg\`, and \`app-spec/specula/\` as behavioral constraints
+7. If present, use \`app-spec/runtime.ts\` as the strongest starting runtime artifact
+8. Keep the generated starter app in \`src/\` aligned with the spec bundle
+9. Preserve the manifest's \`artifact_tags\` and \`provenance\` fields when adding new files
+10. Use only this curated input set: ${specFiles.join(', ')}
+11. Build one clean implementation path with no placeholder demos or junk scaffolds
 `
 }
 
@@ -1329,4 +1945,12 @@ async function readArtifactText(filePath: string): Promise<string> {
   } catch {
     return ''
   }
+}
+
+function resolveArtifactPath(artifactPath: string | null | undefined): string | null {
+  if (!artifactPath) {
+    return null
+  }
+
+  return path.join(mermateDir, artifactPath.replace(/^\//, ''))
 }

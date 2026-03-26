@@ -293,7 +293,7 @@ router.post('/render/ts', async (req, res) => {
       },
       progressionUpdate: {
         stage: 'ts',
-        unlockedStages: ['idea', 'md', 'mmd', 'tla', 'ts'],
+        unlockedStages: ['idea', 'md', 'mmd', 'tsx', 'tla', 'ts'],
         confidence: tsConfidence,
       },
     };

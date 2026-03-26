@@ -31,6 +31,9 @@ const ollamaBaseUrl = process.env.OLLAMA_URL ?? 'http://127.0.0.1:11434'
 const defaultOllamaModel = process.env.OLLAMA_MODEL ?? 'gpt-oss:20b'
 const mermateBaseUrl = process.env.MERMATE_URL ?? 'http://127.0.0.1:3333'
 const projectMcpPath = path.join(rootDir, '.mcp.json')
+const projectClaudeMdPath = path.join(rootDir, 'CLAUDE.md')
+const projectSkillsDir = path.join(rootDir, '.agents', 'skills')
+const projectSkillCatalogPath = path.join(projectSkillsDir, 'catalog.json')
 const cursorMcpPath = path.join(os.homedir(), '.cursor', 'mcp.json')
 const desktopLauncherPath = path.join(os.homedir(), 'Desktop', 'OpenClaw Desktop.command')
 
@@ -246,6 +249,8 @@ app.get('/api/architect/status', async (_request, response) => {
         mermateDir,
         mermateEnvPath,
         desktopDeveloperDir,
+        projectClaudeMdPath,
+        projectSkillCatalogPath,
       },
     })
   } catch (error) {
@@ -540,6 +545,9 @@ async function getMermateState(): Promise<MermateState> {
   const copilot = await fetchJson<MermateCopilotHealth>(`${mermateBaseUrl}/api/copilot/health`, {
     timeoutMs: 900,
   }).catch(() => null)
+  const tsx = await fetchJson<MermateStageStatus>(`${mermateBaseUrl}/api/render/tsx/status`, {
+    timeoutMs: 900,
+  }).catch(() => null)
   const tla = await fetchJson<MermateStageStatus>(`${mermateBaseUrl}/api/render/tla/status`, {
     timeoutMs: 900,
   }).catch(() => null)
@@ -560,10 +568,11 @@ async function getMermateState(): Promise<MermateState> {
     repoPath: mermateDir,
     envPath: mermateEnvPath,
     baseUrl: mermateBaseUrl,
-    running: Boolean(copilot || tla || ts || modes || agents),
+    running: Boolean(copilot || tsx || tla || ts || modes || agents),
     copilotAvailable: copilot?.available ?? false,
     providers: copilot?.providers ?? null,
     maxModeAvailable: copilot?.maxAvailable ?? false,
+    tsxAvailable: tsx?.available ?? false,
     tlaAvailable: tla?.available ?? false,
     tsAvailable: ts?.available ?? false,
     agentModes: (modes?.modes ?? []).map((mode) => ({
@@ -578,12 +587,41 @@ async function getMermateState(): Promise<MermateState> {
 }
 
 function getClaudeIntegrationState(): ClaudeIntegrationState {
+  const catalog = loadSkillCatalog()
+  const skillBundles =
+    catalog?.bundles?.map((bundle) => ({
+      name: bundle.name,
+      purpose: bundle.purpose,
+      stages: bundle.stages,
+      supports: bundle.supports,
+      includesMarkdownImprover: Boolean(bundle.includesMarkdownImprover),
+    })) ?? []
+
   return {
     projectMcpPath,
     projectMcpConfigured: fs.existsSync(projectMcpPath),
+    projectClaudeMdPath,
+    projectClaudeMdPresent: fs.existsSync(projectClaudeMdPath),
+    skillCatalogPath: projectSkillCatalogPath,
+    skillCatalogPresent: fs.existsSync(projectSkillCatalogPath),
+    skillBundleCount: skillBundles.length,
+    skillBundles,
+    markdownImproverIntegrated: Boolean(catalog?.markdownImprover?.integratedInto),
     cursorMcpPath,
     cursorMcpDetected: fs.existsSync(cursorMcpPath),
     pluginMarketplaceDirectorySupported: true,
+  }
+}
+
+function loadSkillCatalog(): ClaudeSkillCatalog | null {
+  if (!fs.existsSync(projectSkillCatalogPath)) {
+    return null
+  }
+
+  try {
+    return JSON.parse(fs.readFileSync(projectSkillCatalogPath, 'utf8')) as ClaudeSkillCatalog
+  } catch {
+    return null
   }
 }
 
@@ -1091,6 +1129,7 @@ type MermateState = {
   copilotAvailable: boolean
   providers: MermateCopilotHealth['providers'] | null
   maxModeAvailable: boolean
+  tsxAvailable: boolean
   tlaAvailable: boolean
   tsAvailable: boolean
   agentModes: MermateAgentMode[]
@@ -1101,9 +1140,37 @@ type MermateState = {
 type ClaudeIntegrationState = {
   projectMcpPath: string
   projectMcpConfigured: boolean
+  projectClaudeMdPath: string
+  projectClaudeMdPresent: boolean
+  skillCatalogPath: string
+  skillCatalogPresent: boolean
+  skillBundleCount: number
+  skillBundles: ClaudeSkillBundle[]
+  markdownImproverIntegrated: boolean
   cursorMcpPath: string
   cursorMcpDetected: boolean
   pluginMarketplaceDirectorySupported: boolean
+}
+
+type ClaudeSkillBundle = {
+  name: string
+  purpose: string
+  stages: string[]
+  supports: string[]
+  includesMarkdownImprover: boolean
+}
+
+type ClaudeSkillCatalog = {
+  bundles?: Array<{
+    name: string
+    purpose: string
+    stages: string[]
+    supports: string[]
+    includesMarkdownImprover?: boolean
+  }>
+  markdownImprover?: {
+    integratedInto?: string
+  }
 }
 
 function shellQuote(value: string): string {

@@ -12,6 +12,7 @@ const runTracker = require('../services/run-tracker');
 const visualProvider = require('../services/visual-provider');
 const { buildPrompt } = require('../services/axiom-prompts');
 const { analyze } = require('../services/input-analyzer');
+const { compileMarkdownArtifact } = require('../services/markdown-compiler');
 const { deriveDiagramName } = require('../utils/naming');
 const logger = require('../utils/logger');
 
@@ -545,6 +546,20 @@ router.post('/render', async (req, res) => {
       await fsp.copyFile(mdSourcePath, mdDestPath).catch(() => {});
     };
 
+    const canonicalMarkdown = compileMarkdownArtifact({
+      diagramName,
+      inputMode: input_mode || profile.contentState || 'idea',
+      diagramType: finalDiagramType || diagramType,
+      originalSource: source,
+      facts: routeResult.facts || null,
+      plan: routeResult.plan || null,
+      mmdSource: finalMmd,
+    });
+    const canonicalMarkdownPath = path.join(outputDir, 'architecture.md');
+    const _writeCanonicalMarkdown = async () => {
+      await fsp.writeFile(canonicalMarkdownPath, canonicalMarkdown.markdownSource, 'utf8');
+    };
+
     const [compiledArchivePath, subviewPaths] = await Promise.all([
       archiveCompiled(finalMmd, diagramName, {
         provider: enhanceMeta?.provider || null,
@@ -553,6 +568,7 @@ router.post('/render', async (req, res) => {
       }),
       _organizeSubviews(),
       _copyMd(),
+      _writeCanonicalMarkdown(),
     ]);
 
     const postRenderValidation = validateMmd(finalMmd);
@@ -589,6 +605,14 @@ router.post('/render', async (req, res) => {
 
     // 8. Finalize run JSON and respond
     if (runId) {
+      const manifest = runTracker.getManifest(runId);
+      if (manifest) {
+        manifest.markdown_artifacts = {
+          canonical: `/flows/${diagramName}/architecture.md`,
+          manifest: canonicalMarkdown.manifest,
+        };
+      }
+
       runTracker.setFinalArtifact(runId, {
         diagramName,
         diagramType: finalDiagramType || diagramType,
@@ -603,6 +627,7 @@ router.post('/render', async (req, res) => {
           mmd: archivePaths.mmdPath,
           compiled_mmd: compiledArchivePath,
           md: archivePaths.mdPath,
+          architecture_md: `/flows/${diagramName}/architecture.md`,
           png: `/flows/${diagramName}/${diagramName}.png`,
           svg: `/flows/${diagramName}/${diagramName}.svg`,
         },
@@ -636,6 +661,7 @@ router.post('/render', async (req, res) => {
         mmd: archivePaths.mmdPath,
         md: archivePaths.mdPath,
         md_local: archivePaths.mdPath ? `/flows/${diagramName}/${diagramName}.md` : null,
+        architecture_md: `/flows/${diagramName}/architecture.md`,
         compiled_mmd: compiledArchivePath,
         subviews: subviewPaths.length > 0 ? subviewPaths : undefined,
       },
@@ -670,8 +696,8 @@ router.post('/render', async (req, res) => {
       run_json_path: runId ? `/runs/${runId}.json` : undefined,
       progressionUpdate: runId ? {
         stage: 'mmd',
-        unlockedStages: ['idea', 'md', 'mmd', 'tla'],
-        nextRecommended: 'tla',
+        unlockedStages: ['idea', 'md', 'mmd', 'tsx', 'tla'],
+        nextRecommended: 'tsx',
         confidence: postRenderValidation.valid ? 0.95 : 0.5,
       } : undefined,
     });
