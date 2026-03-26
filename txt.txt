@@ -1,0 +1,260 @@
+# INFERENCE_KEY_FAMILY — Master key family controlling agent API identities
+# Each INFERENCE_KEY_X may have additional branches (_1, _2, etc.) for "trailing" sibling agents
+
+# ----- Agent API Key Example Mappings -----
+# These provide example environment variable assignments for each agent's API key.
+# Replace the placeholder values with your actual API key values.
+
+MERMATE="your-mermate-api-key-here"
+DALLE="your-dalle-api-key-here"
+Doctor_ALAN_TURING="your-doctor-alan-turing-api-key-here"
+Doctor_GRACE_HOPPER="your-doctor-grace-hopper-api-key-here"
+Doctor_NERI_OXMAN="your-doctor-neri-oxman-api-key-here"
+Doctor_PETER_EISENMAN="your-doctor-peter-eisenman-api-key-here"
+Doctor_PAOLA_ANTONELLI="your-doctor-paola-antonelli-api-key-here"
+
+# --- INFERENCE_KEY_1 Family: Used by main GPT, some architects (1_1, 1_2, 1_3) ---
+INFERENCE_KEY_1={MERMATE}         # Primary inference key 1 (Mermate main agent)
+INFERENCE_KEY_1_1={MERMATE}     # Trailing architect (Architect 3)
+INFERENCE_KEY_1_2={MERMATE}     # Trailing architect (Architect 7)
+INFERENCE_KEY_1_3={MERMATE}     # Trailing architect (Architect 11)
+
+# --- INFERENCE_KEY_2 Family: Used by DALL·E, some architects (2_1, 2_2, 2_3) ---
+INFERENCE_KEY_2={DALLE} # Primary inference key 2 (DALLE and related)
+INFERENCE_KEY_2_1={DALLE}     # Trailing architect (Architect 4)
+INFERENCE_KEY_2_2={DALLE}     # Trailing architect (Architect 8)
+INFERENCE_KEY_2_3={DALLE}     # Trailing architect (Architect 12)
+
+# --- INFERENCE_KEY_3 Family: Controls trail for Architect 1, 5, 9, 13 ---
+INFERENCE_KEY_3={Doctor_ALAN_TURING}      # Architect 1 (Lead: Doctor_ALAN_TURING)
+INFERENCE_KEY_3_1={Doctor_ALAN_TURING}     # Trailing architect (Architect 5)
+INFERENCE_KEY_3_2={Doctor_ALAN_TURING}     # Trailing architect (Architect 9)
+INFERENCE_KEY_3_3={Doctor_ALAN_TURING}     # Trailing architect (Architect 13)
+
+# --- INFERENCE_KEY_4 Family: Controls trail for Architect 2, 6, 10, 14 ---
+INFERENCE_KEY_4={Doctor_GRACE_HOPPER}      # Architect 2 (Lead: Doctor_GRACE_HOPPER)
+INFERENCE_KEY_4_1={Doctor_GRACE_HOPPER}     # Trailing architect (Architect 6)
+INFERENCE_KEY_4_2={Doctor_GRACE_HOPPER}     # Trailing architect (Architect 10)
+INFERENCE_KEY_4_3={Doctor_GRACE_HOPPER}     # Trailing architect (Architect 14)
+
+# --- INFERENCE_KEY_5 Family: Controls Architect 15 + trail (5_1, etc.) ---
+INFERENCE_KEY_5={Doctor_NERI_OXMAN}        # Architect 15 (Doctor_NERI_OXMAN)
+INFERENCE_KEY_5_1={Doctor_NERI_OXMAN}     # Trailing architect (Architect 18)
+
+# --- INFERENCE_KEY_6 Family: Controls Architect 16 + trail (6_1, etc.) ---
+INFERENCE_KEY_6={Doctor_NERI_OXMAN}      # Architect 16 (Doctor_PETER_EISENMAN)
+INFERENCE_KEY_6_1={Doctor_NERI_OXMAN}     # Trailing architect (Architect 19)
+
+# --- INFERENCE_KEY_7 Family: Controls Architect 17 + trail (7_1, etc.) ---
+INFERENCE_KEY_7={Doctor_NERI_OXMAN}      # Architect 17 (Doctor_PAOLA_ANTONELLI)
+INFERENCE_KEY_7_1={Doctor_NERI_OXMAN}     # Trailing architect (Architect 20)
+
+# ------------------------------------------------------------------------
+# Key Family Mapping Examples:
+#   INFERENCE_KEY_3 => 3_1, 3_2, 3_3 (covers Architects 1, 5, 9, 13)
+#   INFERENCE_KEY_4 => 4_1, 4_2, 4_3 (covers Architects 2, 6, 10, 14)
+#   And so forth for trailing pairs/branches
+
+# --- Main App Keys ---
+MERMATE_AI_API_KEY={MERMATE}
+MERMATE_AI_MODEL=gpt-5.1
+MERMATE_AI_MAX_MODEL=gpt-5.4
+MERMATE_AI_MAX_ENABLED=true
+
+DALLE_AI_API_KEY={DALLE}
+DALLE_AI_MAX_ENABLED=true
+
+# -----------------------------------------------------------------------------
+# HPC-GoT Controller Profile (from GoT.tex canonical schedule)
+# -----------------------------------------------------------------------------
+GOT_CONTROLLER_ENABLED=true
+GOT_MODE=hpc_got
+GOT_MAX_DEPTH=3
+GOT_MAX_BRANCH=3
+GOT_STATE_BUDGET=40
+GOT_PRUNE_THRESHOLD=0.85
+GOT_MERGE_ENABLED=true
+GOT_MERGE_TOP_K=3
+GOT_LLM_STAGE_LIMIT=4
+GOT_ROUTER_SCORE_MODE=canonical
+GOT_SCORE_STRUCTURAL_WEIGHT=0.5
+GOT_SCORE_INVARIANT_WEIGHT=0.5
+GOT_DEBATE_MEMORY=last_reasoning_chain
+GOT_RESULT_POLICY=enhanced_simple_idea_only
+GOT_REQUIRE_SEMANTIC_COMPLETENESS=true
+GOT_REQUIRE_SKILL_ALIGNMENT=true
+GOT_COMPILER_FORMAT=harmony
+GOT_PRIMARY_LOCAL_MODEL=gpt-oss:20b
+
+# -----------------------------------------------------------------------------
+# Professor-domain mixing policy (core 4 professors mixed together)
+# -----------------------------------------------------------------------------
+GOT_PROFESSOR_MIX_ENABLED=true
+GOT_PROFESSOR_CORE=Doctor_ALAN_TURING,Doctor_GRACE_HOPPER,Doctor_NERI_OXMAN,Doctor_PETER_EISENMAN
+GOT_PROFESSOR_ADVISOR=Doctor_PAOLA_ANTONELLI
+GOT_PROFESSOR_MIX_STRATEGY=parallel_debate_then_consensus
+GOT_PROFESSOR_MIX_GATE=semantic_reasoning_and_completeness
+
+# -----------------------------------------------------------------------------
+# DALLE pipeline policy (4-stage image enhancement chain, start-gated)
+# Start gate must pass before any DALLE architect is called.
+# -----------------------------------------------------------------------------
+DALLE_START_GATE_ENABLED=true
+DALLE_START_GATE_CONDITION=needs_image_generation
+DALLE_CHAIN_STAGES=4
+DALLE_CHAIN_WINDOW_MODE=same_image_window
+DALLE_CHAIN_HANDOFF=stage_to_stage
+DALLE_CHAIN_ARCHITECTS=4,8,12,20
+DALLE_CHAIN_RETURN=enhanced_prompt_text_only
+
+# -----------------------------------------------------------------------------
+# Agent Architecture Ensemble (20 agents, all collaborate and debate)
+# -----------------------------------------------------------------------------
+ARCHITECT_AI_GLOBAL_ENABLED=true
+ARCHITECT_AI_GLOBAL_MODE=debate_then_merge
+ARCHITECT_AI_TOTAL=20
+ARCHITECT_AI_RETURN_MODE=enhanced_simple_idea_only
+
+# Architect 1: Doctor_ALAN_TURING
+ARCHITECT_AI_1_API_KEY={Doctor_ALAN_TURING}
+ARCHITECT_AI_1_NAME=Doctor_ALAN_TURING
+ARCHITECT_AI_1_MODEL=gpt-4o
+ARCHITECT_AI_1_DOMAIN=formal_reasoning
+ARCHITECT_AI_1_ENABLED=true
+
+# Architect 2: Doctor_GRACE_HOPPER
+ARCHITECT_AI_2_API_KEY={Doctor_GRACE_HOPPER}
+ARCHITECT_AI_2_NAME=Doctor_GRACE_HOPPER
+ARCHITECT_AI_2_MODEL=gpt-4o
+ARCHITECT_AI_2_DOMAIN=systems_compilers
+ARCHITECT_AI_2_ENABLED=true
+
+# Architect 3: Doctor_MIES_VANDERROHE
+ARCHITECT_AI_3_API_KEY={MERMATE}
+ARCHITECT_AI_3_NAME=Doctor_MIES_VANDERROHE
+ARCHITECT_AI_3_MODEL=gpt-4o
+ARCHITECT_AI_3_DOMAIN=minimal_structure
+ARCHITECT_AI_3_ENABLED=true
+
+# Architect 4: Doctor_NORMAN_FOSTER
+ARCHITECT_AI_4_API_KEY={DALLE}
+ARCHITECT_AI_4_NAME=Doctor_NORMAN_FOSTER
+ARCHITECT_AI_4_MODEL=gpt-4o
+ARCHITECT_AI_4_DOMAIN=visual_concept_stage_1
+ARCHITECT_AI_4_ENABLED=true
+
+# Architect 5: Doctor_DAME_ZAHA_HADID
+ARCHITECT_AI_5_API_KEY={Doctor_ALAN_TURING}
+ARCHITECT_AI_5_NAME=Doctor_DAME_ZAHA_HADID
+ARCHITECT_AI_5_MODEL=gpt-4o
+ARCHITECT_AI_5_DOMAIN=parametric_forms
+ARCHITECT_AI_5_ENABLED=true
+
+# Architect 6: Doctor_FRANK_LLOYDWRIGHT
+ARCHITECT_AI_6_API_KEY={Doctor_GRACE_HOPPER}
+ARCHITECT_AI_6_NAME=Doctor_FRANK_LLOYDWRIGHT
+ARCHITECT_AI_6_MODEL=gpt-4o
+ARCHITECT_AI_6_DOMAIN=organic_system_boundaries
+ARCHITECT_AI_6_ENABLED=true
+
+# Architect 7: Doctor_REM_KOOLHAAS
+ARCHITECT_AI_7_API_KEY={MERMATE}
+ARCHITECT_AI_7_NAME=Doctor_REM_KOOLHAAS
+ARCHITECT_AI_7_MODEL=gpt-4o
+ARCHITECT_AI_7_DOMAIN=programmatic_complexity
+ARCHITECT_AI_7_ENABLED=true
+
+# Architect 8: Doctor_TOYO_ITO
+ARCHITECT_AI_8_API_KEY={DALLE}
+ARCHITECT_AI_8_NAME=Doctor_TOYO_ITO
+ARCHITECT_AI_8_MODEL=gpt-4o
+ARCHITECT_AI_8_DOMAIN=visual_concept_stage_2
+ARCHITECT_AI_8_ENABLED=true
+
+# Architect 9: Doctor_JEAN_NOUVEL
+ARCHITECT_AI_9_API_KEY={Doctor_ALAN_TURING}
+ARCHITECT_AI_9_NAME=Doctor_JEAN_NOUVEL
+ARCHITECT_AI_9_MODEL=gpt-4o
+ARCHITECT_AI_9_DOMAIN=contextual_aesthetics
+ARCHITECT_AI_9_ENABLED=true
+
+# Architect 10: Doctor_LINA_BO_BARDI
+ARCHITECT_AI_10_API_KEY={Doctor_GRACE_HOPPER}
+ARCHITECT_AI_10_NAME=Doctor_LINA_BO_BARDI
+ARCHITECT_AI_10_MODEL=gpt-4o
+ARCHITECT_AI_10_DOMAIN=human_centric_systems
+ARCHITECT_AI_10_ENABLED=true
+
+# Architect 11: Doctor_SHIGERU_BAN
+ARCHITECT_AI_11_API_KEY={MERMATE}
+ARCHITECT_AI_11_NAME=Doctor_SHIGERU_BAN
+ARCHITECT_AI_11_MODEL=gpt-4o
+ARCHITECT_AI_11_DOMAIN=material_efficiency
+ARCHITECT_AI_11_ENABLED=true
+
+# Architect 12: Doctor_BJARKE_INGELS
+ARCHITECT_AI_12_API_KEY={DALLE}
+ARCHITECT_AI_12_NAME=Doctor_BJARKE_INGELS
+ARCHITECT_AI_12_MODEL=gpt-4o
+ARCHITECT_AI_12_DOMAIN=visual_concept_stage_3
+ARCHITECT_AI_12_ENABLED=true
+
+# Architect 13: Doctor_ELIZABETH_DILLER
+ARCHITECT_AI_13_API_KEY={Doctor_ALAN_TURING}
+ARCHITECT_AI_13_NAME=Doctor_ELIZABETH_DILLER
+ARCHITECT_AI_13_MODEL=gpt-4o
+ARCHITECT_AI_13_DOMAIN=narrative_system_orchestration
+ARCHITECT_AI_13_ENABLED=true
+
+# Architect 14: Doctor_LUDWIG_MIES
+ARCHITECT_AI_14_API_KEY={Doctor_GRACE_HOPPER}
+ARCHITECT_AI_14_NAME=Doctor_LUDWIG_MIES
+ARCHITECT_AI_14_MODEL=gpt-4o
+ARCHITECT_AI_14_DOMAIN=structural_precision
+ARCHITECT_AI_14_ENABLED=true
+
+# Architect 15: Doctor_NERI_OXMAN
+ARCHITECT_AI_15_API_KEY={Doctor_NERI_OXMAN}
+ARCHITECT_AI_15_NAME=Doctor_NERI_OXMAN
+ARCHITECT_AI_15_MODEL=gpt-4o
+ARCHITECT_AI_15_DOMAIN=computational_material_ecology
+ARCHITECT_AI_15_ENABLED=true
+
+# Architect 16: Doctor_PETER_EISENMAN
+ARCHITECT_AI_16_API_KEY={Doctor_PETER_EISENMAN}
+ARCHITECT_AI_16_NAME=Doctor_PETER_EISENMAN
+ARCHITECT_AI_16_MODEL=gpt-4o
+ARCHITECT_AI_16_DOMAIN=formal_system_transformations
+ARCHITECT_AI_16_ENABLED=true
+
+# Architect 17: Doctor_PAOLA_ANTONELLI
+ARCHITECT_AI_17_API_KEY={Doctor_PAOLA_ANTONELLI}
+ARCHITECT_AI_17_NAME=Doctor_PAOLA_ANTONELLI
+ARCHITECT_AI_17_MODEL=gpt-4o
+ARCHITECT_AI_17_DOMAIN=design_ethics_product_futures
+ARCHITECT_AI_17_ENABLED=true
+
+# Architect 18: Doctor_TATJANA_BILBAO
+ARCHITECT_AI_18_API_KEY={Doctor_NERI_OXMAN}
+ARCHITECT_AI_18_NAME=Doctor_TATJANA_BILBAO
+ARCHITECT_AI_18_MODEL=gpt-4o
+ARCHITECT_AI_18_DOMAIN=regional_material_adaptation
+ARCHITECT_AI_18_ENABLED=true
+
+# Architect 19: Doctor_WANG_SHU
+ARCHITECT_AI_19_API_KEY={Doctor_PETER_EISENMAN}
+ARCHITECT_AI_19_NAME=Doctor_WANG_SHU
+ARCHITECT_AI_19_MODEL=gpt-4o
+ARCHITECT_AI_19_DOMAIN=cultural_continuity_craft
+ARCHITECT_AI_19_ENABLED=true
+
+# Architect 20: Doctor_DIÉBÉDO_FRANCIS_KÉRÉ
+ARCHITECT_AI_20_API_KEY={Doctor_PAOLA_ANTONELLI}
+ARCHITECT_AI_20_NAME=Doctor_DIEBEDO_FRANCIS_KERE
+ARCHITECT_AI_20_MODEL=gpt-4o
+ARCHITECT_AI_20_DOMAIN=visual_concept_stage_4
+ARCHITECT_AI_20_ENABLED=true
+
+# All 20 agents collaborate as a constrained GoT ensemble:
+# 1) parallel debate, 2) validator scoring, 3) prune at tau, 4) optional merge,
+# 5) return only the final enhanced simple idea text.

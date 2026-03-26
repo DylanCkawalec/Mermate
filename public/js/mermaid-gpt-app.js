@@ -478,6 +478,8 @@
     input.value = orchestrator.getArtifact(mode);
     input.placeholder = cfg.placeholder;
     chkEnhance.checked = cfg.enhanceDefault;
+    const _btnEnh = document.getElementById('btn-enhance');
+    if (_btnEnh) _btnEnh.classList.toggle('active', chkEnhance.checked);
 
     if (cfg.showUpload) {
       btnUpload.classList.add('visible');
@@ -502,7 +504,7 @@
     syncUiGuidance();
   }
 
-  document.querySelectorAll('.mode-btn').forEach(btn => {
+  document.querySelectorAll('.sidebar-mode-btn').forEach(btn => {
     btn.addEventListener('click', () => setMode(btn.dataset.mode));
   });
 
