@@ -20,6 +20,38 @@ Mermate ships **without an AI model**. It is a diagram compilation engine with a
 
 ---
 
+## Verified local architecture
+
+This repo is now being used as a sidecar for the local OpenClaw desktop wrapper in:
+
+- `/Users/dylanckawalec/Desktop/developer/dylans_nemoclaw`
+
+Current local architecture:
+
+- OpenClaw Desktop Console: chat UI + OpenShell bridge on `http://127.0.0.1:8787`
+- NemoClaw/OpenShell: managed sandbox execution inside `aoc-local`
+- Ollama: local inference on `http://127.0.0.1:11434`
+- Mermate: idea -> markdown -> Mermaid -> TLA+ -> TypeScript sidecar on `http://127.0.0.1:3333`
+- Claude Code: attached through MCP with both project `.mcp.json` and a local plugin marketplace entry
+
+The wrapper currently uses Mermate as the architecture and formalization surface, not as the primary chat transport.
+
+## Verified model reality on this machine
+
+Observed on March 26, 2026:
+
+- Local Ollama `gpt-oss:20b`: working
+- Local Ollama `nemotron-3-nano:4b`: working
+- Local Ollama `kimi-k2.5:cloud`: listed by Ollama, but direct chat currently returns `unauthorized`
+- Managed `inference.local` route: currently advertises `kimi-k2.5:cloud`, `nemotron-3-nano:4b`, and `gpt-oss:20b`
+- Managed-route requests for `kimi-k2.5:cloud`: currently resolve back to `nemotron-3-nano:4b`
+
+Important caveat:
+
+- The managed route can resolve to a different actual model than the requested one, so any wrapper should trust the response `model` field over the request payload.
+
+---
+
 ## Quick start
 
 ```bash
@@ -40,6 +72,19 @@ cp .env.example .env
 Open [http://localhost:3333](http://localhost:3333).
 
 That's it. The app runs completely without an AI model. You can paste Mermaid source directly and compile it to high-resolution PNG and SVG from day one.
+
+### If startup fails on DuckDB
+
+On this machine, the first Mermate restart failed because the native DuckDB binding was missing under `node_modules/duckdb/lib/binding/duckdb.node`.
+
+Rebuild it with:
+
+```bash
+cd /Users/dylanckawalec/Desktop/developer/mermaid
+npm rebuild duckdb
+```
+
+If you are on a different Node major, prefer rebuilding after any Node upgrade so the native binding matches the active runtime.
 
 ---
 
@@ -138,6 +183,29 @@ This enables:
 - Max mode for final higher-quality architecture output
 - the staged agent workflow that pauses on a preview render before the final Max pass
 
+### Local OpenClaw wrapper integration
+
+The desktop wrapper can attach to Mermate through MCP tools and direct HTTP calls.
+
+Verified wrapper-facing surfaces in this repo:
+
+- `GET /api/copilot/health`
+- `POST /api/render`
+- `GET /api/render/tla/status`
+- `POST /api/render/tla`
+- `GET /api/render/ts/status`
+- `POST /api/render/ts`
+- `GET /api/agent/modes`
+
+That means the wrapper can use Mermate for:
+
+- idea -> markdown -> Mermaid compilation
+- Mermaid -> TLA+ formalization
+- TLA+ -> TypeScript runtime generation
+- mode discovery for code review, thinking, optimize, TLA verify, and TS generation flows
+
+If you want Claude Code to drive those surfaces through the wrapper instead of calling this repo directly, use the OpenClaw desktop plugin and MCP server from `/Users/dylanckawalec/Desktop/developer/dylans_nemoclaw`.
+
 ### Optional setup: local enhancer contract
 
 Any model server that accepts `POST /mermaid/enhance` works.
@@ -230,6 +298,15 @@ curl http://localhost:8100/health
 ```
 
 When the enhancer is healthy, the app shows "Enhancer: healthy" on startup and the `Enhance` checkbox becomes active.
+
+### Kimi 2.5 note
+
+Kimi can fit in two ways, but the current local state matters:
+
+- If Ollama cloud auth is configured, Mermate can target `kimi-k2.5:cloud` through the existing Ollama path by setting `MERMATE_OLLAMA_MODEL=kimi-k2.5:cloud`
+- If you want to use Kimi through an OpenAI-compatible remote API, that needs a premium-provider base-url path that is not currently configurable in `server/services/inference-provider.js`
+
+So on this machine right now, Kimi is discoverable but not yet usable through either the local Ollama path or the managed NemoClaw route.
 
 ---
 

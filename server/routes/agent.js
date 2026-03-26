@@ -44,6 +44,7 @@ const AGENT_MODES = {
     description: 'Recover architecture from a live codebase',
     icon: 'code',
     file: 'CODE-REVIEW-MODE.txt',
+    stage: 'mmd',
   },
   'thinking': {
     id: 'thinking',
@@ -51,6 +52,7 @@ const AGENT_MODES = {
     description: 'Build architecture from ideas, notes, or problem statements',
     icon: 'lightbulb',
     file: 'THINKING-MODE.txt',
+    stage: 'mmd',
   },
   'optimize-mmd': {
     id: 'optimize-mmd',
@@ -58,6 +60,39 @@ const AGENT_MODES = {
     description: 'Improve existing Mermaid or markdown without breaking intent',
     icon: 'tune',
     file: 'OPTIMIZE-MMD-MODE.txt',
+    stage: 'mmd',
+  },
+  'tla-verify': {
+    id: 'tla-verify',
+    label: 'Verify Spec',
+    description: 'Validate and repair TLA+ specification',
+    icon: 'check',
+    file: 'TLA-VERIFY-MODE.txt',
+    stage: 'tla',
+  },
+  'tla-optimize': {
+    id: 'tla-optimize',
+    label: 'Optimize TLA+',
+    description: 'Strengthen invariants and state coverage',
+    icon: 'tune',
+    file: 'TLA-OPTIMIZE-MODE.txt',
+    stage: 'tla',
+  },
+  'ts-generate': {
+    id: 'ts-generate',
+    label: 'Generate Runtime',
+    description: 'Compile TLA+ spec to TypeScript',
+    icon: 'build',
+    file: 'TS-GENERATE-MODE.txt',
+    stage: 'ts',
+  },
+  'ts-optimize': {
+    id: 'ts-optimize',
+    label: 'Optimize TS',
+    description: 'Improve generated TypeScript quality',
+    icon: 'tune',
+    file: 'TS-OPTIMIZE-MODE.txt',
+    stage: 'ts',
   },
 };
 
@@ -169,7 +204,7 @@ function _composeThinkingSummary(role, stage) {
 
 router.get('/agent/modes', (_req, res) => {
   const modes = Object.values(AGENT_MODES).map(m => ({
-    id: m.id, label: m.label, description: m.description, icon: m.icon,
+    id: m.id, label: m.label, description: m.description, icon: m.icon, stage: m.stage,
   }));
   return res.json({ success: true, modes });
 });

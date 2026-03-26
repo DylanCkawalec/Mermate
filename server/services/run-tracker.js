@@ -498,6 +498,7 @@ async function finalize(runId, status = 'completed') {
   if (status === 'completed') {
     try { require('./meta-gateway-bridge').auditRun(runId).catch(() => {}); } catch { /* optional */ }
     try { require('./run-exporter').exportRun(runId, m).catch(() => {}); } catch { /* optional */ }
+    try { require('../backend/ingester').ingestRun(runId).catch(e => logger.warn('db.ingest_failed', { error: e.message })); } catch { /* DuckDB optional */ }
   }
 
   logger.info('run_tracker.finalized', {

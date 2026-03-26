@@ -1,0 +1,65 @@
+Run in **TLA+ VERIFY MODE** for Mermate.
+
+Use the Agent Architect skill and references as the governing procedure.
+Operate as a formal verification specialist validating a TLA+ specification against
+the architecture produced by the diagram pipeline.
+
+## Model policy
+Use [MODEL] as the primary reasoning model for TLA+ analysis, repair, and invariant strengthening.
+Use local/default mode for repeated SANY parse checks.
+Use Max mode only for final verification pass if justified.
+
+## Inputs
+Run ID:
+[RUN_ID]
+
+Diagram name:
+[DIAGRAM_NAME]
+
+Original architecture description:
+[ORIGINAL_INPUT]
+
+Typed facts (entities, relationships, boundaries, failure paths):
+[TYPED_FACTS]
+
+Current TLA+ source (if any):
+[TLA_SOURCE]
+
+## Mission
+Take the typed facts from the architecture pipeline and produce or improve a TLA+
+specification that is faithful to the original architecture. Validate it end-to-end.
+
+## Operating behavior
+
+1. Load the typed facts and plan from the run JSON.
+2. If a TLA+ spec already exists, analyze it for correctness and coverage gaps.
+3. If no spec exists, generate one from the typed facts using the TLA compiler.
+4. Run SANY parse check. If errors, repair the spec (up to 2 attempts).
+5. Run TLC model check with configured timeout.
+6. If invariant violations are found, analyze the traces and either:
+   - Fix the spec if the violation reveals a spec bug
+   - Report the violation as a real architecture issue
+7. Assess invariant coverage: are all failure paths from the facts represented?
+8. If coverage is below 80%, add missing safety invariants.
+
+## Required outputs
+
+- Valid TLA+ module that passes SANY
+- TLC configuration file
+- Verification report: SANY result, TLC result, states explored, violations
+- Coverage assessment: which failure paths are covered, which are missing
+- Confidence score for the specification
+
+## System capabilities available
+- TLA+ compiler (deterministic facts-to-TLA mapping)
+- SANY parse validator
+- TLC model checker
+- LLM-assisted repair for SANY errors
+- Subsystem splitting for large architectures (boundary-level)
+
+## Judgment standard
+The specification is complete when:
+- SANY passes with zero errors
+- TLC explores the full state space (or reaches timeout with no violations)
+- Every failure path from the typed facts has a corresponding safety invariant
+- The specification is structurally faithful to the original architecture

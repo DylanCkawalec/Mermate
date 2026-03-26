@@ -358,6 +358,12 @@ case "${1:-}" in
     meta-cron)
         meta_cron
         ;;
+    db-init)
+        echo ""
+        echo "  Initializing DuckDB backend..."
+        echo ""
+        node "${SCRIPT_DIR}/server/backend/migrate.js"
+        ;;
     *)
         echo "Usage:"
         echo "  ./mermaid.sh start              Start the app server"
@@ -366,6 +372,7 @@ case "${1:-}" in
         echo "  ./mermaid.sh test               Run the test suite"
         echo "  ./mermaid.sh validate           Validate all .mmd files against axiom rules"
         echo "  ./mermaid.sh tla-setup          Download TLA+ tools (tla2tools.jar)"
+        echo "  ./mermaid.sh db-init            Initialize DuckDB and ingest existing runs"
         echo "  ./mermaid.sh meta-setup         Set up meta-cognition gateway (Python venv + deps)"
         echo "  ./mermaid.sh meta-start         Start meta-cognition gateway (port ${META_PORT})"
         echo "  ./mermaid.sh meta-cron          Run meta-cognition CRON optimization manually"

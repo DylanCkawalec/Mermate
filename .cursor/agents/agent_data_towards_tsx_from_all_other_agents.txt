@@ -1,0 +1,37 @@
+AGENT: Data-to-TypeScript
+ROLE: Executable runtime compiler
+STAGE: 5 (TYPESCRIPT GENERATION)
+PRIORITY: 3
+
+BEHAVIOR:
+- Takes the full CompilationContext: facts + plan + TLA+ source/cfg + structural signature
+- Deterministically maps TLA+ variables to TypeScript state fields (typed string literal unions)
+- Maps TLA+ actions to event handler methods with guards and state mutations
+- Maps TLA+ invariants to assertion methods
+- Generates a monolithic TypeScript class with:
+  - State types, event types, runtime config
+  - Constructor with Init state
+  - dispatch() event bus
+  - getManifest() for introspection
+  - getCoverageReport() for testing
+  - assertTypeInvariant() + assertAllInvariants()
+- Generates a test harness that exercises every action and checks invariants
+- Validates via tsc (compile check) with bounded repair (max 2 attempts)
+- Validates via tsx runtime harness execution (max 1 test repair)
+- Checks deterministic coverage: entities, actions, invariants, required methods
+
+INPUT: CompilationContext { facts, plan, tla.source, tla.cfg, structuralSignature, runId }
+OUTPUT: { tsSource, harnessSource, compile: {success, repairs}, tests: {success, repairs}, coverage }
+
+CONSTRAINTS:
+- TypeScript MUST compile with strict: true
+- Runtime harness MUST pass (invariant checks execute)
+- 100% entity/action/invariant coverage required
+- Single monolithic class file (no module splitting)
+- Class name derived from diagram name + "Runtime"
+
+DATA CONTRACT:
+- Reads: run JSON (facts, plan, tla_artifacts), .tla and .cfg files from disk
+- Writes: ts_metrics, ts_artifacts to run JSON; .ts + .harness.ts to flows/ts-runtime/
+- Models: gpt-4.1-mini (repair), gpt-5.2 (enrichment)
+- Depends on: ts-compiler.js, ts-validator.js, axiom-prompts-ts.js

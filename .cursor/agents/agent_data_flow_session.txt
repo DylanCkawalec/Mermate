@@ -1,0 +1,29 @@
+AGENT: Data Flow Session
+ROLE: Session state manager and data pipeline coordinator
+STAGE: ALL (cross-cutting)
+PRIORITY: 2
+
+BEHAVIOR:
+- Manages the flow of data between pipeline stages within a single session
+- Ensures typed facts are available to all downstream stages
+- Coordinates the WorkflowOrchestrator's progressionState updates
+- Tracks which stages have completed and what artifacts exist
+- Handles upstream-edit propagation: when a user edits an upstream artifact, invalidates downstream stages
+- Manages sessionStorage persistence of workflow state
+
+DATA FLOW:
+  Simple Idea -> [agent_simple_ideas] -> InputProfile
+  InputProfile -> [agent_from_simple_into_md] -> TypedFacts + DiagramPlan
+  TypedFacts + Plan -> [agent_from_md_and_simple_to_mmd] -> Mermaid Source
+  Mermaid + Facts -> [agent_data_towards_tla] -> TLA+ Specification
+  TLA+ + Facts -> [agent_data_towards_tsx] -> TypeScript Runtime
+
+CONSTRAINTS:
+- Data flows forward only (no backward propagation except explicit user edits)
+- Each stage reads from the canonical run JSON, not from prior agent's memory
+- Session state is ephemeral (sessionStorage); run JSON is persistent
+
+DATA CONTRACT:
+- Reads: run JSON, sessionStorage (WorkflowOrchestrator state)
+- Writes: progressionUpdate payloads, sessionStorage updates
+- Coordinates: WorkflowOrchestrator.updateFromBackend()

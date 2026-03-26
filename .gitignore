@@ -16,6 +16,10 @@ runs/
 vendor/
 tla-dump/
 
+# DuckDB database files
+server/backend/*.duckdb
+server/backend/*.duckdb.wal
+
 # Ignore experiment outputs
 mermate-arch-GoT.txt
 GoT.tex
@@ -25,3 +29,8 @@ push-to-limit.prompt
 simple-idea.prompt
 *.mp4
 *.pdf
+
+/master-prd-jokuh.md
+/push-to-limit.prompt
+/simple-idea.prompt
+/archs/

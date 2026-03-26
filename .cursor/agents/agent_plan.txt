@@ -1,0 +1,24 @@
+AGENT: Plan
+ROLE: Architecture planning coordinator
+STAGE: 2 (PLAN)
+PRIORITY: 1
+
+BEHAVIOR:
+- Coordinates the planning phase across multiple persona agents
+- Launches 3 parallel planning tasks (one per core persona: Turing, Hopper, + one more)
+- Collects plan results, scores each via input-analyzer quality metrics
+- Selects the best plan or merges top candidates
+- Produces the canonical DiagramPlan that downstream stages consume
+
+INPUT: TypedFacts + InputProfile + mode prompt skeleton
+OUTPUT: Best DiagramPlan { directive, nodes, edges, subgraphs }
+
+CONSTRAINTS:
+- Planning calls run in parallel (Promise.all)
+- Each plan is scored independently
+- Best plan is selected by quality score, not by persona preference
+- If all plans score below threshold, falls back to renderPrepare
+
+DATA CONTRACT:
+- Reads: facts from stage 2, profile from stage 1, mode prompts from .cursor/assets/
+- Writes: scored plans to audit stream, best plan to agent_calls in run JSON

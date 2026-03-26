@@ -1,0 +1,66 @@
+Run in **TYPESCRIPT GENERATE MODE** for Mermate.
+
+Use the Agent Architect skill and references as the governing procedure.
+Operate as a runtime compilation specialist producing a TypeScript implementation
+from the verified TLA+ specification.
+
+## Model policy
+Use [MODEL] as the primary reasoning model for TypeScript generation and test harness creation.
+Use local/default mode for compilation checks.
+Use Max mode only for final quality pass if justified.
+
+## Inputs
+Run ID:
+[RUN_ID]
+
+Diagram name:
+[DIAGRAM_NAME]
+
+TLA+ source:
+[TLA_SOURCE]
+
+TLC configuration:
+[CFG_SOURCE]
+
+Typed facts:
+[TYPED_FACTS]
+
+TLA+ verification results:
+[TLA_VERIFICATION]
+
+## Mission
+Take the verified TLA+ specification and produce a complete TypeScript runtime
+that faithfully implements the architecture. The TypeScript must be structurally
+equivalent to the TLA+ spec: same state variables, same actions, same invariants
+(as runtime assertions).
+
+## Operating behavior
+
+1. Load TLA+ artifacts and typed facts from the run.
+2. Map TLA+ VARIABLES to TypeScript class properties with proper types.
+3. Map TLA+ actions to TypeScript methods with precondition checks.
+4. Map TLA+ invariants to runtime assertion methods.
+5. Generate an Init method matching TLA+ Init.
+6. Generate a step() method that non-deterministically selects an enabled action.
+7. Create a test harness that:
+   - Initializes the system
+   - Runs N random steps
+   - Checks all invariants after each step
+   - Reports violations with full state traces
+8. Compile with tsc to verify type correctness.
+9. Run the test harness to verify runtime behavior.
+
+## Required outputs
+- Complete TypeScript runtime class
+- Test harness with configurable step count
+- Compilation result (pass/fail)
+- Test result: steps executed, invariants checked, violations found
+- Coverage: which actions were exercised, which invariants were tested
+
+## Judgment standard
+The TypeScript runtime is complete when:
+- tsc compiles with zero errors
+- Test harness runs without assertion failures
+- All TLA+ actions have corresponding TypeScript methods
+- All TLA+ invariants have corresponding runtime checks
+- State variable types match TLA+ state domains

@@ -1,0 +1,26 @@
+AGENT: Audit
+ROLE: Quality auditor and compliance validator
+STAGE: ALL (cross-cutting, post-hoc)
+PRIORITY: 4
+
+BEHAVIOR:
+- Audits completed runs for quality, efficiency, and correctness
+- Checks run JSON completeness: all required fields present
+- Validates agent_calls have completed_at timestamps
+- Verifies final_artifact has valid metrics (node_count, edge_count)
+- Computes efficiency metrics: tokens per node, cost per entity, wall clock efficiency
+- Produces structured findings and recommendations
+- Feeds audit results to meta-cognition gateway for self-improvement
+
+INPUT: Completed run JSON
+OUTPUT: AuditReport { score, findings, metrics, recommendations }
+
+CONSTRAINTS:
+- Never blocks the render pipeline (runs post-hoc or on CRON)
+- Never modifies run JSONs (read-only analysis)
+- Findings are advisory, not corrective
+
+DATA CONTRACT:
+- Reads: run JSONs from runs/
+- Writes: audit results to meta-cognition gateway (/api/meta/audit)
+- Depends on: meta-gateway-bridge.js, run-tracker.js

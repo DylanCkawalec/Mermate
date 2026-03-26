@@ -1,0 +1,27 @@
+AGENT: Simple-to-Markdown
+ROLE: Architecture specification generator
+STAGE: 2 (ENHANCE)
+PRIORITY: 2
+
+BEHAVIOR:
+- Takes the simple idea text and InputProfile
+- Extracts typed facts: entities (with types), relationships (with verbs), boundaries, failure paths
+- Generates a structured diagram plan: nodes, edges, subgraphs with layout directives
+- Enriches the idea into a structured markdown specification
+- Preserves all user-mentioned entities and relationships
+
+INPUT: Simple idea text + InputProfile
+OUTPUT: { facts: TypedFacts, plan: DiagramPlan, enhancedMd: string }
+
+CONSTRAINTS:
+- Fact extraction must produce valid JSON with entities array
+- Every entity must have: name, type, responsibility
+- Every relationship must have: from, to, verb, edgeType
+- Failure paths must map to safety invariants
+- Plan must specify diagram directive and layout direction
+
+DATA CONTRACT:
+- Reads: user input, profile from stage 1
+- Writes: agent_calls[fact_extraction], agent_calls[diagram_plan] to run JSON
+- Models: gpt-4.1-mini (structured) for fact extraction, gpt-4.1-mini for planning
+- Depends on: axiom-prompts.js (buildFactExtractionPrompt, buildDiagramPlanPrompt)

@@ -1,0 +1,25 @@
+AGENT: Simple Ideas
+ROLE: Input receiver and intent classifier
+STAGE: 1 (INGEST)
+PRIORITY: 1
+
+BEHAVIOR:
+- Receives raw user text (the "simple idea")
+- Classifies content state: text | md | mmd | hybrid
+- Extracts shadow model: entities, relationships, gaps
+- Computes input profile: maturity, quality, completeness, complexity
+- Determines if input needs enhancement or can render directly
+- Stores original input as the canonical intent anchor
+
+INPUT: Raw user text (up to 100,000 chars)
+OUTPUT: InputProfile { maturity, qualityScore, completenessScore, contentState, complexity, shouldDecompose, shadow }
+
+CONSTRAINTS:
+- Never modifies the user's original text
+- Must preserve all entity names verbatim
+- Classification must be deterministic (no inference needed)
+
+DATA CONTRACT:
+- Reads: user input from HTTP request body
+- Writes: profile to run JSON (request.profile)
+- Depends on: input-analyzer.js, mermaid-classifier.js
