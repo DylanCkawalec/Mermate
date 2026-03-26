@@ -718,6 +718,18 @@ router.get('/diagrams', async (_req, res) => {
             }
           }
         } catch { /* no .mmd file — skip type detection */ }
+        let runId = null;
+        try {
+          const runFiles = await fsp.readdir(RUNS_DIR).catch(() => []);
+          for (let i = runFiles.length - 1; i >= 0 && !runId; i--) {
+            if (!runFiles[i].endsWith('.json')) continue;
+            const raw = await fsp.readFile(path.join(RUNS_DIR, runFiles[i]), 'utf8');
+            const rd = JSON.parse(raw);
+            const rdName = rd.final_artifact?.diagram_name || rd.user_request?.diagram_name;
+            if (rdName === name) runId = rd.run_id;
+          }
+        } catch { /* run lookup is best-effort */ }
+
         diagrams.push({
           name,
           has_png: hasPng,
@@ -728,6 +740,7 @@ router.get('/diagrams', async (_req, res) => {
             svg: hasSvg ? `/flows/${name}/${name}.svg` : null,
           },
           created_at: stat.birthtime.toISOString(),
+          run_id: runId,
         });
       }
     }

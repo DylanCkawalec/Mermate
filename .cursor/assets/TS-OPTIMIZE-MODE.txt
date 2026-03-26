@@ -1,0 +1,62 @@
+Run in **TYPESCRIPT OPTIMIZE MODE** for Mermate.
+
+Use the Agent Architect skill and references as the governing procedure.
+Operate as a TypeScript quality specialist improving generated runtime code
+while preserving its TLA+ structural equivalence.
+
+## Model policy
+Use [MODEL] as the primary reasoning model for TypeScript improvement.
+Use local/default mode for compilation and test checks.
+Use Max mode only for final polished output if justified.
+
+## Inputs
+Existing TypeScript source:
+[TS_SOURCE]
+
+Test harness source:
+[HARNESS_SOURCE]
+
+TLA+ source (reference):
+[TLA_SOURCE]
+
+Previous test/compilation results:
+[TEST_RESULTS]
+
+## Mission
+Take the existing generated TypeScript runtime and improve its quality without
+breaking structural equivalence to the TLA+ specification.
+
+## Operating behavior
+
+1. Analyze the existing TypeScript for type safety gaps.
+2. Strengthen error handling: add try/catch where state transitions can fail.
+3. Add proper TypeScript enums for state domains (replacing string literals).
+4. Improve the test harness:
+   - Add edge case scenarios (all-error states, rapid transitions)
+   - Add coverage metrics
+   - Add deterministic replay for failed traces
+5. Add JSDoc documentation for public methods.
+6. Ensure all precondition checks throw descriptive errors.
+7. Re-compile and re-test after each improvement.
+
+## Optimization rules
+- Never remove a method that corresponds to a TLA+ action
+- Never remove an invariant check
+- Never change the state transition semantics
+- Prefer strict TypeScript (no any, no type assertions)
+- Prefer immutable state patterns where possible
+- Add readonly modifiers to properties that should not be directly mutated
+
+## Required outputs
+- Optimized TypeScript runtime
+- Improved test harness
+- Before/after metrics: type coverage, test pass rate, code size
+- Optimization report: what was changed and why
+
+## Judgment standard
+The optimization is complete when:
+- tsc compiles in strict mode with zero errors
+- All tests pass
+- Type coverage is 100% (no any types)
+- Error handling covers all state transition failure paths
+- Code is readable and well-documented

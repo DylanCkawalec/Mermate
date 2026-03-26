@@ -236,6 +236,25 @@
   let currentDiagramName = '';
   let currentPaths = null;
   let currentRunId = null;
+
+  function _persistSession() {
+    try {
+      sessionStorage.setItem('mermate_session', JSON.stringify({
+        runId: currentRunId, diagramName: currentDiagramName, paths: currentPaths,
+      }));
+    } catch {}
+  }
+
+  function _restoreSession() {
+    try {
+      const raw = sessionStorage.getItem('mermate_session');
+      if (!raw) return;
+      const s = JSON.parse(raw);
+      if (s.runId) currentRunId = s.runId;
+      if (s.diagramName) currentDiagramName = s.diagramName;
+      if (s.paths) currentPaths = s.paths;
+    } catch {}
+  }
   let isFullscreen = false;
   let copilot = null;
   let speech = null;
@@ -245,6 +264,63 @@
   let profileHint = '';
   let agentState = 'idle';
   let notesDirty = false;
+
+  const AGENT_MODES_BY_STAGE = {
+    idea: [
+      { id: 'thinking',     icon: '\u{1F4A1}', name: 'Thinking',    desc: 'Build architecture from ideas or notes' },
+      { id: 'code-review',  icon: '\u{1F50D}', name: 'Code Review', desc: 'Recover architecture from a codebase' },
+      { id: 'optimize-mmd', icon: '\u26A1',     name: 'Optimize',    desc: 'Improve existing Mermaid or markdown' },
+    ],
+    md:  null,
+    mmd: null,
+    tla: [
+      { id: 'tla-verify',   icon: '\u2713',     name: 'Verify Spec',   desc: 'Validate and repair TLA+ specification' },
+      { id: 'tla-optimize', icon: '\u26A1',     name: 'Optimize TLA+', desc: 'Strengthen invariants and state coverage' },
+    ],
+    ts: [
+      { id: 'ts-generate',  icon: '\u{1F528}', name: 'Generate Runtime', desc: 'Compile TLA+ spec to TypeScript' },
+      { id: 'ts-optimize',  icon: '\u26A1',     name: 'Optimize TS',     desc: 'Improve generated TypeScript quality' },
+    ],
+  };
+
+  function _getAgentModesForStage(stage) {
+    return AGENT_MODES_BY_STAGE[stage] || AGENT_MODES_BY_STAGE.idea;
+  }
+
+  function _rebuildAgentDropdown() {
+    const dropdown = document.getElementById('agent-dropdown');
+    if (!dropdown) return;
+
+    const modes = _getAgentModesForStage(currentMode);
+    dropdown.innerHTML = '';
+
+    for (const mode of modes) {
+      const btn = document.createElement('button');
+      btn.className = 'agent-mode-option';
+      btn.dataset.agentMode = mode.id;
+      if (mode.id === selectedAgentMode) btn.classList.add('selected');
+
+      btn.innerHTML = `<span class="agent-mode-icon">${mode.icon}</span>`
+        + `<span class="agent-mode-info">`
+        + `<span class="agent-mode-name">${mode.name}</span>`
+        + `<span class="agent-mode-desc">${mode.desc}</span>`
+        + `</span>`;
+
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setAgentMode(mode.id);
+      });
+
+      dropdown.appendChild(btn);
+    }
+
+    if (selectedAgentMode) {
+      const validIds = modes.map(m => m.id);
+      if (!validIds.includes(selectedAgentMode)) {
+        setAgentMode(null);
+      }
+    }
+  }
 
   const COPILOT_API_BASE = '/api/copilot';
 
@@ -422,6 +498,7 @@
       copilot = null;
     }
 
+    _rebuildAgentDropdown();
     syncUiGuidance();
   }
 
@@ -607,23 +684,13 @@
     resultSection.classList.add('is-revealing');
     window.setTimeout(() => resultSection.classList.remove('is-revealing'), 220);
 
-    if (runId) {
-      orchestrator.updateFromBackend({
-        stage: 'mmd',
-        unlockedStages: ['idea', 'md', 'mmd', 'tla'],
-        confidence: 1.0,
-      });
-    }
-
-    // MERMATE reveal notification
-    _playRenderReveal({
+    orchestrator.updateFromBackend({
       stage: 'mmd',
-      isFinal: !!runId,
-      diagramName: data.diagram_name || diagramName,
-      metrics: data.mmd_metrics || null,
-      paths: data.paths || null,
+      unlockedStages: ['idea', 'md', 'mmd', 'tla'],
+      confidence: 1.0,
     });
 
+    _persistSession();
     syncUiGuidance();
   }
 
@@ -1321,6 +1388,7 @@
     currentPaths = null;
     currentDiagramName = '';
     currentRunId = null;
+    _persistSession();
     if (pzFront) { pzFront.destroy(); pzFront = null; }
     if (pzBack) { pzBack.destroy(); pzBack = null; }
     if (copilot) copilot.dismissGhost();
@@ -1397,9 +1465,7 @@
     });
   }
 
-  agentDropdown?.querySelectorAll('.agent-mode-option').forEach(opt => {
-    opt.addEventListener('click', (e) => { e.stopPropagation(); setAgentMode(opt.dataset.agentMode); });
-  });
+  // Agent mode option clicks are handled dynamically by _rebuildAgentDropdown()
 
   document.addEventListener('click', () => { if (agentDropdown && !agentDropdown.hidden) agentDropdown.hidden = true; });
 
@@ -1487,8 +1553,14 @@
   // =========================================================================
 
   orchestrator.restore();
+  _restoreSession();
   setMode(orchestrator.currentStage);
+  _rebuildAgentDropdown();
   updateBadges();
+
+  if (currentPaths && (currentPaths.png || currentPaths.svg)) {
+    showResult(currentPaths, currentDiagramName, currentRunId);
+  }
 
   fetch('/api/copilot/health')
     .then(r => r.json())
@@ -1502,7 +1574,7 @@
         const serverNames = new Set(data.diagrams.map(d => d.name));
         sidebar.reconcile(serverNames);
         data.diagrams.forEach(d => {
-          sidebar.add({ name: d.name, type: d.diagram_type || '', paths: d.paths, timestamp: d.created_at ? new Date(d.created_at).toLocaleString() : '' });
+          sidebar.add({ name: d.name, type: d.diagram_type || '', paths: d.paths, timestamp: d.created_at ? new Date(d.created_at).toLocaleString() : '', run_id: d.run_id || null });
         });
       }
     })

@@ -1,0 +1,35 @@
+AGENT: Data Final Dump
+ROLE: Run artifact exporter and archive manager
+STAGE: POST-PIPELINE (after all stages complete)
+PRIORITY: 5
+
+BEHAVIOR:
+- After a run completes, exports all artifacts to the MERMATE dump directory
+- Creates a structured dump folder per run: /MERMATE/dumps/{run_id}/
+- Copies: run JSON, compiled .mmd, .tla, .cfg, .ts, .harness.ts, SVG, PNG
+- Generates a manifest.json summarizing all artifacts and their paths
+- Maintains a rolling index of recent dumps for quick access
+- Cleans up dumps older than 30 days (configurable)
+
+DUMP STRUCTURE:
+  /MERMATE/dumps/{run_id}/
+    manifest.json        - artifact index with paths, sizes, timestamps
+    run.json             - complete run lineage
+    diagram.mmd          - compiled Mermaid source
+    diagram.svg          - rendered SVG
+    diagram.png          - rendered PNG
+    spec.tla             - TLA+ specification
+    spec.cfg             - TLC configuration
+    runtime.ts           - TypeScript runtime class
+    runtime.harness.ts   - test harness
+    prompts/             - system prompts used for each inference call
+
+CONSTRAINTS:
+- Never blocks the render pipeline (runs asynchronously after finalization)
+- Fire-and-forget: export failures are logged but don't affect the user
+- Respects disk space: rolling cleanup
+
+DATA CONTRACT:
+- Reads: run JSON, artifact files from flows/ and archs/
+- Writes: dump folder to MERMATE_DUMP_DIR (default: /Desktop/MERMATE/dumps/)
+- Triggered by: run-tracker.finalize() completion

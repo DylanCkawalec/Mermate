@@ -77,11 +77,13 @@ const agentRouter = require('./routes/agent');
 const transcribeRouter = require('./routes/transcribe');
 const tlaRouter = require('./routes/tla');
 const tsRouter = require('./routes/ts');
+const searchRouter = require('./routes/search');
 app.use('/api', renderRouter);
 app.use('/api', agentRouter);
 app.use('/api', transcribeRouter);
 app.use('/api', tlaRouter);
 app.use('/api', tsRouter);
+app.use('/api', searchRouter);
 
 // Run retention cleanup on startup (non-blocking)
 const runTracker = require('./services/run-tracker');
