@@ -24,7 +24,7 @@ Mermate ships **without an AI model**. It is a diagram compilation engine with a
 
 This repo is now being used as a sidecar for the local OpenClaw desktop wrapper in:
 
-- `/Users/dylanckawalec/Desktop/developer/dylans_nemoclaw`
+- `/Users/dylanckawalec/Desktop/developer/mermaid/nemoclaw`
 
 Current local architecture:
 
@@ -33,8 +33,9 @@ Current local architecture:
 - Ollama: local inference on `http://127.0.0.1:11434`
 - Mermate: idea -> markdown -> Mermaid -> TLA+ -> TypeScript sidecar on `http://127.0.0.1:3333`
 - Claude Code: attached through MCP with both project `.mcp.json` and a local plugin marketplace entry
+- Generated app repos: created under `/Users/dylanckawalec/Desktop/developer/<repo-name>` with a repo-local `run.sh` and Desktop launcher
 
-The wrapper currently uses Mermate as the architecture and formalization surface, not as the primary chat transport.
+The wrapper currently uses Mermate as the architecture and formalization surface, not as the primary chat transport. It now also inherits this repo's `.env` as the architect-agent profile and scaffolds launchable desktop-window starter repos from successful runs.
 
 ## Verified model reality on this machine
 
@@ -190,6 +191,7 @@ The desktop wrapper can attach to Mermate through MCP tools and direct HTTP call
 Verified wrapper-facing surfaces in this repo:
 
 - `GET /api/copilot/health`
+- `GET /api/agents`
 - `POST /api/render`
 - `GET /api/render/tla/status`
 - `POST /api/render/tla`
@@ -203,8 +205,61 @@ That means the wrapper can use Mermate for:
 - Mermaid -> TLA+ formalization
 - TLA+ -> TypeScript runtime generation
 - mode discovery for code review, thinking, optimize, TLA verify, and TS generation flows
+- agent inventory discovery through `/api/agents`
+- clean repo generation through the wrapper MCP/server layer after a run clears the quality gate
 
-If you want Claude Code to drive those surfaces through the wrapper instead of calling this repo directly, use the OpenClaw desktop plugin and MCP server from `/Users/dylanckawalec/Desktop/developer/dylans_nemoclaw`.
+If you want Claude Code to drive those surfaces through the wrapper instead of calling this repo directly, use the OpenClaw desktop plugin and MCP server from `/Users/dylanckawalec/Desktop/developer/mermaid/nemoclaw`.
+
+### Native Python MCP server in this repo
+
+This repo now also ships its own Python MCP bridge for OpenClaw and other MCP clients.
+
+Files:
+
+- `.mcp.json`
+- `mcp_service/server.py`
+- `mcp_service/client.py`
+
+The project `.mcp.json` is wired to a repo-local virtualenv on this machine:
+
+- `/Users/dylanckawalec/Desktop/developer/mermaid/.venv-mcp/bin/python`
+
+If you clone or move the repo somewhere else, recreate that venv and update `.mcp.json`.
+
+Manual setup for a fresh checkout:
+
+```bash
+cd /Users/dylanckawalec/Desktop/developer/mermaid
+python3 -m venv .venv-mcp
+./.venv-mcp/bin/pip install -r requirements.txt
+```
+
+Run it directly if you want to test the bridge outside the client:
+
+```bash
+cd /Users/dylanckawalec/Desktop/developer/mermaid
+./.venv-mcp/bin/python -m mcp_service
+```
+
+If you prefer using your active Python instead of the repo-local venv:
+
+```bash
+cd /Users/dylanckawalec/Desktop/developer/mermaid
+python3 -m pip install -r requirements.txt
+python3 -m mcp_service
+```
+
+The repo-level `.mcp.json` points MCP clients at the repo-local venv interpreter with `MERMATE_URL=http://127.0.0.1:3333`.
+
+Exposed MCP surfaces include:
+
+- runtime status and stage discovery
+- copilot suggest and enhance
+- render, TLA+, and TypeScript stages
+- agent preview and finalize SSE workflows
+- diagram management
+- project search, pipeline status, and scoreboard
+- meta-cognition and agent registry endpoints
 
 ### Optional setup: local enhancer contract
 

@@ -1,0 +1,102 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;700&display=swap');
+
+:root {
+  --bg: #17110f;
+  --ink: #d5c4a7;
+  --ink-muted: rgba(70, 57, 47, 0.64);
+  --ink-soft: #5f4d40;
+  --ink-strong: #241a15;
+  --line: rgba(53, 42, 33, 0.16);
+  --accent: #ec7a32;
+  --panel-shadow:
+    0 24px 60px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  --sans: 'Space Grotesk', 'Avenir Next', 'Segoe UI', sans-serif;
+  --mono: 'IBM Plex Mono', 'SFMono-Regular', monospace;
+  font: 17px/1.55 var(--sans);
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top, rgba(216, 104, 45, 0.24), transparent 34%),
+    linear-gradient(180deg, #120d0c, #17110f 28%, #120d0c);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  position: relative;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 36px 36px;
+  mask-image: radial-gradient(circle at center, black 55%, transparent 100%);
+  pointer-events: none;
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1,
+h2 {
+  color: var(--ink-strong);
+  font-weight: 700;
+  line-height: 0.98;
+}
+
+h1 {
+  font-size: clamp(3rem, 7vw, 5.2rem);
+  letter-spacing: -0.06em;
+  max-width: 11ch;
+}
+
+h2 {
+  font-size: clamp(1.2rem, 3vw, 1.8rem);
+  letter-spacing: -0.03em;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  background: rgba(47, 38, 31, 0.1);
+  color: var(--ink-strong);
+  padding: 0.14rem 0.45rem;
+  border-radius: 999px;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+@media (max-width: 720px) {
+  :root {
+    font-size: 15px;
+  }
+}

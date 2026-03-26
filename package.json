@@ -5,6 +5,8 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
+    "nemoclaw:launch": "npm --prefix ./nemoclaw run desktop:launch",
+    "nemoclaw:mcp": "npm --prefix ./nemoclaw run mcp",
     "test": "node --test test/test-*.js",
     "test:fast": "node --test test/test-agent-api.js test/test-classifier.js test/test-enhanced-validation.js test/test-enhancer-bridge.js test/test-image-validation.js test/test-input-analyzer.js test/test-mermaid-repairer.js test/test-rate-master-bridge.js test/test-run-tracker.js test/test-structural-signature.js test/test-tla-compiler.js test/test-ts-compiler.js test/test-ts-validator.js test/test-perf-optimizations.js",
     "test:compile": "node --test --test-concurrency=2 test/test-compiler.js test/test-compile-retry.js test/test-all-fixtures.js test/test-render-api.js",

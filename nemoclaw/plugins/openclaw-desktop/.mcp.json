@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "openclaw_desktop_plugin": {
+      "command": "npm",
+      "args": [
+        "--prefix",
+        "/Users/dylanckawalec/Desktop/developer/mermaid/nemoclaw",
+        "run",
+        "mcp"
+      ],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}",
+      "env": {
+        "OPENCLAW_CONSOLE_URL": "http://127.0.0.1:8787",
+        "MERMATE_URL": "http://127.0.0.1:3333"
+      }
+    }
+  }
+}
