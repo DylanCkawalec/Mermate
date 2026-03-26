@@ -402,6 +402,8 @@
     input.value = orchestrator.getArtifact(mode);
     input.placeholder = cfg.placeholder;
     chkEnhance.checked = cfg.enhanceDefault;
+    const _btnEnh = document.getElementById('btn-enhance');
+    if (_btnEnh) _btnEnh.classList.toggle('active', chkEnhance.checked);
 
     if (cfg.showUpload) {
       btnUpload.classList.add('visible');
@@ -410,6 +412,13 @@
       btnUpload.classList.remove('visible');
     }
 
+    document.querySelectorAll('.sidebar-mode-btn').forEach(btn => {
+      const isActive = btn.dataset.mode === mode;
+      btn.classList.toggle('active', isActive);
+      btn.setAttribute('aria-checked', isActive ? 'true' : 'false');
+    });
+
+    // Copilot lifecycle: only active in idea mode
     if (mode === 'idea' && window.MermaidCopilot) {
       if (copilot) copilot.destroy();
       copilot = new window.MermaidCopilot(input, {
@@ -425,9 +434,18 @@
     syncUiGuidance();
   }
 
-  document.querySelectorAll('.mode-btn').forEach(btn => {
+  document.querySelectorAll('.sidebar-mode-btn').forEach(btn => {
     btn.addEventListener('click', () => setMode(btn.dataset.mode));
   });
+
+  // ---- Enhance toggle button ----
+  const btnEnhance = document.getElementById('btn-enhance');
+  if (btnEnhance) {
+    btnEnhance.addEventListener('click', () => {
+      chkEnhance.checked = !chkEnhance.checked;
+      btnEnhance.classList.toggle('active', chkEnhance.checked);
+    });
+  }
 
   // =========================================================================
   //  UI Guidance
