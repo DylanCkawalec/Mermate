@@ -16,14 +16,16 @@ from .client import MermateClient, MermateHttpError, summarize_sse_events
 
 
 SERVER_NAME = "mermate-openclaw-mcp"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 DEFAULT_BASE_URL = os.environ.get("MERMATE_URL", "http://127.0.0.1:3333")
+DEFAULT_OPENCLAW_URL = os.environ.get("OPENCLAW_URL", "http://127.0.0.1:8787")
 
 DEFAULT_ROUTE_TIMEOUT_S = int(os.environ.get("MERMATE_MCP_HTTP_TIMEOUT_S", "30"))
 DEFAULT_RENDER_TIMEOUT_S = int(os.environ.get("MERMATE_MCP_RENDER_TIMEOUT_S", "360"))
 DEFAULT_TLA_TIMEOUT_S = int(os.environ.get("MERMATE_MCP_TLA_TIMEOUT_S", "240"))
 DEFAULT_TS_TIMEOUT_S = int(os.environ.get("MERMATE_MCP_TS_TIMEOUT_S", "240"))
 DEFAULT_AGENT_TIMEOUT_S = int(os.environ.get("MERMATE_MCP_AGENT_TIMEOUT_S", "900"))
+DEFAULT_OPENCLAW_TIMEOUT_S = int(os.environ.get("OPENCLAW_MCP_HTTP_TIMEOUT_S", "120"))
 
 STAGE_MAP = {
     "render": {
@@ -54,6 +56,10 @@ STAGE_MAP = {
     "project_pipeline": {
         "route": "/api/projects/:id/pipeline",
         "description": "Read the persisted pipeline progression and GoT metrics for a named project.",
+    },
+    "openclaw_application_protocol": {
+        "route": "/api/architect/pipeline",
+        "description": "Run the OpenClaw wrapper protocol: idea to architecture, optional TLA+, optional TypeScript, and optional scaffold.",
     },
 }
 
@@ -92,11 +98,17 @@ TOOL_ROUTE_MAP = {
     "mermate_meta_audit": ["/api/meta/audit"],
     "mermate_meta_cron": ["/api/meta/cron"],
     "mermate_agents": ["/api/agents"],
+    "openclaw_status": ["/api/status"],
+    "openclaw_chat": ["/api/chat"],
+    "openclaw_connectivity_probe": ["/api/connectivity/probe"],
+    "openclaw_architect_status": ["/api/architect/status"],
+    "openclaw_application_protocol": ["/api/architect/pipeline"],
+    "openclaw_builder_scaffold": ["/api/builder/scaffold"],
 }
 
 INSTRUCTIONS = (
-    "Use this server to drive the local Mermate pipeline from OpenClaw or any other MCP client. "
-    "Prefer the stage-specific tools for render, TLA+, TypeScript, and agent flows. "
+    "Use this server to drive the local Mermate pipeline and the colocated OpenClaw wrapper from one MCP endpoint. "
+    "Prefer the stage-specific tools for render, TLA+, TypeScript, agent flows, and the OpenClaw application-builder protocol. "
     "Treat the underlying Express routes as the source of truth."
 )
 
@@ -110,6 +122,10 @@ mcp = FastMCP(
 
 def create_client() -> MermateClient:
     return MermateClient(base_url=DEFAULT_BASE_URL, timeout_s=DEFAULT_ROUTE_TIMEOUT_S)
+
+
+def create_openclaw_client() -> MermateClient:
+    return MermateClient(base_url=DEFAULT_OPENCLAW_URL, timeout_s=DEFAULT_OPENCLAW_TIMEOUT_S)
 
 
 def _normalize_input_mode(mode: str | None) -> str | None:
@@ -154,6 +170,25 @@ def _call_json(
         return payload if isinstance(payload, dict) else {"success": True, "data": payload}
     except Exception as exc:
         return _normalize_api_error(exc, path)
+
+
+def _call_openclaw_json(
+    method: str,
+    path: str,
+    *,
+    body: dict[str, Any] | None = None,
+    query: dict[str, Any] | None = None,
+    timeout_s: int | None = None,
+) -> dict[str, Any]:
+    client = create_openclaw_client()
+    try:
+        payload = client.request_json(method, path, body=body, query=query, timeout_s=timeout_s)
+        if isinstance(payload, dict):
+            return {"base_url": DEFAULT_OPENCLAW_URL, **payload}
+        return {"success": True, "base_url": DEFAULT_OPENCLAW_URL, "data": payload}
+    except Exception as exc:
+        normalized = _normalize_api_error(exc, path)
+        return {"base_url": DEFAULT_OPENCLAW_URL, **normalized}
 
 
 def _call_sse(path: str, *, body: dict[str, Any], timeout_s: int | None = None, include_events: bool = False) -> dict[str, Any]:
@@ -376,6 +411,93 @@ def mermate_full_pipeline(
     }
 
 
+@mcp.tool(description="Inspect the colocated OpenClaw wrapper that drives NemoClaw, local Ollama, and the Mermate sidecar.")
+def openclaw_status() -> dict[str, Any]:
+    return _call_openclaw_json("GET", "/api/status", timeout_s=DEFAULT_OPENCLAW_TIMEOUT_S)
+
+
+@mcp.tool(description="Send a prompt through the OpenClaw wrapper using either the managed route or local Ollama.")
+def openclaw_chat(
+    prompt: str,
+    transport: Literal["openshell", "ollama"] = "openshell",
+    model: str | None = None,
+    system_prompt: str | None = None,
+    timeout_s: int | None = None,
+) -> dict[str, Any]:
+    messages: list[dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    return _call_openclaw_json(
+        "POST",
+        "/api/chat",
+        body={"messages": messages, "transport": transport, "model": model},
+        timeout_s=timeout_s or DEFAULT_OPENCLAW_TIMEOUT_S,
+    )
+
+
+@mcp.tool(description="Probe a currently allowlisted host from inside the NemoClaw sandbox through the OpenClaw wrapper.")
+def openclaw_connectivity_probe(host: str, timeout_s: int | None = None) -> dict[str, Any]:
+    return _call_openclaw_json(
+        "POST",
+        "/api/connectivity/probe",
+        body={"host": host},
+        timeout_s=timeout_s or DEFAULT_OPENCLAW_TIMEOUT_S,
+    )
+
+
+@mcp.tool(description="Inspect the architect profile and Mermate sidecar state as seen by the OpenClaw wrapper.")
+def openclaw_architect_status(timeout_s: int | None = None) -> dict[str, Any]:
+    return _call_openclaw_json(
+        "GET",
+        "/api/architect/status",
+        timeout_s=timeout_s or DEFAULT_OPENCLAW_TIMEOUT_S,
+    )
+
+
+@mcp.tool(description="Run the staged OpenClaw application-builder protocol from idea to architecture, optional formal stages, and optional scaffold.")
+def openclaw_application_protocol(
+    source: str,
+    diagram_name: str | None = None,
+    input_mode: Literal["idea", "markdown", "mmd"] = "idea",
+    include_tla: bool = True,
+    include_ts: bool = True,
+    scaffold: bool = False,
+    repo_name: str | None = None,
+    timeout_s: int | None = None,
+) -> dict[str, Any]:
+    return _call_openclaw_json(
+        "POST",
+        "/api/architect/pipeline",
+        body={
+            "source": source,
+            "diagramName": diagram_name,
+            "inputMode": input_mode,
+            "maxMode": True,
+            "includeTla": include_tla or include_ts,
+            "includeTs": include_ts,
+            "scaffold": scaffold,
+            "repoName": repo_name,
+        },
+        timeout_s=timeout_s or max(DEFAULT_OPENCLAW_TIMEOUT_S, DEFAULT_AGENT_TIMEOUT_S),
+    )
+
+
+@mcp.tool(description="Scaffold a clean repository from an existing OpenClaw/Mermate run bundle.")
+def openclaw_builder_scaffold(
+    run_id: str,
+    repo_name: str,
+    source_idea: str,
+    timeout_s: int | None = None,
+) -> dict[str, Any]:
+    return _call_openclaw_json(
+        "POST",
+        "/api/builder/scaffold",
+        body={"runId": run_id, "repoName": repo_name, "sourceIdea": source_idea},
+        timeout_s=timeout_s or DEFAULT_OPENCLAW_TIMEOUT_S,
+    )
+
+
 @mcp.tool(description="Return the currently available Mermate agent modes.")
 def mermate_agent_modes() -> dict[str, Any]:
     return _call_json("GET", "/api/agent/modes")
@@ -590,4 +712,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

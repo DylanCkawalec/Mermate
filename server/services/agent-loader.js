@@ -15,10 +15,15 @@
 
 const fsp = require('node:fs/promises');
 const path = require('node:path');
+const os = require('node:os');
 const logger = require('../utils/logger');
 
-const AGENTS_DIR = process.env.MERMATE_AGENTS_DIR
-  || path.resolve(require('node:os').homedir(), 'Desktop', 'MERMATE');
+const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
+const DEFAULT_AGENT_DIRS = [
+  process.env.MERMATE_AGENTS_DIR,
+  path.join(PROJECT_ROOT, '.cursor', 'agents'),
+  path.resolve(os.homedir(), 'Desktop', 'MERMATE'),
+].filter(Boolean);
 
 let _agents = null;
 
@@ -54,29 +59,44 @@ async function loadAgents() {
   if (_agents) return _agents;
 
   _agents = new Map();
+  const loadedDirs = [];
+  const missingDirs = [];
 
-  try {
-    const entries = await fsp.readdir(AGENTS_DIR);
-    const agentFiles = entries.filter(f => f.startsWith('agent_') && (f.endsWith('.txt') || !f.includes('.')));
+  for (const dir of DEFAULT_AGENT_DIRS) {
+    try {
+      const entries = await fsp.readdir(dir);
+      const agentFiles = entries.filter(
+        (file) => file.startsWith('agent_') && (file.endsWith('.txt') || !file.includes('.')),
+      );
 
-    for (const file of agentFiles) {
-      try {
-        const content = await fsp.readFile(path.join(AGENTS_DIR, file), 'utf8');
-        if (!content.trim()) continue;
-        const agent = _parseAgentFile(content, file);
-        const key = file.replace(/^agent_/, '').replace(/\.txt$/, '').toLowerCase();
-        _agents.set(key, agent);
-      } catch { /* skip unreadable files */ }
+      if (agentFiles.length > 0) {
+        loadedDirs.push(dir);
+      }
+
+      for (const file of agentFiles) {
+        try {
+          const content = await fsp.readFile(path.join(dir, file), 'utf8');
+          if (!content.trim()) continue;
+          const agent = _parseAgentFile(content, file);
+          const key = file.replace(/^agent_/, '').replace(/\.txt$/, '').toLowerCase();
+          if (!_agents.has(key)) {
+            _agents.set(key, agent);
+          }
+        } catch {
+          /* skip unreadable files */
+        }
+      }
+    } catch (err) {
+      missingDirs.push({ dir, error: err.message });
     }
-
-    logger.info('agent_loader.loaded', {
-      dir: AGENTS_DIR,
-      count: _agents.size,
-      agents: [..._agents.keys()],
-    });
-  } catch (err) {
-    logger.warn('agent_loader.dir_not_found', { dir: AGENTS_DIR, error: err.message });
   }
+
+  logger.info('agent_loader.loaded', {
+    dirs: loadedDirs,
+    missingDirs,
+    count: _agents.size,
+    agents: [..._agents.keys()],
+  });
 
   return _agents;
 }
@@ -98,4 +118,10 @@ function getAllAgents() {
   return [..._agents.values()].sort((a, b) => a.priority - b.priority);
 }
 
-module.exports = { loadAgents, getAgent, getAgentsByStage, getAllAgents, AGENTS_DIR };
+module.exports = {
+  loadAgents,
+  getAgent,
+  getAgentsByStage,
+  getAllAgents,
+  AGENTS_DIRS: DEFAULT_AGENT_DIRS,
+};

@@ -175,6 +175,10 @@ Type /talk to speak your idea"
         <button id="btn-agent-run" class="btn btn-agent-run" hidden aria-label="Run Agent">
           Run Agent
         </button>
+        <button id="btn-openclaw" class="btn btn-secondary btn-openclaw" aria-label="Open NemoClaw builder">
+          NemoClaw
+        </button>
+        <span id="openclaw-status-chip" class="next-action-chip openclaw-status-chip" data-state="loading" aria-live="polite">Checking claw…</span>
       </div>
 
       <!-- Agent planning panel -->
@@ -318,6 +322,41 @@ Type /talk to speak your idea"
     </div>
   </dialog>
 
+  <dialog id="openclaw-dialog" class="openclaw-dialog">
+    <div class="openclaw-dialog-shell">
+      <div class="openclaw-dialog-header">
+        <div>
+          <p class="openclaw-dialog-eyebrow">NemoClaw Wrapper</p>
+          <h3>OpenClaw Inside Mermate</h3>
+        </div>
+        <div class="openclaw-dialog-actions">
+          <button id="btn-openclaw-refresh" class="btn btn-secondary">Refresh</button>
+          <button id="btn-openclaw-launch" class="btn btn-secondary">Open Full Window</button>
+          <button id="btn-openclaw-close" class="btn btn-secondary">Close</button>
+        </div>
+      </div>
+      <div class="openclaw-dialog-meta">
+        <div class="openclaw-meta-card">
+          <span>Wrapper</span>
+          <strong id="openclaw-base-url">http://127.0.0.1:8787</strong>
+        </div>
+        <div class="openclaw-meta-card">
+          <span>Route</span>
+          <strong id="openclaw-route-summary">Checking managed route…</strong>
+        </div>
+        <div class="openclaw-meta-card">
+          <span>Architect</span>
+          <strong id="openclaw-architect-summary">Loading architect profile…</strong>
+        </div>
+        <div class="openclaw-meta-card">
+          <span>Agents</span>
+          <strong id="openclaw-agent-summary">Loading Mermate specialists…</strong>
+        </div>
+      </div>
+      <iframe id="openclaw-frame" class="openclaw-frame" title="NemoClaw Builder"></iframe>
+    </div>
+  </dialog>
+
   <script src="/js/landing.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip@3/dist/jszip.min.js"></script>
   <script src="/js/mermaid-gpt-classifier.js"></script>
@@ -330,5 +369,6 @@ Type /talk to speak your idea"
   <script src="/js/mermaid-gpt-run-details.js"></script>
   <script src="/js/mermaid-gpt-speech.js"></script>
   <script src="/js/mermaid-gpt-app.js"></script>
+  <script src="/js/mermate-openclaw-bridge.js"></script>
 </body>
 </html>

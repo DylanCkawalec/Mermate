@@ -8,7 +8,8 @@
       ],
       "cwd": "/Users/dylanckawalec/Desktop/developer/mermaid",
       "env": {
-        "MERMATE_URL": "http://127.0.0.1:3333"
+        "MERMATE_URL": "http://127.0.0.1:3333",
+        "OPENCLAW_URL": "http://127.0.0.1:8787"
       }
     }
   }
