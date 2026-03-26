@@ -1,20 +1,55 @@
 {
   "version": 1,
   "skills": {
+    "Nexus": {
+      "source": "simota/agent-skills",
+      "sourceType": "github",
+      "computedHash": "c92ee451323a726fd9b2017cc24c945f3d559907b9dee6a88c72cdd9333cd2c6"
+    },
+    "adr-writing": {
+      "source": "existential-birds/beagle",
+      "sourceType": "github",
+      "computedHash": "4d3df3cd395863e3bdbaa0e4feacc57934258db07ec98da9a1587bd7f799fc36"
+    },
+    "brainstorming": {
+      "source": "obra/superpowers",
+      "sourceType": "github",
+      "computedHash": "8df9b47092524833138b58682d03f2e153a242e550d1693657afdbee0cc9cdb0"
+    },
+    "c4-architecture": {
+      "source": "softaworks/agent-toolkit",
+      "sourceType": "github",
+      "computedHash": "f35f57420c35f2e8413e1e22934ca3950cae8286499f6fbe978cff604c35cfcd"
+    },
     "enhance-prompt": {
       "source": "google-labs-code/stitch-skills",
       "sourceType": "github",
       "computedHash": "71cc23e9ec5fc6361e12453495fa8c683f6cf26f3efaf9b230b0f43e0a32cc96"
+    },
+    "first-principles-thinking": {
+      "source": "akshat10/skills",
+      "sourceType": "github",
+      "computedHash": "85bdd335ffc89462a492408dfb4b6a5ca1df49d3f8276f4ed86486acf5b5e6fe"
     },
     "mermaid-diagrams": {
       "source": "softaworks/agent-toolkit",
       "sourceType": "github",
       "computedHash": "6d36e69adad781f106a2fb4b19ebc22bf0c211babdc0d1ae5822fa65abb48bd8"
     },
+    "nexus-mapper": {
+      "source": "haaaiawd/nexus-skills",
+      "sourceType": "github",
+      "computedHash": "9a15393535647d51b38908a4df73c88ff5d19c87bea0869ff18896752cce59e8"
+    },
     "ooda": {
       "source": "neurofoo/agent-skills",
       "sourceType": "github",
       "computedHash": "bc3ab2ef00e1268e8f5318d3bc5f802326844ddbdb2949e2ed91458a4e338e41"
+    },
+    "repository-analyzer": {
+      "source": "jackspace/claudeskillz",
+      "sourceType": "github",
+      "computedHash": "c7ed94564577f452ba3388ada9c470c777fd5cfcd62145b044135bbe8721073d"
     },
     "software-architecture": {
       "source": "sickn33/antigravity-awesome-skills",

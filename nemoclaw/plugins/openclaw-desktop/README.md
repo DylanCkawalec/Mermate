@@ -1,6 +1,6 @@
 # OpenClaw Desktop Plugin
 
-Local Claude Code plugin for the desktop wrapper in `/Users/dylanckawalec/Desktop/developer/mermaid/nemoclaw`.
+Local Claude Code plugin for the desktop wrapper under [`nemoclaw/`](../../README.md) in the Mermate repository (Mermate app and API live at the repo root; this plugin ships inside `nemoclaw/plugins/openclaw-desktop/`).
 
 What it exposes:
 
@@ -23,6 +23,6 @@ This plugin assumes the desktop launcher has already started:
 - OpenClaw console on `http://127.0.0.1:8787`
 - Mermate on `http://127.0.0.1:3333`
 
-The wrapper now treats Mermate as the architect sidecar and can scaffold launchable starter repos under `/Users/dylanckawalec/Desktop/developer`.
+The wrapper treats Mermate as the architect sidecar and can scaffold launchable starter repos under a configurable output directory (often `~/Desktop/developer`).
 
-If you move this repo, update the absolute `npm --prefix` path in [plugins/openclaw-desktop/.mcp.json](/Users/dylanckawalec/Desktop/developer/mermaid/nemoclaw/plugins/openclaw-desktop/.mcp.json).
+If you move this checkout, update the `npm --prefix` path in [.mcp.json](.mcp.json) so it points at this plugin directory on disk.
