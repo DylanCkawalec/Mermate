@@ -206,6 +206,57 @@ That means the wrapper can use Mermate for:
 
 If you want Claude Code to drive those surfaces through the wrapper instead of calling this repo directly, use the OpenClaw desktop plugin and MCP server from `/Users/dylanckawalec/Desktop/developer/dylans_nemoclaw`.
 
+### Native Python MCP server in this repo
+
+This repo now also ships its own Python MCP bridge for OpenClaw and other MCP clients.
+
+Files:
+
+- `.mcp.json`
+- `mcp_service/server.py`
+- `mcp_service/client.py`
+
+The project `.mcp.json` is wired to a repo-local virtualenv on this machine:
+
+- `/Users/dylanckawalec/Desktop/developer/mermaid/.venv-mcp/bin/python`
+
+If you clone or move the repo somewhere else, recreate that venv and update `.mcp.json`.
+
+Manual setup for a fresh checkout:
+
+```bash
+cd /Users/dylanckawalec/Desktop/developer/mermaid
+python3 -m venv .venv-mcp
+./.venv-mcp/bin/pip install -r requirements.txt
+```
+
+Run it directly if you want to test the bridge outside the client:
+
+```bash
+cd /Users/dylanckawalec/Desktop/developer/mermaid
+./.venv-mcp/bin/python -m mcp_service
+```
+
+If you prefer using your active Python instead of the repo-local venv:
+
+```bash
+cd /Users/dylanckawalec/Desktop/developer/mermaid
+python3 -m pip install -r requirements.txt
+python3 -m mcp_service
+```
+
+The repo-level `.mcp.json` points MCP clients at the repo-local venv interpreter with `MERMATE_URL=http://127.0.0.1:3333`.
+
+Exposed MCP surfaces include:
+
+- runtime status and stage discovery
+- copilot suggest and enhance
+- render, TLA+, and TypeScript stages
+- agent preview and finalize SSE workflows
+- diagram management
+- project search, pipeline status, and scoreboard
+- meta-cognition and agent registry endpoints
+
 ### Optional setup: local enhancer contract
 
 Any model server that accepts `POST /mermaid/enhance` works.

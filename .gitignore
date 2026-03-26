@@ -9,6 +9,9 @@ archs/*
 .DS_Store
 *.log
 .env
+.venv-mcp/
+__pycache__/
+*.py[cod]
 
 # Ignore outputs and temp artifacts
 prompt-example.md
