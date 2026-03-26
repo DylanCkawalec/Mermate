@@ -6,15 +6,45 @@
       "sourceType": "github",
       "computedHash": "1fdc3ae39490000d36b242168c64db00c1654fe1a0e45a1b12e93b38cc21e32c"
     },
+    "backend-patterns": {
+      "source": "affaan-m/everything-claude-code",
+      "sourceType": "github",
+      "computedHash": "24d5803368c402ed5a72541dbbd0cb9975c56e574cdf4b45332f54991186301a"
+    },
+    "capability-evolver": {
+      "source": "autogame-17/capability-evolver",
+      "sourceType": "github",
+      "computedHash": "4d2f036bf7e4d04333c94ff080b590171b7ea069b9f00397006f0344500487ac"
+    },
     "code-review-expert": {
       "source": "sanyuan0704/code-review-expert",
       "sourceType": "github",
       "computedHash": "6c2fe31851a34e63e033257527eab04eea835ca1cf4c4276d1392a323e36e377"
     },
+    "crafting-effective-readmes": {
+      "source": "softaworks/agent-toolkit",
+      "sourceType": "github",
+      "computedHash": "c931a8c22160e8925400778fcb2266b5d1df762f3052edba65f72479f79f2d6c"
+    },
+    "cryptography": {
+      "source": "melodic-software/claude-code-plugins",
+      "sourceType": "github",
+      "computedHash": "0b3067f1a8fa54e4aacb6129962a59b7349fe4db4f2004eb436d1693009eec24"
+    },
+    "engineering-advanced-skills": {
+      "source": "alirezarezvani/claude-skills",
+      "sourceType": "github",
+      "computedHash": "33b21059b523ff230a491d985ea50d9fe1d489151a0731e7c173f1d49e787ff0"
+    },
     "find-skills": {
       "source": "vercel-labs/skills",
       "sourceType": "github",
       "computedHash": "d31e234f0c90694a670222cdd1dafa853e051d7066beda389f1097c22dadd461"
+    },
+    "hybrid-cloud-networking": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "computedHash": "813d61a05d54745c2a1a9e5871218d14e556b9a4088631aba0b7118b20e30543"
     },
     "improve-codebase-architecture": {
       "source": "mattpocock/skills",
@@ -30,6 +60,11 @@
       "source": "neondatabase/agent-skills",
       "sourceType": "github",
       "computedHash": "391693eee67001639ab65474df185da3ea5cf9ee4b99badecfd64561113edbb4"
+    },
+    "nvidia-nemoclaw": {
+      "source": "aradotso/trending-skills",
+      "sourceType": "github",
+      "computedHash": "6932608be46d8296e3e66d4e5ce0a491a10c188fb734c09e497c2734ba6458f8"
     },
     "orbstack-best-practices": {
       "source": "0xbigboss/claude-code",
@@ -95,6 +130,16 @@
       "source": "sickn33/antigravity-awesome-skills",
       "sourceType": "github",
       "computedHash": "f0f625132cf53116cb27725926e2c99f142861b9063d459938dd85fbf8e2bf61"
+    },
+    "ui-ux-pro-max": {
+      "source": "nextlevelbuilder/ui-ux-pro-max-skill",
+      "sourceType": "github",
+      "computedHash": "0a413bf988d06481f69bb81df2070741c3ba12dd9f1be2706d57f259c905992d"
+    },
+    "writing-skills": {
+      "source": "obra/superpowers",
+      "sourceType": "github",
+      "computedHash": "c0a92e629e39ea91b1f54da67a6aa92723008a8ef5b500c6de078f55485937c7"
     }
   }
 }

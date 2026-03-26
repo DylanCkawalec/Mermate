@@ -22,9 +22,9 @@ Mermate ships **without an AI model**. It is a diagram compilation engine with a
 
 ## Verified local architecture
 
-This repo is now being used as a sidecar for the local OpenClaw desktop wrapper in:
+This repo is also used as a sidecar for the local OpenClaw desktop wrapper in:
 
-- `/Users/dylanckawalec/Desktop/developer/mermaid/nemoclaw`
+- [`nemoclaw/`](nemoclaw/) (OpenClaw / NemoClaw desktop wrapper in this repository)
 
 Current local architecture:
 
@@ -33,7 +33,7 @@ Current local architecture:
 - Ollama: local inference on `http://127.0.0.1:11434`
 - Mermate: idea -> markdown -> Mermaid -> TLA+ -> TypeScript sidecar on `http://127.0.0.1:3333`
 - Claude Code: attached through MCP with both project `.mcp.json` and a local plugin marketplace entry
-- Generated app repos: created under `/Users/dylanckawalec/Desktop/developer/<repo-name>` with a repo-local `run.sh` and Desktop launcher
+- Generated app repos: created under a configurable output directory (for example `~/Desktop/developer/<repo-name>`) with a repo-local `run.sh` and Desktop launcher
 
 The wrapper currently uses Mermate as the architecture and formalization surface, not as the primary chat transport. It now also inherits this repo's `.env` as the architect-agent profile and scaffolds launchable desktop-window starter repos from successful runs.
 
@@ -81,7 +81,7 @@ On this machine, the first Mermate restart failed because the native DuckDB bind
 Rebuild it with:
 
 ```bash
-cd /Users/dylanckawalec/Desktop/developer/mermaid
+cd /path/to/this/repo   # repository root
 npm rebuild duckdb
 ```
 
@@ -208,7 +208,7 @@ That means the wrapper can use Mermate for:
 - agent inventory discovery through `/api/agents`
 - clean repo generation through the wrapper MCP/server layer after a run clears the quality gate
 
-If you want Claude Code to drive those surfaces through the wrapper instead of calling this repo directly, use the OpenClaw desktop plugin and MCP server from `/Users/dylanckawalec/Desktop/developer/mermaid/nemoclaw`.
+If you want Claude Code to drive those surfaces through the wrapper instead of calling this repo directly, use the OpenClaw desktop plugin and MCP server from [`nemoclaw/`](nemoclaw/).
 
 ### Native Python MCP server in this repo
 
@@ -220,16 +220,16 @@ Files:
 - `mcp_service/server.py`
 - `mcp_service/client.py`
 
-The project `.mcp.json` is wired to a repo-local virtualenv on this machine:
+The project `.mcp.json` expects a repo-local virtualenv interpreter:
 
-- `/Users/dylanckawalec/Desktop/developer/mermaid/.venv-mcp/bin/python`
+- `.venv-mcp/bin/python` (under the repository root)
 
-If you clone or move the repo somewhere else, recreate that venv and update `.mcp.json`.
+If you clone or move the repo, recreate that venv and point `.mcp.json` at your interpreter path.
 
 Manual setup for a fresh checkout:
 
 ```bash
-cd /Users/dylanckawalec/Desktop/developer/mermaid
+cd /path/to/this/repo   # repository root
 python3 -m venv .venv-mcp
 ./.venv-mcp/bin/pip install -r requirements.txt
 ```
@@ -237,14 +237,14 @@ python3 -m venv .venv-mcp
 Run it directly if you want to test the bridge outside the client:
 
 ```bash
-cd /Users/dylanckawalec/Desktop/developer/mermaid
+cd /path/to/this/repo
 ./.venv-mcp/bin/python -m mcp_service
 ```
 
 If you prefer using your active Python instead of the repo-local venv:
 
 ```bash
-cd /Users/dylanckawalec/Desktop/developer/mermaid
+cd /path/to/this/repo
 python3 -m pip install -r requirements.txt
 python3 -m mcp_service
 ```

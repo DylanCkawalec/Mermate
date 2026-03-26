@@ -23,5 +23,5 @@ Preferred tools:
 Operational rules:
 
 - Trust the returned runtime status over stale assumptions
-- If the wrapper endpoints are offline, tell the user to open `/Users/dylanckawalec/Desktop/OpenClaw Desktop.command`
+- If the wrapper endpoints are offline, tell the user to start the desktop launcher (for example their `OpenClaw Desktop.command` or equivalent)
 - When a managed-route chat response reports a different `model` than the requested one, treat the returned model as authoritative
