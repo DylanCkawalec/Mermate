@@ -363,6 +363,7 @@ function setFinalArtifact(runId, {
   m.final_artifact = {
     diagram_name: diagramName,
     diagram_type: diagramType,
+    mmd_source: mmdSource.length <= MAX_MMD_INLINE ? mmdSource : null,
     mmd_source_hash: _hash16(mmdSource),
     mmd_char_count: mmdSource.length,
     metrics: {

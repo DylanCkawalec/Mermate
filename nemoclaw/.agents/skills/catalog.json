@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "focus": "claude-only",
+  "lastCurated": "2026-03-26",
+  "bundles": [
+    {
+      "name": "sonnet-skills",
+      "purpose": "Repo-specific architecture refinement, formalization discipline, and provenance-aware repo synthesis across the Mermate to Specula/TLA+ workflow.",
+      "stages": [
+        "idea",
+        "markdown",
+        "mmd",
+        "tsx",
+        "tla",
+        "ts",
+        "repo"
+      ],
+      "supports": [
+        "architecture_refinement",
+        "specification_refinement",
+        "tla_preparation",
+        "meta_tagging",
+        "repo_synthesis"
+      ],
+      "references": [
+        ".agents/skills/sonnet-skills/references/repo-flow.md",
+        ".agents/skills/sonnet-skills/references/specula-tla-pipeline.md",
+        ".agents/skills/sonnet-skills/references/meta-tagging.md"
+      ],
+      "upstreamInputs": [
+        {
+          "source": "local",
+          "skill": "improve-codebase-architecture"
+        },
+        {
+          "source": "local",
+          "skill": "engineering-advanced-skills/spec-driven-workflow"
+        },
+        {
+          "source": "local",
+          "skill": "engineering-advanced-skills/agent-workflow-designer"
+        },
+        {
+          "source": "local",
+          "skill": "nvidia-nemoclaw"
+        }
+      ]
+    },
+    {
+      "name": "anthropic-skills",
+      "purpose": "Anthropic-derived markdown, project-memory, skill-curation, and MCP design patterns adapted for OpenClaw and Nemoclaw.",
+      "stages": [
+        "markdown",
+        "spec",
+        "repo"
+      ],
+      "supports": [
+        "markdown_refinement",
+        "claude_memory",
+        "skill_curation",
+        "mcp_design",
+        "agentic_system_construction"
+      ],
+      "includesMarkdownImprover": true,
+      "references": [
+        ".agents/skills/anthropic-skills/references/doc-coauthoring.md",
+        ".agents/skills/anthropic-skills/references/skill-curation.md",
+        ".agents/skills/anthropic-skills/references/claude-md-pipeline.md",
+        ".agents/skills/anthropic-skills/references/mcp-patterns.md"
+      ],
+      "upstreamInputs": [
+        {
+          "repo": "anthropics/skills",
+          "commit": "98669c1",
+          "skills": [
+            "doc-coauthoring",
+            "mcp-builder",
+            "skill-creator"
+          ]
+        },
+        {
+          "repo": "anthropics/claude-plugins-official",
+          "commit": "72b9754",
+          "skills": [
+            "claude-md-improver"
+          ]
+        }
+      ]
+    }
+  ],
+  "markdownImprover": {
+    "directClaudeInstall": ".claude/skills/claude-md-improver",
+    "integratedInto": "anthropic-skills",
+    "projectMemory": "CLAUDE.md",
+    "qualityTargets": [
+      "CLAUDE.md",
+      "builder docs",
+      "pre-TLA markdown",
+      "spec handoff text"
+    ]
+  }
+}

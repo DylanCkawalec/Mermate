@@ -86,10 +86,12 @@ Plugin skill:
 
 - [plugins/openclaw-desktop/skills/openclaw-wrapper/SKILL.md](plugins/openclaw-desktop/skills/openclaw-wrapper/SKILL.md)
 
-Agent skills (project-local, including README guidance and other bundles):
+Claude-only skill layer:
 
-- [.agents/skills/](.agents/skills/)
-- [skills-lock.json](skills-lock.json) — install sources and content hashes
+- [.agents/skills/](.agents/skills/) — curated project-local bundles (`sonnet-skills` and `anthropic-skills`)
+- [.agents/skills/catalog.json](.agents/skills/catalog.json) — runtime-readable bundle catalog
+- [CLAUDE.md](CLAUDE.md) — project memory target for `claude-md-improver`
+- [skills-lock.json](skills-lock.json) — upstream provenance for curated external inputs
 
 The MCP server itself lives in:
 

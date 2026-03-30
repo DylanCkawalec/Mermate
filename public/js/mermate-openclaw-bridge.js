@@ -48,6 +48,7 @@
         : 'Mermate agent inventory unavailable';
 
       iframe.src = `${cachedBaseUrl}/?embed=mermate`;
+      chip.hidden = false;
       setChip(routeHealthy ? 'Claw online' : 'Claw degraded', routeHealthy ? 'online' : 'warning');
     } catch (error) {
       routeEl.textContent = 'Wrapper unreachable from Mermate';
@@ -55,6 +56,7 @@
       agentsEl.textContent = 'Open `/Users/dylanckawalec/Desktop/OpenClaw Desktop.command` to start the wrapper.';
       iframe.removeAttribute('src');
       setChip('Claw offline', 'offline');
+      chip.hidden = true;
     }
   }
 

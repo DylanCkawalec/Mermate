@@ -13,14 +13,23 @@ const path = require('node:path');
 const fsp = require('node:fs/promises');
 const tlaCompiler = require('../services/tla-compiler');
 const tlaValidator = require('../services/tla-validator');
-const { buildTlaRepairPrompt, buildTlaRepairUserPrompt, buildTlaEnrichPrompt, buildTlaEnrichUserPrompt } = require('../services/axiom-prompts-tla');
+const { buildTlaRepairPrompt, buildTlaRepairUserPrompt } = require('../services/axiom-prompts-tla');
 const provider = require('../services/inference-provider');
-const runTracker = require('../services/run-tracker');
+const speculaLlm = require('../services/specula-llm');
+const { buildSpeculaBundle } = require('../services/specula-bundle');
+const {
+  loadRunData,
+  persistRunData,
+  extractFactsAndPlan,
+  getOriginalInput,
+  resolveDiagramName,
+  loadCanonicalMarkdown,
+  readTextArtifact,
+} = require('../services/run-artifact-loader');
 const logger = require('../utils/logger');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const FLOWS_DIR = path.join(PROJECT_ROOT, 'flows');
-const RUNS_DIR = path.join(PROJECT_ROOT, 'runs');
 
 const router = Router();
 
@@ -40,6 +49,7 @@ router.get('/render/tla/status', async (_req, res) => {
     jarPath: tlaValidator.JAR_PATH,
     sanyTimeoutMs: tlaValidator.SANY_TIMEOUT_MS,
     tlcTimeoutMs: tlaValidator.TLC_TIMEOUT_MS,
+    specula: speculaLlm.getConfig(),
   });
 });
 
@@ -68,29 +78,19 @@ router.post('/render/tla', async (req, res) => {
   }
 
   try {
-    // Load run JSON to get facts + plan
-    const runPath = path.join(RUNS_DIR, `${run_id}.json`);
+    let runPath;
     let runData;
     try {
-      const raw = await fsp.readFile(runPath, 'utf8');
-      runData = JSON.parse(raw);
+      const loaded = await loadRunData(run_id);
+      runPath = loaded.runPath;
+      runData = loaded.runData;
     } catch {
       return res.status(404).json({ success: false, error: `Run ${run_id} not found` });
     }
 
     // Extract facts and plan from agent_calls (HPC-GoT path)
-    let facts = null;
-    let plan = null;
-    let originalInput = runData.request?.user_input || runData.user_request?.input || '';
-
-    for (const call of (runData.agent_calls || [])) {
-      if (call.stage === 'fact_extraction' && call.success) {
-        try { facts = JSON.parse(call.output_text); } catch { /* skip */ }
-      }
-      if (call.stage === 'diagram_plan' && call.success) {
-        try { plan = JSON.parse(call.output_text); } catch { /* skip */ }
-      }
-    }
+    let { facts, plan } = extractFactsAndPlan(runData);
+    const originalInput = getOriginalInput(runData);
 
     // If facts not found in agent_calls (e.g. decompose pipeline), extract them now
     if (!facts || !facts.entities || facts.entities.length === 0) {
@@ -148,10 +148,20 @@ router.post('/render/tla', async (req, res) => {
       }
     }
 
-    const name = diagram_name || runData.user_request?.diagram_name || 'spec';
+    const name = diagram_name || resolveDiagramName(runData, 'spec');
     const moduleName = tlaCompiler._sanitizeId(name).replace(/^v/, 'M') || 'Spec';
     const tlaDir = path.join(FLOWS_DIR, name);
     await fsp.mkdir(tlaDir, { recursive: true });
+
+    const markdownSource = await loadCanonicalMarkdown(runData, name);
+    let tsxManifest = null;
+    try {
+      if (runData?.tsx_artifacts?.manifest) {
+        tsxManifest = JSON.parse(await readTextArtifact(runData.tsx_artifacts.manifest));
+      }
+    } catch (err) {
+      logger.warn('tla.tsx_manifest_unavailable', { error: err.message });
+    }
 
     logger.info('tla.compile_start', { moduleName, run_id: run_id.slice(0, 8), entities: facts.entities.length });
 
@@ -159,9 +169,15 @@ router.post('/render/tla', async (req, res) => {
       const { system } = buildTlaRepairPrompt();
       const userPrompt = buildTlaRepairUserPrompt(source, errors);
       const _repairStart = Date.now();
-      const result = await provider.infer('repair_from_trace', { systemPrompt: system, userPrompt });
-      logger.info('tla.repair.timing', { ms: Date.now() - _repairStart, provider: result.provider, hasOutput: !!result.output, noOp: result.noOp });
-      if (result.output && !result.noOp) {
+      const result = await speculaLlm.inferTlaStage('repair_tla', { systemPrompt: system, userPrompt });
+      logger.info('tla.repair.timing', {
+        ms: Date.now() - _repairStart,
+        provider: result.provider,
+        hasOutput: !!result.output,
+        available: result.available,
+        error: result.error || null,
+      });
+      if (result.output) {
         let repaired = result.output.trim();
         if (repaired.startsWith('```')) {
           repaired = repaired.replace(/^```(?:tla\+?)?\s*\n?/, '').replace(/\n?```\s*$/, '');
@@ -272,6 +288,28 @@ router.post('/render/tla', async (req, res) => {
       metrics.submodulesSanyValid = submoduleResults.filter(s => s.sany?.valid).length;
     }
 
+    const speculaBundle = buildSpeculaBundle({
+      runId: run_id,
+      diagramName: name,
+      moduleName,
+      facts,
+      plan,
+      variables,
+      actions,
+      invariants,
+      markdownPath: `/flows/${name}/architecture.md`,
+      markdownSource,
+      tsxManifest,
+      tsxPaths: runData?.tsx_artifacts || null,
+      baseTlaSource: validation.tlaSource,
+      baseCfgSource: cfgSource,
+      validation,
+    });
+    await fsp.mkdir(path.join(tlaDir, 'specula'), { recursive: true });
+    await Promise.all(speculaBundle.files.map((file) => (
+      fsp.writeFile(path.join(tlaDir, file.relativePath), file.content, 'utf8')
+    )));
+
     // Update run JSON with TLA+ metrics
     try {
       runData.tla_metrics = metrics;
@@ -280,7 +318,23 @@ router.post('/render/tla', async (req, res) => {
         cfg: `/flows/${name}/${moduleName}.cfg`,
         trace: validation.tracePath ? `/flows/${name}/trace.json` : null,
       };
-      await fsp.writeFile(runPath, JSON.stringify(runData, null, 2), 'utf8');
+      runData.specula_artifacts = {
+        base_tla: `/flows/${name}/specula/base.tla`,
+        base_cfg: `/flows/${name}/specula/base.cfg`,
+        modeling_brief_md: `/flows/${name}/specula/modeling-brief.md`,
+        modeling_brief_json: `/flows/${name}/specula/modeling-brief.json`,
+        mc_tla: `/flows/${name}/specula/MC.tla`,
+        mc_cfg: `/flows/${name}/specula/MC.cfg`,
+        trace_tla: `/flows/${name}/specula/Trace.tla`,
+        trace_cfg: `/flows/${name}/specula/Trace.cfg`,
+        instrumentation_spec: `/flows/${name}/specula/instrumentation-spec.md`,
+        validation_loop: `/flows/${name}/specula/validation-loop.json`,
+        hunt_cfgs: speculaBundle.huntConfigs.map((config) => `/flows/${name}/specula/${config.fileName}`),
+      };
+      runData.tla_env = {
+        claude: speculaLlm.getConfig(),
+      };
+      await persistRunData(runPath, runData);
     } catch (err) {
       logger.warn('tla.run_update_failed', { error: err.message });
     }
@@ -328,12 +382,45 @@ router.post('/render/tla', async (req, res) => {
         cfg: `/flows/${name}/${moduleName}.cfg`,
         trace: validation.tracePath ? `/flows/${name}/trace.json` : null,
         dump: `/tla-dump/${name}/`,
+        specula: {
+          root: `/flows/${name}/specula/`,
+          modeling_brief_md: `/flows/${name}/specula/modeling-brief.md`,
+          modeling_brief_json: `/flows/${name}/specula/modeling-brief.json`,
+          mc_tla: `/flows/${name}/specula/MC.tla`,
+          mc_cfg: `/flows/${name}/specula/MC.cfg`,
+          trace_tla: `/flows/${name}/specula/Trace.tla`,
+          trace_cfg: `/flows/${name}/specula/Trace.cfg`,
+          instrumentation_spec: `/flows/${name}/specula/instrumentation-spec.md`,
+          validation_loop: `/flows/${name}/specula/validation-loop.json`,
+          hunt_cfgs: speculaBundle.huntConfigs.map((config) => `/flows/${name}/specula/${config.fileName}`),
+        },
+      },
+      specula: {
+        upstream: speculaBundle.upstream,
+        env: speculaLlm.getConfig(),
+        modeling_brief: speculaBundle.modelingBrief,
+        modeling_brief_markdown: speculaBundle.modelingBriefMarkdown,
+        mc: {
+          module_name: speculaBundle.mc.moduleName,
+          source: speculaBundle.mc.source,
+          cfg_source: speculaBundle.mc.cfgSource,
+          hunt_configs: speculaBundle.huntConfigs,
+        },
+        trace_spec: {
+          module_name: speculaBundle.trace.moduleName,
+          source: speculaBundle.trace.source,
+          cfg_source: speculaBundle.trace.cfgSource,
+        },
+        instrumentation: {
+          markdown: speculaBundle.instrumentationMarkdown,
+        },
+        validation_loop: speculaBundle.validationLoop,
       },
       progressionUpdate: {
         stage: 'tla',
         unlockedStages: validation.sany.valid
-          ? ['idea', 'md', 'mmd', 'tla', 'ts']
-          : ['idea', 'md', 'mmd', 'tla'],
+          ? ['idea', 'md', 'mmd', 'tsx', 'tla', 'ts']
+          : ['idea', 'md', 'mmd', 'tsx', 'tla'],
         nextRecommended: validation.sany.valid ? 'ts' : undefined,
         confidence: tlaConfidence,
       },

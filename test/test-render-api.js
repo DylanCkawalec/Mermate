@@ -83,10 +83,12 @@ describe('POST /api/render', () => {
       assert.ok(res.body.progressionUpdate, 'progressionUpdate must be present when run_id exists');
       assert.equal(res.body.progressionUpdate.stage, 'mmd');
       assert.ok(Array.isArray(res.body.progressionUpdate.unlockedStages));
+      assert.ok(res.body.progressionUpdate.unlockedStages.includes('tsx'), 'TSX must be unlocked after Mermaid render');
       assert.ok(res.body.progressionUpdate.unlockedStages.includes('tla'), 'TLA+ must be unlocked after Mermaid render');
       assert.equal(typeof res.body.progressionUpdate.confidence, 'number');
       assert.ok(res.body.progressionUpdate.confidence > 0 && res.body.progressionUpdate.confidence <= 1);
     }
+    assert.ok(res.body.paths.architecture_md);
   });
 
   it('returns 400 for missing mermaid_source', async () => {
