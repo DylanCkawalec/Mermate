@@ -1,145 +1,23 @@
 {
   "version": 1,
   "skills": {
-    "agent-browser": {
-      "source": "vercel-labs/agent-browser",
-      "sourceType": "github",
-      "computedHash": "1fdc3ae39490000d36b242168c64db00c1654fe1a0e45a1b12e93b38cc21e32c"
-    },
-    "backend-patterns": {
-      "source": "affaan-m/everything-claude-code",
-      "sourceType": "github",
-      "computedHash": "24d5803368c402ed5a72541dbbd0cb9975c56e574cdf4b45332f54991186301a"
-    },
-    "capability-evolver": {
-      "source": "autogame-17/capability-evolver",
-      "sourceType": "github",
-      "computedHash": "4d2f036bf7e4d04333c94ff080b590171b7ea069b9f00397006f0344500487ac"
-    },
-    "code-review-expert": {
-      "source": "sanyuan0704/code-review-expert",
-      "sourceType": "github",
-      "computedHash": "6c2fe31851a34e63e033257527eab04eea835ca1cf4c4276d1392a323e36e377"
-    },
-    "crafting-effective-readmes": {
-      "source": "softaworks/agent-toolkit",
-      "sourceType": "github",
-      "computedHash": "c931a8c22160e8925400778fcb2266b5d1df762f3052edba65f72479f79f2d6c"
-    },
-    "cryptography": {
-      "source": "melodic-software/claude-code-plugins",
-      "sourceType": "github",
-      "computedHash": "0b3067f1a8fa54e4aacb6129962a59b7349fe4db4f2004eb436d1693009eec24"
-    },
-    "engineering-advanced-skills": {
-      "source": "alirezarezvani/claude-skills",
-      "sourceType": "github",
-      "computedHash": "33b21059b523ff230a491d985ea50d9fe1d489151a0731e7c173f1d49e787ff0"
-    },
-    "find-skills": {
-      "source": "vercel-labs/skills",
-      "sourceType": "github",
-      "computedHash": "d31e234f0c90694a670222cdd1dafa853e051d7066beda389f1097c22dadd461"
-    },
-    "hybrid-cloud-networking": {
-      "source": "wshobson/agents",
-      "sourceType": "github",
-      "computedHash": "813d61a05d54745c2a1a9e5871218d14e556b9a4088631aba0b7118b20e30543"
-    },
-    "improve-codebase-architecture": {
-      "source": "mattpocock/skills",
-      "sourceType": "github",
-      "computedHash": "76d07c4c0bebc162cc76ca7494bfe7a90e279f35832f7ce6dfc4ce16518fd560"
-    },
-    "latex-paper-en": {
-      "source": "bahayonghang/academic-writing-skills",
-      "sourceType": "github",
-      "computedHash": "b5f02c771db97e8a96dedd05bd4a3d57c4ccd97a3d47434ef7a3cadd28097d05"
-    },
-    "neon-postgres": {
-      "source": "neondatabase/agent-skills",
-      "sourceType": "github",
-      "computedHash": "391693eee67001639ab65474df185da3ea5cf9ee4b99badecfd64561113edbb4"
-    },
-    "nvidia-nemoclaw": {
-      "source": "aradotso/trending-skills",
-      "sourceType": "github",
-      "computedHash": "6932608be46d8296e3e66d4e5ce0a491a10c188fb734c09e497c2734ba6458f8"
-    },
-    "orbstack-best-practices": {
-      "source": "0xbigboss/claude-code",
-      "sourceType": "github",
-      "computedHash": "a8897604fd876485e7d2548ce4f23c41e22e971bfd9c9d08db6543437a64eee8"
-    },
-    "pdf": {
+    "anthropic-skills": {
       "source": "anthropics/skills",
       "sourceType": "github",
-      "computedHash": "cfbc539377088ca7e44a813b30c306327385bbd973cd7a721e1743f60837dd62"
+      "computedHash": "deaf4274f088f1ae086080bb1f8480d747489f010ec6fd74515ebf23905274d1",
+      "curatedFrom": [
+        "doc-coauthoring",
+        "mcp-builder",
+        "skill-creator"
+      ],
+      "note": "Manual curation into .agents/skills/anthropic-skills"
     },
-    "postgresql-expert": {
-      "source": "personamanagmentlayer/pcl",
+    "claude-md-improver": {
+      "source": "anthropics/claude-plugins-official",
       "sourceType": "github",
-      "computedHash": "716c442b158e393a7b437a70e52764da97bd2a265717c87069d3552e26b9fb5a"
-    },
-    "proactive-self-improving-agent": {
-      "source": "yanhongxi-openclaw/proactive-self-improving-agent",
-      "sourceType": "github",
-      "computedHash": "222b091845df24469f3ecf63b1a24c5e88df0ac7e05565f656573a1413e3f280"
-    },
-    "python-design-patterns": {
-      "source": "wshobson/agents",
-      "sourceType": "github",
-      "computedHash": "b70500bae0d16740d8a359be63c4645a0ab0f9b839d11d181c45d20958313698"
-    },
-    "python-sdk": {
-      "source": "inferen-sh/skills",
-      "sourceType": "github",
-      "computedHash": "c2b779bc845089d0ac9109f976a5686dc0f10a8b9450792e9a85d9404b2f2f3e"
-    },
-    "rust-engineer": {
-      "source": "404kidwiz/claude-supercode-skills",
-      "sourceType": "github",
-      "computedHash": "414e36b6c940659a486b24a9486fa0fddc0b5a9c5d9299069859541981c4cab9"
-    },
-    "rust-pro": {
-      "source": "sickn33/antigravity-awesome-skills",
-      "sourceType": "github",
-      "computedHash": "efe90b6c467a058dc53de4bb4238a56228f6f3a4098ffec8128120750018cd0f"
-    },
-    "scrapling-official": {
-      "source": "d4vinci/scrapling",
-      "sourceType": "github",
-      "computedHash": "a34ef8426ff94f495aad6edc72efe7210410142911b517c2831a032c1974c307"
-    },
-    "skill-creator": {
-      "source": "anthropics/skills",
-      "sourceType": "github",
-      "computedHash": "b122f4d1e91aa1d83027e050b5b37c3156203ee85458d7b1360bc48167c9e02a"
-    },
-    "tidy-laptop-folders": {
-      "source": "mahavirteraiya/tidy-laptop-folders",
-      "sourceType": "github",
-      "computedHash": "ced083f4434092a08fa9bc93200b46487bcdb273c664548a51f00bc96e26f97c"
-    },
-    "typescript-advanced-types": {
-      "source": "wshobson/agents",
-      "sourceType": "github",
-      "computedHash": "3a3be8c925f96ac4e1280db28a01677e7ca5197f3792de2bbf35ab3bb324b6dd"
-    },
-    "typescript-expert": {
-      "source": "sickn33/antigravity-awesome-skills",
-      "sourceType": "github",
-      "computedHash": "f0f625132cf53116cb27725926e2c99f142861b9063d459938dd85fbf8e2bf61"
-    },
-    "ui-ux-pro-max": {
-      "source": "nextlevelbuilder/ui-ux-pro-max-skill",
-      "sourceType": "github",
-      "computedHash": "0a413bf988d06481f69bb81df2070741c3ba12dd9f1be2706d57f259c905992d"
-    },
-    "writing-skills": {
-      "source": "obra/superpowers",
-      "sourceType": "github",
-      "computedHash": "c0a92e629e39ea91b1f54da67a6aa92723008a8ef5b500c6de078f55485937c7"
+      "computedHash": "d6707ed0467d9664d0f9d2c44724c8fb1814475ec6d3c62a5d54bbbe807e0775",
+      "integratedInto": "anthropic-skills",
+      "directClaudeInstall": ".claude/skills/claude-md-improver"
     }
   }
 }

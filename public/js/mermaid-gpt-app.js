@@ -483,28 +483,30 @@
 
     if (cfg.showUpload) {
       btnUpload.classList.add('visible');
-      fileUpload.setAttribute('accept', cfg.accept || '');
+      if (fileUpload) fileUpload.setAttribute('accept', cfg.accept || '');
     } else {
       btnUpload.classList.remove('visible');
     }
 
-    if (mode === 'idea' && window.MermaidCopilot) {
-      if (copilot) copilot.destroy();
-      copilot = new window.MermaidCopilot(input, {
-        apiBase: COPILOT_API_BASE,
-        onAccept: updateBadges,
-        onProfileUpdate: _onProfileUpdate,
-      });
-    } else if (copilot) {
-      copilot.destroy();
-      copilot = null;
-    }
+    try {
+      if (mode === 'idea' && window.MermaidCopilot) {
+        if (copilot) copilot.destroy();
+        copilot = new window.MermaidCopilot(input, {
+          apiBase: COPILOT_API_BASE,
+          onAccept: updateBadges,
+          onProfileUpdate: _onProfileUpdate,
+        });
+      } else if (copilot) {
+        copilot.destroy();
+        copilot = null;
+      }
+    } catch { copilot = null; }
 
     _rebuildAgentDropdown();
     syncUiGuidance();
   }
 
-  document.querySelectorAll('.sidebar-mode-btn').forEach(btn => {
+  document.querySelectorAll('.mode-btn').forEach(btn => {
     btn.addEventListener('click', () => setMode(btn.dataset.mode));
   });
 
@@ -653,7 +655,7 @@
     syncUiGuidance();
   }
 
-  function showResult(paths, name, runId) {
+  function showResult(paths, name, runId, metrics) {
     currentPaths = paths;
     currentDiagramName = name || 'diagram';
     currentRunId = runId || null;
@@ -694,6 +696,14 @@
 
     _persistSession();
     syncUiGuidance();
+
+    _playRenderReveal({
+      stage: currentMode,
+      isFinal: false,
+      diagramName: currentDiagramName,
+      metrics: metrics || null,
+      paths: currentPaths,
+    });
   }
 
   // ============================================================
@@ -1134,7 +1144,7 @@
       const shouldAnimate = data.enhanced && data.compiled_source && data.content_state !== 'mmd';
       if (shouldAnimate) { setLoading(false); await animateRenderTransition(source, data.compiled_source); }
 
-      showResult(data.paths, data.diagram_name, data.run_id);
+      showResult(data.paths, data.diagram_name, data.run_id, data.metrics);
 
       const finalText = shouldAnimate ? data.compiled_source : source;
       if (copilot) copilot.setRenderedHash(finalText);
@@ -1413,6 +1423,21 @@
   btnResetZoom.addEventListener('click', () => { if (pzFront) pzFront.fitToViewport(); if (pzBack) pzBack.fitToViewport(); });
   btnDismissError.addEventListener('click', hideError);
 
+  // ---- Enhance toggle (mirrors hidden chk-enhance checkbox) ----
+  const _btnEnhanceClick = document.getElementById('btn-enhance');
+  if (_btnEnhanceClick) {
+    _btnEnhanceClick.addEventListener('click', () => {
+      chkEnhance.checked = !chkEnhance.checked;
+      _btnEnhanceClick.classList.toggle('active', chkEnhance.checked);
+    });
+  }
+
+  // ---- Top-bar New Diagram button (mirrors sidebar btn-new-diagram) ----
+  const btnNewDiagramFloat = document.getElementById('btn-new-diagram-float');
+  if (btnNewDiagramFloat) {
+    btnNewDiagramFloat.addEventListener('click', () => btnNewDiagram.click());
+  }
+
   // ---- Max mode toggle ----
   if (btnMax) {
     btnMax.addEventListener('click', () => {
@@ -1459,11 +1484,37 @@
     syncUiGuidance();
   }
 
+  function _positionAgentDropdown() {
+    if (!btnAgentToggle || !agentDropdown) return;
+    const r = btnAgentToggle.getBoundingClientRect();
+    const vh = window.innerHeight;
+    agentDropdown.style.left = r.left + 'px';
+    agentDropdown.style.maxHeight = '';
+
+    const dropH = agentDropdown.scrollHeight || 200;
+    const spaceBelow = vh - r.bottom - 8;
+    const spaceAbove = r.top - 8;
+
+    if (spaceBelow >= dropH || spaceBelow >= spaceAbove) {
+      agentDropdown.style.top = (r.bottom + 8) + 'px';
+      agentDropdown.style.bottom = '';
+      if (spaceBelow < dropH) agentDropdown.style.maxHeight = spaceBelow + 'px';
+    } else {
+      agentDropdown.style.top = '';
+      agentDropdown.style.bottom = (vh - r.top + 8) + 'px';
+      if (spaceAbove < dropH) agentDropdown.style.maxHeight = spaceAbove + 'px';
+    }
+  }
+
   if (btnAgentToggle) {
     btnAgentToggle.addEventListener('click', (e) => {
       e.stopPropagation();
       if (agentModeActive) { setAgentMode(null); }
-      else { agentDropdown.hidden = !agentDropdown.hidden; }
+      else {
+        const wasHidden = agentDropdown.hidden;
+        agentDropdown.hidden = !wasHidden;
+        if (!agentDropdown.hidden) _positionAgentDropdown();
+      }
     });
   }
 
@@ -1504,7 +1555,7 @@
         if (state === 'running') { notesDirty = false; btnAgentRun.textContent = 'Stop Agent'; btnAgentRun.classList.add('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = false; }
         else if (state === 'awaiting_notes') { input.readOnly = false; btnAgentRun.hidden = true; }
         else if (state === 'finalizing') { notesDirty = false; input.readOnly = true; btnAgentRun.hidden = true; setLoading(true, 'text'); }
-        else if (state === 'idle') { btnAgentRun.textContent = 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = false; input.readOnly = false; setLoading(false); }
+        else if (state === 'idle') { btnAgentRun.textContent = 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = !agentModeActive; btnRender.hidden = agentModeActive; input.readOnly = false; setLoading(false); }
         syncUiGuidance();
       },
     });
