@@ -2,15 +2,20 @@
   "mcpServers": {
     "mermate_python": {
       "command": "/Users/dylanckawalec/Desktop/developer/mermaid/.venv-mcp/bin/python",
-      "args": [
-        "-m",
-        "mcp_service"
-      ],
+      "args": ["-m", "mcp_service"],
       "cwd": "/Users/dylanckawalec/Desktop/developer/mermaid",
       "env": {
         "MERMATE_URL": "http://127.0.0.1:3333",
         "OPENCLAW_URL": "http://127.0.0.1:8787"
       }
+    },
+    "opseeq": {
+      "url": "http://localhost:9090/mcp",
+      "transport": "sse"
+    },
+    "synth": {
+      "command": "synthesis-mcp",
+      "transport": "stdio"
     }
   }
 }
