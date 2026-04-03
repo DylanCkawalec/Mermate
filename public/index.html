@@ -31,18 +31,51 @@
     </div>
   </div>
 
-  <!-- Sidebar -->
+  <!-- Sidebar (flippable: diagrams front / Opseeq chat back) -->
   <aside id="sidebar" class="sidebar" role="navigation" aria-label="Diagram history">
-    <div class="sidebar-header">
-      <h1 class="sidebar-title">MERMATE</h1>
-      <button id="btn-new-diagram" class="btn btn-new" aria-label="Create new diagram">+ New Diagram</button>
+    <div class="sidebar-flip-container">
+      <!-- Front: diagram history -->
+      <div class="sidebar-face sidebar-face-front">
+        <div class="sidebar-header">
+          <h1 class="sidebar-title">MERMATE</h1>
+          <div class="sidebar-header-actions">
+            <button id="btn-new-diagram" class="btn btn-new" aria-label="Create new diagram">+ New</button>
+            <button id="btn-sidebar-flip" class="btn-sidebar-flip" aria-label="Open Opseeq guide" title="Opseeq Guide">
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.5"/><path d="M6 6.5a2 2 0 1 1 2 2v1"/><circle cx="8" cy="12" r="0.5" fill="currentColor"/></svg>
+            </button>
+          </div>
+        </div>
+        <input type="checkbox" id="chk-enhance" hidden />
+        <nav id="sidebar-list" class="sidebar-list" aria-label="Previous diagrams"></nav>
+      </div>
+      <!-- Back: Opseeq chat -->
+      <div class="sidebar-face sidebar-face-back">
+        <div class="sidebar-header">
+          <h1 class="sidebar-title">Opseeq Guide</h1>
+          <div class="sidebar-header-actions">
+            <button id="btn-sidebar-unflip" class="btn-sidebar-flip" aria-label="Back to diagrams" title="Back to diagrams">
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="10 3 5 8 10 13"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="sidebar-opseeq-status" class="sidebar-opseeq-status">Connecting...</div>
+        <iframe id="sidebar-opseeq-frame" class="sidebar-opseeq-frame" title="Opseeq Guide Chat" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+      </div>
     </div>
-    <input type="checkbox" id="chk-enhance" hidden />
-    <nav id="sidebar-list" class="sidebar-list" aria-label="Previous diagrams"></nav>
   </aside>
 
   <!-- Main content -->
   <main class="main" role="main">
+    <!-- Auto Guide beacon bar -->
+    <div id="autoguide-beacon" class="autoguide-beacon" hidden>
+      <button class="beacon-seg" data-stage="idea" data-state="active"></button>
+      <button class="beacon-seg" data-stage="md" data-state="pending"></button>
+      <button class="beacon-seg" data-stage="mmd" data-state="pending"></button>
+      <button class="beacon-seg" data-stage="tla" data-state="locked"></button>
+      <button class="beacon-seg" data-stage="ts" data-state="locked"></button>
+    </div>
+    <!-- Auto Guide tooltip -->
+    <div id="autoguide-tooltip" class="autoguide-tooltip" hidden></div>
     <!-- Sticky top bar -->
     <div class="top-bar">
       <div class="mode-selector" role="radiogroup" aria-label="Input mode">
@@ -68,6 +101,17 @@
           <span class="mode-label">TypeScript</span>
           <span class="stage-badge" data-stage="ts" hidden></span>
         </button>
+      </div>
+      <div id="pipeline-progress" class="pipeline-progress" aria-label="Pipeline progress">
+        <button class="pipeline-segment" data-stage="idea" data-state="active" title="Idea">idea</button>
+        <span class="pipeline-arrow">&rarr;</span>
+        <button class="pipeline-segment" data-stage="md" data-state="pending" title="Markdown">md</button>
+        <span class="pipeline-arrow">&rarr;</span>
+        <button class="pipeline-segment" data-stage="mmd" data-state="pending" title="Mermaid">mmd</button>
+        <span class="pipeline-arrow">&rarr;</span>
+        <button class="pipeline-segment" data-stage="tla" data-state="locked" title="TLA+">tla+</button>
+        <span class="pipeline-arrow">&rarr;</span>
+        <button class="pipeline-segment" data-stage="ts" data-state="locked" title="TypeScript">ts</button>
       </div>
       <button id="btn-new-diagram-float" class="btn-new-float" aria-label="New diagram">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -156,8 +200,8 @@ Type /talk to speak your idea"
       </div>
 
       <div class="input-controls-secondary">
-        <button id="btn-openclaw" class="btn btn-secondary btn-openclaw" aria-label="Open NemoClaw builder">
-          NemoClaw
+        <button id="btn-openclaw" class="btn btn-secondary btn-openclaw" aria-label="Open Opseeq gateway">
+          Opseeq
         </button>
         <span id="openclaw-status-chip" class="next-action-chip openclaw-status-chip" data-state="loading" hidden aria-live="polite">Checking claw…</span>
       </div>
@@ -307,8 +351,8 @@ Type /talk to speak your idea"
     <div class="openclaw-dialog-shell">
       <div class="openclaw-dialog-header">
         <div>
-          <p class="openclaw-dialog-eyebrow">NemoClaw Wrapper</p>
-          <h3>OpenClaw Inside Mermate</h3>
+          <p class="openclaw-dialog-eyebrow">Opseeq Gateway</p>
+          <h3>Opseeq Inside Mermate</h3>
         </div>
         <div class="openclaw-dialog-actions">
           <button id="btn-openclaw-refresh" class="btn btn-secondary">Refresh</button>
@@ -334,7 +378,7 @@ Type /talk to speak your idea"
           <strong id="openclaw-agent-summary">Loading Mermate specialists…</strong>
         </div>
       </div>
-      <iframe id="openclaw-frame" class="openclaw-frame" title="NemoClaw Builder"></iframe>
+      <iframe id="openclaw-frame" class="openclaw-frame" title="Opseeq Builder"></iframe>
     </div>
   </dialog>
 
@@ -351,5 +395,6 @@ Type /talk to speak your idea"
   <script src="/js/mermaid-gpt-speech.js"></script>
   <script src="/js/mermaid-gpt-app.js"></script>
   <script src="/js/mermate-openclaw-bridge.js"></script>
+  <script src="/js/mermate-autoguide.js"></script>
 </body>
 </html>

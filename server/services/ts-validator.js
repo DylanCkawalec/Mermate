@@ -424,6 +424,7 @@ async function fullValidation(tsSource, harnessSource, tsDir, fileBase, coverage
         tests: {
           checked: true,
           success: false,
+          passed: false,
           wallClockMs: testResult.wallClockMs,
           timedOut: testResult.timedOut,
           repairs: testRepairs,
@@ -448,6 +449,7 @@ async function fullValidation(tsSource, harnessSource, tsDir, fileBase, coverage
       tests: {
         checked: true,
         success: true,
+        passed: true,
         wallClockMs: testResult.wallClockMs,
         timedOut: false,
         repairs: testRepairs,

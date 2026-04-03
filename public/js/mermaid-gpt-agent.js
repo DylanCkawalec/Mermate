@@ -18,6 +18,8 @@ const PHASE_LABELS = {
   preview:             'Building preview',
   incorporating_notes: 'Applying your notes',
   finalizing:          'Final render',
+  tla_build:           'Generating TLA+ specification',
+  ts_build:            'Compiling TypeScript runtime',
   complete:            'Complete',
 };
 
@@ -443,11 +445,39 @@ window.MermaidAgent = class MermaidAgent {
             'system', 'render:complete',
           );
           this.onRenderResult(event);
-          this._showContinuationCTA('tla', 'Diagram complete', 'Continue to TLA+ Specification');
+          if (this._mode !== 'full-build') {
+            this._showContinuationCTA('tla', 'Diagram complete', 'Continue to TLA+ Specification', { autoChain: true, delayMs: 3000 });
+          }
         } else {
           this._addNarrationLog(`Render failed  —  ${(event.error || 'unknown').slice(0, 45)}`, 'system', 'render:failed');
           this.onError(event.error || 'Render failed — try a simpler description or check your model connection');
         }
+        break;
+
+      case 'pipeline_stage':
+        this._markPreviousLogDone();
+        if (event.stage === 'tla') {
+          const tlaOk = event.success && event.sany_valid;
+          this._addNarrationLog(
+            tlaOk ? `TLA+ spec verified — SANY passed, ${event.violations || 0} violations` : `TLA+ stage ${event.success ? 'completed' : 'failed'}`,
+            'system', tlaOk ? 'tla:pass' : 'tla:fail',
+          );
+        } else if (event.stage === 'ts') {
+          this._addNarrationLog(
+            event.success ? `TypeScript compiled — tsc ${event.compile_ok ? 'pass' : 'fail'}, tests ${event.tests_ok ? 'pass' : 'fail'}` : `TypeScript stage failed`,
+            'system', event.success ? 'ts:pass' : 'ts:fail',
+          );
+        }
+        break;
+
+      case 'bundle_ready':
+        this._markPreviousLogDone();
+        this._closeCurrentPhase();
+        this._addNarrationLog(
+          `Full build complete — stages: ${(event.stages_completed || []).join(' → ')}`,
+          'system', 'bundle:ready',
+        );
+        if (this.onBundleReady) this.onBundleReady(event);
         break;
 
       case 'done':
@@ -492,8 +522,9 @@ window.MermaidAgent = class MermaidAgent {
 
   // ---- Continuation CTA ----
 
-  _showContinuationCTA(nextStage, label, buttonText) {
+  _showContinuationCTA(nextStage, label, buttonText, { autoChain = false, delayMs = 3000 } = {}) {
     this._removeContinuationCTA();
+    if (this._autoChainTimer) { clearTimeout(this._autoChainTimer); this._autoChainTimer = null; }
 
     const wrap = document.createElement('div');
     wrap.className = 'agent-continuation';
@@ -507,21 +538,41 @@ window.MermaidAgent = class MermaidAgent {
     btn.className = 'btn btn-continuation';
     btn.dataset.nextStage = nextStage;
     btn.textContent = buttonText;
-    btn.addEventListener('click', () => {
+
+    const fireContinue = () => {
+      if (this._autoChainTimer) { clearTimeout(this._autoChainTimer); this._autoChainTimer = null; }
       this._removeContinuationCTA();
       this.onContinue(nextStage);
-    });
+    };
 
+    btn.addEventListener('click', fireContinue);
     wrap.append(span, btn);
     this.panelLog.parentNode.insertBefore(wrap, this.notesWrap);
     this.panelLog.scrollTop = this.panelLog.scrollHeight;
+
+    if (autoChain) {
+      const countdown = document.createElement('span');
+      countdown.className = 'continuation-countdown';
+      let remaining = Math.ceil(delayMs / 1000);
+      countdown.textContent = ` (auto in ${remaining}s)`;
+      btn.appendChild(countdown);
+
+      const tick = () => {
+        remaining -= 1;
+        if (remaining <= 0) { fireContinue(); return; }
+        countdown.textContent = ` (auto in ${remaining}s)`;
+        this._autoChainTimer = setTimeout(tick, 1000);
+      };
+      this._autoChainTimer = setTimeout(tick, 1000);
+    }
   }
 
-  showTsContinuation() {
-    this._showContinuationCTA('ts', 'TLA+ verified', 'Continue to TypeScript Runtime');
+  showTsContinuation({ autoChain = false } = {}) {
+    this._showContinuationCTA('ts', 'TLA+ verified', 'Continue to TypeScript Runtime', { autoChain });
   }
 
   _removeContinuationCTA() {
+    if (this._autoChainTimer) { clearTimeout(this._autoChainTimer); this._autoChainTimer = null; }
     this.panel.querySelectorAll('.agent-continuation').forEach(el => el.remove());
   }
 

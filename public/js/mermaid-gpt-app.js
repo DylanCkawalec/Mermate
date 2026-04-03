@@ -15,7 +15,7 @@
   //  WorkflowOrchestrator — FSM + artifact graph + pub/sub
   // =========================================================================
 
-  const STAGES = ['idea', 'md', 'mmd', 'tla', 'ts'];
+  const STAGES = ['idea', 'md', 'mmd', 'tla', 'ts', 'rust'];
   const INPUT_STAGES = new Set(['idea', 'md', 'mmd']);
   const RENDER_ICON_SVGS = {
     idea: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5a4.5 4.5 0 0 1 2.25 8.4v1.85a1.25 1.25 0 0 1-1.25 1.25h-2a1.25 1.25 0 0 1-1.25-1.25V9.9A4.5 4.5 0 0 1 8 1.5z"/></svg>',
@@ -23,6 +23,7 @@
     mmd:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="5 4 2 8 5 12"/><polyline points="11 4 14 8 11 12"/><line x1="9" y1="2" x2="7" y2="14"/></svg>',
     tla:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5l5.5 3v7L8 14.5 2.5 11.5v-7z"/><path d="M5 8h6"/><path d="M8 5.5v5"/></svg>',
     ts:   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M6 6h4M8 6v5"/></svg>',
+    rust: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M5 8h6M8 5v6"/><circle cx="8" cy="8" r="2"/></svg>',
   };
 
   class WorkflowOrchestrator {
@@ -267,6 +268,7 @@
 
   const AGENT_MODES_BY_STAGE = {
     idea: [
+      { id: 'full-build',   icon: '\u{1F3D7}', name: 'Full Build',  desc: 'Idea \u2192 Diagram \u2192 TLA+ \u2192 TypeScript \u2192 Bundle' },
       { id: 'thinking',     icon: '\u{1F4A1}', name: 'Thinking',    desc: 'Build architecture from ideas or notes' },
       { id: 'code-review',  icon: '\u{1F50D}', name: 'Code Review', desc: 'Recover architecture from a codebase' },
       { id: 'optimize-mmd', icon: '\u26A1',     name: 'Optimize',    desc: 'Improve existing Mermaid or markdown' },
@@ -361,6 +363,12 @@
       enhanceDefault: false,
       showUpload: false,
     },
+    rust: {
+      placeholder: 'Rust binary source...\n\nGenerated after TypeScript verification.\nPress Render to compile with cargo and produce a standalone binary.',
+      hint: 'Edit the Rust source, then Render to compile the binary',
+      enhanceDefault: false,
+      showUpload: false,
+    },
   };
 
   const LOADING_MESSAGES = {
@@ -370,6 +378,7 @@
     hybrid: 'Repairing and compiling...',
     tla: 'Verifying TLA+ specification...',
     ts: 'Compiling TypeScript runtime...',
+    rust: 'Compiling Rust binary...',
   };
 
   const STATE_LABELS = {
@@ -458,7 +467,22 @@
         resultSection.hidden = false;
       }
     }
+
+    document.querySelectorAll('.pipeline-segment').forEach(seg => {
+      const stage = seg.dataset.stage;
+      if (stage === mode) seg.dataset.state = 'active';
+      else if (orchestrator.isCompleted(stage)) seg.dataset.state = 'completed';
+      else if (orchestrator.isUnlocked(stage)) seg.dataset.state = 'pending';
+      else seg.dataset.state = 'locked';
+    });
   }
+
+  document.querySelectorAll('.pipeline-segment').forEach(seg => {
+    seg.addEventListener('click', () => {
+      const stage = seg.dataset.stage;
+      if (orchestrator.isUnlocked(stage)) setMode(stage);
+    });
+  });
 
   orchestrator.subscribe(renderUI);
 
@@ -504,6 +528,19 @@
 
     _rebuildAgentDropdown();
     syncUiGuidance();
+
+    if ((mode === 'tla' || mode === 'ts') && currentRunId && currentDiagramName) {
+      const artifact = orchestrator.getArtifact(mode);
+      if (!artifact || !artifact.trim()) {
+        input.value = mode === 'tla'
+          ? `Generating TLA+ specification from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)}\nPress Render or wait for auto-start.`
+          : `Generating TypeScript runtime from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)}\nPress Render or wait for auto-start.`;
+        input.readOnly = true;
+        setTimeout(() => {
+          if (currentMode === mode && !isLoading) render();
+        }, 600);
+      }
+    }
   }
 
   document.querySelectorAll('.mode-btn').forEach(btn => {
@@ -549,14 +586,35 @@
       nextAction = hasInput ? 'Next: run agent' : (hasName ? 'Next: describe the architecture' : 'Next: enter prompt');
       tone = 'ready';
     } else if (currentMode === 'tla') {
-      hint = hasInput ? activeMode.hint : 'Switch to the TLA+ tab and press Render to generate and verify.';
-      nextAction = hasInput ? 'Next: render to verify TLA+' : 'Next: render to generate TLA+ spec';
-      tone = 'ready';
+      const hasRun = !!(currentRunId && currentDiagramName);
+      if (hasInput && hasInput !== input.value.startsWith('Generating')) {
+        hint = activeMode.hint;
+        nextAction = 'Next: render to verify TLA+';
+      } else if (hasRun) {
+        hint = `Ready to generate TLA+ for "${currentDiagramName}" — auto-starting...`;
+        nextAction = 'Next: generating TLA+ specification via Specula';
+        tone = 'busy';
+      } else {
+        hint = 'Render a diagram first — the TLA+ pipeline will auto-start when ready.';
+        nextAction = 'Next: go back to Simple Idea and render a diagram';
+      }
+      tone = tone || 'ready';
     } else if (currentMode === 'ts') {
-      hint = hasInput ? activeMode.hint : 'Switch to the TypeScript tab and press Render to generate.';
-      nextAction = hasInput ? 'Next: render to compile TypeScript' : 'Next: render to generate TypeScript runtime';
-      tone = 'ready';
+      const hasRun = !!(currentRunId && currentDiagramName);
+      if (hasInput && !input.value.startsWith('Generating')) {
+        hint = activeMode.hint;
+        nextAction = 'Next: render to compile TypeScript';
+      } else if (hasRun) {
+        hint = `Ready to generate TypeScript for "${currentDiagramName}" — auto-starting...`;
+        nextAction = 'Next: compiling TypeScript runtime';
+        tone = 'busy';
+      } else {
+        hint = 'Complete the TLA+ stage first — TypeScript generation will auto-start.';
+        nextAction = 'Next: go to TLA+ tab first';
+      }
+      tone = tone || 'ready';
     } else if (!hasInput) {
+      const enhanceLabel = chkEnhance.checked ? 'Enhance ON — AI will refine before rendering' : 'Enhance OFF — click Enhance to enable AI refinement';
       if (currentMode === 'idea') {
         hint = hasName ? 'Describe the system, actors, and flow direction.' : activeMode.hint;
         nextAction = hasName ? 'Next: describe the architecture' : 'Next: enter an idea';
@@ -565,6 +623,7 @@
       } else {
         nextAction = 'Next: paste Mermaid source or upload .mmd';
       }
+      if (currentMode === 'idea' || currentMode === 'md') hint += ' · ' + enhanceLabel;
     } else if (hasResult) {
       hint = currentMode === 'idea'
         ? 'Diagram rendered. Refine the prompt, rerender, or inspect the result.'
@@ -577,9 +636,9 @@
       if (currentMode === 'idea' && profileHint) {
         hint = profileHint;
       }
-      nextAction = currentMode === 'idea'
-        ? 'Next: render or press Cmd/Ctrl+Enter to enhance'
-        : 'Next: render the current source';
+      nextAction = (currentMode === 'idea' && chkEnhance.checked)
+        ? 'Next: \u2318+Enter to enhance, or Render to compile'
+        : (currentMode === 'idea' ? 'Next: render or press \u2318/Ctrl+Enter to enhance' : 'Next: render the current source');
     }
 
     inputHint.textContent = hint;
@@ -627,6 +686,25 @@
 
   function hideError() {
     errorBanner.hidden = true;
+  }
+
+  function _showFallbackBanner(events) {
+    const count = events.length;
+    const existing = document.getElementById('fallback-banner');
+    if (existing) existing.remove();
+
+    const bar = document.createElement('div');
+    bar.id = 'fallback-banner';
+    bar.style.cssText = 'position:fixed;bottom:12px;left:50%;transform:translateX(-50%);z-index:10000;' +
+      'background:linear-gradient(135deg,#1a1a2e,#16213e);color:#e0a040;padding:6px 14px;border-radius:6px;' +
+      'font-size:11px;font-family:monospace;display:flex;align-items:center;gap:8px;border:1px solid #e0a04040;' +
+      'box-shadow:0 2px 12px #00000060;opacity:0;transition:opacity .3s ease';
+    bar.innerHTML = `<span style="font-size:13px">⚡</span> <span>${count} call${count > 1 ? 's' : ''} used direct provider fallback (Opseeq gateway unavailable)</span>` +
+      `<button style="background:none;border:none;color:#e0a040;cursor:pointer;font-size:14px;padding:0 4px" onclick="this.parentElement.remove()">×</button>`;
+
+    document.body.appendChild(bar);
+    requestAnimationFrame(() => { bar.style.opacity = '1'; });
+    setTimeout(() => { if (bar.parentElement) { bar.style.opacity = '0'; setTimeout(() => bar.remove(), 300); } }, 8000);
   }
 
   function setLoading(on, contentState) {
@@ -704,6 +782,10 @@
       metrics: metrics || null,
       paths: currentPaths,
     });
+
+    if (INPUT_STAGES.has(currentMode) && currentRunId) {
+      _showStandaloneContinuation('tla', `Diagram "${currentDiagramName}" rendered`, 'Continue to TLA+ Specification');
+    }
   }
 
   // ============================================================
@@ -1084,20 +1166,83 @@
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && isFullscreen) toggleFullscreen(); });
 
   // =========================================================================
+  //  Standalone Continuation CTA (used outside agent mode)
+  // =========================================================================
+
+  function _showStandaloneContinuation(nextStage, label, buttonText) {
+    _removeStandaloneContinuation();
+    const container = artifactResults || resultSection;
+    if (!container) return;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'agent-continuation standalone-continuation';
+    wrap.dataset.continuationStage = nextStage;
+
+    const span = document.createElement('span');
+    span.className = 'continuation-label';
+    span.textContent = label;
+
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-continuation';
+    btn.dataset.nextStage = nextStage;
+    btn.textContent = buttonText;
+    btn.addEventListener('click', () => {
+      _removeStandaloneContinuation();
+      if (nextStage === 'download') {
+        downloadBundle();
+      } else if (orchestrator.isUnlocked(nextStage)) {
+        setMode(nextStage);
+      }
+    });
+
+    wrap.append(span, btn);
+    container.appendChild(wrap);
+  }
+
+  function _removeStandaloneContinuation() {
+    document.querySelectorAll('.standalone-continuation').forEach(el => el.remove());
+  }
+
+  // =========================================================================
   //  ZIP Download
   // =========================================================================
 
   async function downloadBundle() {
-    if (!currentPaths || !window.JSZip) return;
+    if (!window.JSZip) return;
+
     try {
-      const [pngRes, svgRes] = await Promise.all([fetch(currentPaths.png), fetch(currentPaths.svg)]);
-      const [pngBlob, svgBlob] = await Promise.all([pngRes.blob(), svgRes.blob()]);
       const zip = new JSZip();
-      zip.file(`${currentDiagramName}.png`, pngBlob);
-      zip.file(`${currentDiagramName}.svg`, svgBlob);
       const now = new Date();
       const dateStr = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, '0'), String(now.getDate()).padStart(2, '0')].join('-');
       const timeStr = String(now.getHours()).padStart(2, '0') + String(now.getMinutes()).padStart(2, '0');
+
+      if (currentRunId) {
+        try {
+          const bundleRes = await fetch(`/api/runs/${currentRunId}/bundle`);
+          const bundleData = await bundleRes.json();
+          if (bundleData.success && bundleData.files) {
+            for (const [filePath, b64] of Object.entries(bundleData.files)) {
+              zip.file(filePath, b64, { base64: true });
+            }
+            const zipName = `${dateStr}_${timeStr}_${bundleData.diagram_name || currentDiagramName}_full_bundle.zip`;
+            const content = await zip.generateAsync({ type: 'blob' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(content);
+            a.download = zipName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(a.href);
+            return;
+          }
+        } catch { /* fall through to basic bundle */ }
+      }
+
+      if (!currentPaths) return;
+      const [pngRes, svgRes] = await Promise.all([fetch(currentPaths.png), fetch(currentPaths.svg)]);
+      const [pngBlob, svgBlob] = await Promise.all([pngRes.blob(), svgRes.blob()]);
+      zip.file(`${currentDiagramName}.png`, pngBlob);
+      zip.file(`${currentDiagramName}.svg`, svgBlob);
       const zipName = `${dateStr}_${timeStr}_${currentDiagramName}_bundle.zip`;
       const content = await zip.generateAsync({ type: 'blob' });
       const a = document.createElement('a');
@@ -1146,6 +1291,11 @@
 
       showResult(data.paths, data.diagram_name, data.run_id, data.metrics);
 
+      // Surface direct-provider fallback events
+      if (data.fallback_events && data.fallback_events.length > 0) {
+        _showFallbackBanner(data.fallback_events);
+      }
+
       const finalText = shouldAnimate ? data.compiled_source : source;
       if (copilot) copilot.setRenderedHash(finalText);
 
@@ -1174,8 +1324,14 @@
 
   async function renderTla() {
     if (!currentRunId || !currentDiagramName) {
-      showError('Render a diagram first to generate a TLA+ specification.');
-      return;
+      const lastEntry = sidebar.getLatestWithRunId?.();
+      if (lastEntry?.run_id && lastEntry?.name) {
+        currentRunId = lastEntry.run_id;
+        currentDiagramName = lastEntry.name;
+      } else {
+        showError('No diagram available. Render a diagram first, then the TLA+ pipeline will auto-start.');
+        return;
+      }
     }
 
     hideError();
@@ -1191,6 +1347,7 @@
 
       orchestrator.setArtifact('tla', data.tla_source || '');
       input.value = data.tla_source || '';
+      input.readOnly = false;
 
       const statusEl = document.getElementById('tla-status');
       const sourceEl = document.getElementById('tla-source');
@@ -1259,8 +1416,12 @@
         orchestrator.updateFromBackend(data.progressionUpdate);
       }
 
-      if (data.sany?.valid && agent && typeof agent.showTsContinuation === 'function') {
-        agent.showTsContinuation();
+      if (data.sany?.valid) {
+        if (agent && typeof agent.showTsContinuation === 'function') {
+          agent.showTsContinuation({ autoChain: true });
+        } else {
+          _showStandaloneContinuation('ts', 'TLA+ verified — SANY passed', 'Continue to TypeScript Runtime');
+        }
       }
     } catch (err) {
       if (tlaResultsEl) {
@@ -1270,14 +1431,22 @@
         if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">Error: ${err.message}</span>`;
       }
     } finally {
+      input.readOnly = false;
       setLoading(false);
+      syncUiGuidance();
     }
   }
 
   async function renderTs() {
     if (!currentRunId || !currentDiagramName) {
-      showError('Verify with TLA+ first before generating TypeScript.');
-      return;
+      const lastEntry = sidebar.getLatestWithRunId?.();
+      if (lastEntry?.run_id && lastEntry?.name) {
+        currentRunId = lastEntry.run_id;
+        currentDiagramName = lastEntry.name;
+      } else {
+        showError('No TLA+ specification available. Complete the TLA+ stage first.');
+        return;
+      }
     }
 
     hideError();
@@ -1293,6 +1462,7 @@
 
       orchestrator.setArtifact('ts', data.ts_source || '');
       input.value = data.ts_source || '';
+      input.readOnly = false;
 
       if (artifactResults) artifactResults.hidden = false;
       if (tsResultsEl) tsResultsEl.hidden = false;
@@ -1341,6 +1511,10 @@
       if (data.progressionUpdate) {
         orchestrator.updateFromBackend(data.progressionUpdate);
       }
+
+      if (data.success) {
+        _showStandaloneContinuation('download', 'TypeScript compiled — pipeline complete', 'Download Full Bundle');
+      }
     } catch (err) {
       if (tsResultsEl) {
         if (artifactResults) artifactResults.hidden = false;
@@ -1349,7 +1523,9 @@
         if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">Error: ${err.message}</span>`;
       }
     } finally {
+      input.readOnly = false;
       setLoading(false);
+      syncUiGuidance();
     }
   }
 
@@ -1357,11 +1533,38 @@
   //  Render — single entry point dispatches by current stage
   // =========================================================================
 
+  async function renderRust() {
+    if (!currentRunId || !currentDiagramName) {
+      showError('Complete TypeScript stage first before compiling Rust binary.');
+      return;
+    }
+    hideError();
+    setLoading(true, 'rust');
+    try {
+      const res = await fetch('/api/render/rust', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ diagram_name: currentDiagramName, run_id: currentRunId }),
+      });
+      const data = await res.json();
+      orchestrator.setArtifact('rust', data.rust_source || '');
+      input.value = data.rust_source || '';
+      if (artifactResults) artifactResults.hidden = false;
+      resultSection.hidden = false;
+      if (data.progressionUpdate) orchestrator.updateFromBackend(data.progressionUpdate);
+    } catch (err) {
+      showError('Rust compilation error: ' + err.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function render() {
     if (isLoading || _renderAnimating) return;
 
     if (currentMode === 'tla') return renderTla();
     if (currentMode === 'ts') return renderTs();
+    if (currentMode === 'rust') return renderRust();
 
     if (INPUT_STAGES.has(currentMode)) {
       orchestrator.resetDownstream(currentMode);
@@ -1548,6 +1751,20 @@
         setMode(stage);
         setTimeout(() => render(), 300);
       },
+      onBundleReady: (event) => {
+        const completedStages = event.stages_completed || [];
+        if (completedStages.includes('tla')) {
+          orchestrator.updateFromBackend({
+            stage: 'tla',
+            unlockedStages: ['idea', 'md', 'mmd', 'tla', 'ts'],
+            confidence: event.tla_valid ? 0.9 : 0.4,
+          });
+        }
+        if (completedStages.includes('ts')) {
+          orchestrator.updateFromBackend({ stage: 'ts', confidence: event.ts_compiled ? 0.9 : 0.3 });
+        }
+        _showStandaloneContinuation('download', `Full build complete — ${completedStages.join(' \u2192 ')}`, 'Download Full Bundle');
+      },
       onComplete: () => { agentState = 'idle'; btnAgentRun.textContent = 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; input.readOnly = false; syncUiGuidance(); },
       onError: (msg) => { agentState = 'idle'; notesDirty = false; showError(msg); btnAgentRun.textContent = 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; input.readOnly = false; setLoading(false); syncUiGuidance(); },
       onStateChange: (state) => {
@@ -1620,6 +1837,24 @@
     .then(data => { if (data.maxAvailable && btnMax) btnMax.classList.add('visible'); })
     .catch(() => {});
 
+  fetch('/api/render/tla/status')
+    .then(r => r.json())
+    .then(data => {
+      const tlaBtn = document.querySelector('.mode-btn[data-mode="tla"]');
+      if (!tlaBtn) return;
+      const speculaReady = data.specula?.apiKeyPresent && data.available;
+      if (speculaReady) {
+        tlaBtn.dataset.specula = 'ready';
+        tlaBtn.title = `TLA+ — Specula ready (${data.specula.model})`;
+      } else {
+        tlaBtn.dataset.specula = 'unavailable';
+        tlaBtn.title = data.specula?.apiKeyPresent
+          ? 'TLA+ — Java/TLC not available'
+          : 'TLA+ — Specula unavailable (set CLAUDE_API_KEY)';
+      }
+    })
+    .catch(() => {});
+
   fetch('/api/diagrams')
     .then(r => r.json())
     .then(data => {
@@ -1632,5 +1867,32 @@
       }
     })
     .catch(() => {});
+
+  // =========================================================================
+  //  State Bus — read-only facade for external modules (autoguide, etc.)
+  // =========================================================================
+
+  const _busState = {
+    get currentMode() { return currentMode; },
+    get isLoading() { return isLoading; },
+    get agentState() { return agentState; },
+    get agentModeActive() { return agentModeActive; },
+    get selectedAgentMode() { return selectedAgentMode; },
+    get currentRunId() { return currentRunId; },
+    get currentDiagramName() { return currentDiagramName; },
+    get currentPaths() { return currentPaths; },
+    get maxMode() { return maxMode; },
+    get enhanceChecked() { return chkEnhance.checked; },
+    get notesDirty() { return notesDirty; },
+    get hasInput() { return !!(input.value || '').trim(); },
+    get hasName() { return !!diagramNameInput?.value?.trim(); },
+    get hasResult() { return !!currentPaths; },
+    orchestrator: {
+      get state() { return Object.freeze({ ...orchestrator.state }); },
+      isUnlocked(s) { return orchestrator.isUnlocked(s); },
+      isCompleted(s) { return orchestrator.isCompleted(s); },
+    },
+  };
+  Object.defineProperty(window, '__mermate', { value: Object.freeze(_busState), configurable: false });
 
 })();

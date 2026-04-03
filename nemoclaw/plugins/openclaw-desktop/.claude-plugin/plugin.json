@@ -1,7 +1,0 @@
-{
-  "name": "openclaw-desktop",
-  "version": "0.2.0",
-  "description": "Local Claude Code plugin for the OpenClaw desktop wrapper, NemoClaw, Ollama, and Mermate.",
-  "skills": "./skills/",
-  "mcpServers": "./.mcp.json"
-}

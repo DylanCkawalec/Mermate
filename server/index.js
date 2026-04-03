@@ -80,6 +80,11 @@ const tsRouter = require('./routes/ts');
 const tsxRouter = require('./routes/tsx');
 const searchRouter = require('./routes/search');
 const openclawRouter = require('./routes/openclaw');
+const bundleRouter = require('./routes/bundle');
+const guideRouter = require('./routes/guide');
+const artifactsRouter = require('./routes/artifacts');
+const rustRouter = require('./routes/rust');
+const traceRouter = require('./routes/trace');
 app.use('/api', renderRouter);
 app.use('/api', agentRouter);
 app.use('/api', transcribeRouter);
@@ -88,6 +93,11 @@ app.use('/api', tsRouter);
 app.use('/api', tsxRouter);
 app.use('/api', searchRouter);
 app.use('/api', openclawRouter);
+app.use('/api', bundleRouter);
+app.use('/api', guideRouter);
+app.use('/api', artifactsRouter);
+app.use('/api', rustRouter);
+app.use('/api', traceRouter);
 
 // Run retention cleanup on startup (non-blocking)
 const runTracker = require('./services/run-tracker');

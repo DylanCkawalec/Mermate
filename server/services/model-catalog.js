@@ -111,6 +111,9 @@ const Stage = Object.freeze({
   COMPOSE_TS:        'compose:ts',
   REPAIR_TS:         'repair:ts',
   VALIDATE_TS:       'validate:ts',
+  COMPOSE_RUST:      'compose:rust',
+  REPAIR_RUST:       'repair:rust',
+  GENERATE_ICON:     'generate:icon',
 });
 
 const STAGE_LEGACY_MAP = Object.freeze({
@@ -132,6 +135,9 @@ const STAGE_LEGACY_MAP = Object.freeze({
   compose_ts:        Stage.COMPOSE_TS,
   repair_ts:         Stage.REPAIR_TS,
   validate_ts:       Stage.VALIDATE_TS,
+  compose_rust:      Stage.COMPOSE_RUST,
+  repair_rust:       Stage.REPAIR_RUST,
+  generate_icon:     Stage.GENERATE_ICON,
 });
 
 function canonicalStage(legacyName) {
@@ -161,6 +167,9 @@ const CONTEXT_PROFILE = Object.freeze({
   [Stage.COMPOSE_TS]:      { avgIn: 6000,  avgOut: 9000  },
   [Stage.REPAIR_TS]:       { avgIn: 7000,  avgOut: 7000  },
   [Stage.VALIDATE_TS]:     { avgIn: 2500,  avgOut: 1500  },
+  [Stage.COMPOSE_RUST]:    { avgIn: 8000,  avgOut: 12000 },
+  [Stage.REPAIR_RUST]:     { avgIn: 8000,  avgOut: 8000  },
+  [Stage.GENERATE_ICON]:   { avgIn: 500,   avgOut: 500   },
 });
 
 const MAX_CONTEXT_WINDOW = 128000;
@@ -207,6 +216,9 @@ const STAGE_PRIORITY = Object.freeze({
   [Stage.COMPOSE_TS]:      Priority.HIGH,
   [Stage.REPAIR_TS]:       Priority.NORMAL,
   [Stage.VALIDATE_TS]:     Priority.NORMAL,
+  [Stage.COMPOSE_RUST]:    Priority.HIGH,
+  [Stage.REPAIR_RUST]:     Priority.NORMAL,
+  [Stage.GENERATE_ICON]:   Priority.LOW,
 });
 
 const PRIORITY_LABELS = ['CRITICAL', 'HIGH', 'NORMAL', 'LOW', 'BACKGROUND'];

@@ -80,6 +80,23 @@ async function exportRun(runId, runData) {
       if (await _safeCopy(hPath, path.join(dumpPath, 'runtime.harness.ts'))) copied.push('runtime.harness.ts');
     }
 
+    if (runData.specula_artifacts) {
+      const speculaDump = path.join(dumpPath, 'specula');
+      await fsp.mkdir(speculaDump, { recursive: true }).catch(() => {});
+      const speculaCopies = await Promise.all(
+        Object.entries(runData.specula_artifacts).map(async ([, relPath]) => {
+          if (!relPath || typeof relPath !== 'string') return null;
+          const absPath = path.join(PROJECT_ROOT, relPath.replace(/^\//, ''));
+          const basename = path.basename(relPath);
+          const ok = await _safeCopy(absPath, path.join(speculaDump, basename));
+          return ok ? `specula/${basename}` : null;
+        }),
+      );
+      for (const entry of speculaCopies) {
+        if (entry) copied.push(entry);
+      }
+    }
+
     const manifest = {
       run_id: runId,
       exported_at: new Date().toISOString(),

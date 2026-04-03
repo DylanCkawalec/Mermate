@@ -3,7 +3,14 @@
 const { Router } = require('express');
 
 const router = Router();
-const OPENCLAW_URL = (process.env.OPENCLAW_URL || 'http://127.0.0.1:8787').replace(/\/+$/, '');
+
+function _normalizeOpenclawBase() {
+  const raw = (process.env.OPENCLAW_URL || process.env.OPSEEQ_URL || 'http://localhost:9090').replace(/\/+$/, '');
+  // Management endpoints live at the service root, not under /v1.
+  return raw.endsWith('/v1') ? raw.slice(0, -3) : raw;
+}
+
+const OPENCLAW_URL = _normalizeOpenclawBase();
 
 async function _proxyJson(path, { method = 'GET', body, query } = {}) {
   const url = new URL(`${OPENCLAW_URL}${path}`);

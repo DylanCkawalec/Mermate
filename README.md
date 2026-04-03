@@ -18,24 +18,21 @@ Describe a system in plain English. Mermate compiles it into production-quality 
 
 Mermate ships **without an AI model**. It is a diagram compilation engine with a copilot layer. You bring the model.
 
+**Tandem protocol (MERMATE ↔ Opseeq):** shared `run_id` / `X-Request-Id`, stage traces, URL rules, gateway fallback, and idea-to-binary packaging are documented in [docs/tandem-opseeq-protocol.md](docs/tandem-opseeq-protocol.md).
+
 ---
 
 ## Verified local architecture
 
-This repo is also used as a sidecar for the local OpenClaw desktop wrapper in:
+Typical local stack:
 
-- [`nemoclaw/`](nemoclaw/) (OpenClaw / NemoClaw desktop wrapper in this repository)
+- **Opseeq** (optional): OpenAI-compatible gateway + management API on `http://127.0.0.1:9090` — set `OPSEEQ_URL` to that origin **without** `/v1` (see [docs/tandem-opseeq-protocol.md](docs/tandem-opseeq-protocol.md)).
+- **Ollama** (optional): local inference on `http://127.0.0.1:11434`
+- **Mermate**: idea → markdown → Mermaid → **TLA+** → **TypeScript runtime** → optional **Rust binary** and **macOS `.app`** on `http://127.0.0.1:3333`
+- **MCP**: Python bridge under `mcp_service/` with repo `.mcp.json` (virtualenv path may need adjusting after clone)
+- **Outputs**: diagram and formal artifacts under `flows/`; run lineage and traces under `runs/` (including `*.trace.json`); successful Rust packaging can copy a `.app` to the Desktop with a generated landing page and `skill.json` for agent consumption
 
-Current local architecture:
-
-- OpenClaw Desktop Console: chat UI + OpenShell bridge on `http://127.0.0.1:8787`
-- NemoClaw/OpenShell: managed sandbox execution inside `aoc-local`
-- Ollama: local inference on `http://127.0.0.1:11434`
-- Mermate: idea -> markdown -> Mermaid -> TLA+ -> TypeScript sidecar on `http://127.0.0.1:3333`
-- Claude Code: attached through MCP with both project `.mcp.json` and a local plugin marketplace entry
-- Generated app repos: created under a configurable output directory (for example `~/Desktop/developer/<repo-name>`) with a repo-local `run.sh` and Desktop launcher
-
-The wrapper currently uses Mermate as the architecture and formalization surface, not as the primary chat transport. It now also inherits this repo's `.env` as the architect-agent profile and scaffolds launchable desktop-window starter repos from successful runs.
+External OpenClaw desktop integrations can attach over MCP and HTTP using the `/api` routes listed below; they are not required for core Mermate operation.
 
 ## Verified model reality on this machine
 
@@ -99,29 +96,46 @@ Start with:
 cp .env.example .env
 ```
 
-Recommended `.env` for the OpenAI API path:
+Recommended `.env` for the OpenAI API path (inference via Opseeq):
 
 ```env
-MERMATE_AI_API_KEY=your_openai_api_key
-MERMATE_AI_PROVIDER=openai
-MERMATE_AI_MODEL=gpt-4o-mini
-MERMATE_AI_MAX_MODEL=gpt-4o
+OPENAI_API_KEY=sk-proj-YOUR_OPENAI_PROJECT_KEY_HERE
+MERMATE_AI_API_KEY=sk-proj-YOUR_OPENAI_PROJECT_KEY_HERE
+OPSEEQ_URL=http://localhost:9090
+# Optional: override inference base only (must include /v1)
+# OPENAI_BASE_URL=http://localhost:9090/v1
+DALLE_API_KEY=sk-proj-YOUR_OPENAI_PROJECT_KEY_HERE
+MERMATE_IMAGE_MODEL=gpt-image-1
+CLAUDE_API_KEY=sk-ant-YOUR_CLAUDE_KEY_HERE
+MERMATE_ORCHESTRATOR_MODEL=gpt-5.4
+MERMATE_WORKER_MODEL=gpt-5.2
+MERMATE_FAST_STRUCTURED_MODEL=gpt-4.1-mini
+MERMATE_AI_MODEL=gpt-5.2
+MERMATE_AI_MAX_MODEL=gpt-5.4
 MERMATE_AI_MAX_ENABLED=true
 ```
 
 What these do:
 
-- `MERMATE_AI_API_KEY`: enables the premium API provider
-- `MERMATE_AI_PROVIDER`: premium provider selector; `openai` is the default and recommended option
-- `MERMATE_AI_MODEL`: default premium model used for normal AI renders
-- `MERMATE_AI_MAX_MODEL`: stronger premium model used when Max mode is enabled
+- `OPENAI_API_KEY`: primary hosted-model key
+- `MERMATE_AI_API_KEY`: backward-compatible alias used by the runtime provider layer
+- `OPENAI_BASE_URL`: optional; OpenAI-compatible **inference** base (include `/v1`). If unset, the provider derives `…/v1` from `OPSEEQ_URL`
+- `OPSEEQ_URL`: **single service root** for Opseeq (no `/v1`). Used by the Opseeq bridge for `/health`, `/api/...`, and forwarding stage events; inference appends `/v1` internally
+- `DALLE_API_KEY` / `MERMATE_IMAGE_MODEL`: OpenAI Images API for packaged-app icon and hero assets (falls back to `OPENAI_API_KEY` if unset)
+- `CLAUDE_API_KEY`: Anthropic API for primary TLA+ authoring and optional TypeScript review in formal stages
+- `MERMATE_ORCHESTRATOR_MODEL`: strongest model used for final synthesis and merge
+- `MERMATE_WORKER_MODEL`: primary branch reasoning model
+- `MERMATE_FAST_STRUCTURED_MODEL`: fast structured / repair model
+- `MERMATE_AI_MODEL`: backward-compatible worker alias
+- `MERMATE_AI_MAX_MODEL`: stronger model used when Max mode is enabled
 - `MERMATE_AI_MAX_ENABLED`: turns Max mode on in the runtime provider layer
 
 Recommended starting setup:
 
-- Use `openai` for the premium provider
-- Keep `gpt-4o-mini` as the default model for cheaper iteration
-- Use `gpt-4o` as the Max model for final architect-grade renders
+- Set `OPSEEQ_URL` to the bare Opseeq origin; only set `OPENAI_BASE_URL` if you need a different inference base than `OPSEEQ_URL` + `/v1`
+- Keep `gpt-5.2` as the default worker model for branch reasoning
+- Use `gpt-5.4` as the orchestrator / Max model for final architect-grade renders
+- Keep `gpt-4.1-mini` as the fast structured model for repairs, routing, and narration
 - Leave local Ollama or the Python enhancer optional unless you specifically want a local-first workflow
 
 Optional local providers:
@@ -138,6 +152,8 @@ Provider behavior in the app today:
 - Copilot suggestions and text enhancement prefer local-first fallback: Ollama -> Python enhancer -> premium API
 - Render preparation prefers the strongest available provider path, with premium API first
 - Max mode uses `MERMATE_AI_MAX_MODEL` when `MERMATE_AI_MAX_ENABLED=true`
+- When premium traffic targets a gateway (e.g. Opseeq) and the gateway errors, the provider may fall back to **direct OpenAI**; the render API can return `fallback_events` and the UI shows a short notice
+- While a render run is active, premium requests send **`X-Request-Id`** set to the MERMATE **`run_id`** for log correlation
 - If no AI provider is available, the app still works as a Mermaid compiler with local suggestion fallbacks
 
 ---
@@ -170,10 +186,14 @@ The app automatically uses the best available provider chain for the current act
 If you want the simplest and highest-quality agent setup, use the premium API path:
 
 ```env
-MERMATE_AI_API_KEY=your_openai_api_key
-MERMATE_AI_PROVIDER=openai
-MERMATE_AI_MODEL=gpt-4o-mini
-MERMATE_AI_MAX_MODEL=gpt-4o
+OPENAI_API_KEY=sk-proj-YOUR_OPENAI_PROJECT_KEY_HERE
+MERMATE_AI_API_KEY=sk-proj-YOUR_OPENAI_PROJECT_KEY_HERE
+OPSEEQ_URL=http://localhost:9090
+MERMATE_ORCHESTRATOR_MODEL=gpt-5.4
+MERMATE_WORKER_MODEL=gpt-5.2
+MERMATE_FAST_STRUCTURED_MODEL=gpt-4.1-mini
+MERMATE_AI_MODEL=gpt-5.2
+MERMATE_AI_MAX_MODEL=gpt-5.4
 MERMATE_AI_MAX_ENABLED=true
 ```
 
@@ -184,31 +204,30 @@ This enables:
 - Max mode for final higher-quality architecture output
 - the staged agent workflow that pauses on a preview render before the final Max pass
 
-### Local OpenClaw wrapper integration
+### Local OpenClaw / MCP integration
 
-The desktop wrapper can attach to Mermate through MCP tools and direct HTTP calls.
+Clients can attach to Mermate through MCP tools and direct HTTP calls.
 
-Verified wrapper-facing surfaces in this repo:
+Representative HTTP surfaces:
 
 - `GET /api/copilot/health`
 - `GET /api/agents`
-- `POST /api/render`
-- `GET /api/render/tla/status`
-- `POST /api/render/tla`
-- `GET /api/render/ts/status`
-- `POST /api/render/ts`
-- `GET /api/agent/modes`
+- `POST /api/render` (response may include `run_id`, `fallback_events`)
+- `GET /api/mermate/trace/:run_id` — stage event timeline (local store; see [docs/tandem-opseeq-protocol.md](docs/tandem-opseeq-protocol.md))
+- `POST /api/mermate/stage` — ingest stage event (same store)
+- `GET /api/render/tla/status`, `POST /api/render/tla`
+- `GET /api/render/ts/status`, `POST /api/render/ts`
+- Rust packaging (e.g. compile + `.app`): routes under `server/routes/rust.js` as mounted in `server/index.js`
+- `POST /api/guide/evaluate` — Auto Guide evaluation (heuristic fallback when Opseeq is unhealthy)
+- `GET /api/agent/modes`, `POST /api/agent/run`, `POST /api/agent/finalize`
 
-That means the wrapper can use Mermate for:
+That enables:
 
-- idea -> markdown -> Mermaid compilation
-- Mermaid -> TLA+ formalization
-- TLA+ -> TypeScript runtime generation
-- mode discovery for code review, thinking, optimize, TLA verify, and TS generation flows
-- agent inventory discovery through `/api/agents`
-- clean repo generation through the wrapper MCP/server layer after a run clears the quality gate
+- idea → Mermaid → TLA+ → TypeScript → optional Rust binary and desktop bundle
+- correlated traces for the same `run_id` across MERMATE and (when deployed) Opseeq
+- agent modes and SSE workflows via `/api/agent/*`
 
-If you want Claude Code to drive those surfaces through the wrapper instead of calling this repo directly, use the OpenClaw desktop plugin and MCP server from [`nemoclaw/`](nemoclaw/).
+Use the repo’s `.mcp.json` and `mcp_service/` for MCP-driven access; point `MERMATE_URL` at your running server.
 
 ### Native Python MCP server in this repo
 
@@ -454,7 +473,7 @@ The `.cursor/scripts/` directory contains Python modules for a **local AI enhanc
 
 ## Route overview
 
-The route layer is split into two files mounted under `/api` in `server/index.js`.
+Multiple routers are mounted under `/api` in `server/index.js` (render, agent, tla, ts, tsx, transcribe, search, openclaw, bundle, guide, artifacts, rust, trace, and others).
 
 ### `server/routes/render.js`
 
@@ -463,11 +482,15 @@ Handles the main app workflow:
 - `GET /api/copilot/health`: provider availability and Max readiness
 - `POST /api/analyze`: input profile analysis without rendering
 - `POST /api/copilot/enhance`: copilot suggestion/enhancement proxy
-- `POST /api/render`: full analysis -> transform -> compile -> archive pipeline
+- `POST /api/render`: full analysis -> transform -> compile -> archive pipeline (may return `run_id`, `fallback_events`, and emits stage events — see [docs/tandem-opseeq-protocol.md](docs/tandem-opseeq-protocol.md))
 - `GET /api/diagrams`: list saved diagram outputs
 - `DELETE /api/diagrams/:name`: remove compiled artifacts and archived source
 
 This is the core production path for the app. It decides whether to route through premium API, Ollama, the enhancer bridge, or non-AI compile paths.
+
+### `server/routes/trace.js`
+
+- `POST /api/mermate/stage`, `GET /api/mermate/trace/:run_id`, `GET /api/mermate/trace-stats` — local stage trace ingest and readback
 
 ### `server/routes/agent.js`
 
@@ -478,6 +501,7 @@ Handles the staged architecture-agent workflow:
 - calls the inference provider for planning and refinement
 - performs a preview render through `/api/render`
 - pauses for user notes before triggering the final Max render
+- reports agent stage events via the same trace mechanism as render/tla/ts/rust
 
 This route makes Mermate more than a one-shot Mermaid compiler: it turns the app into a review-and-refine architecture copilot.
 
@@ -488,9 +512,15 @@ This route makes Mermate more than a one-shot Mermaid compiler: it turns the app
 ```
 mermaid/
 ├── mermaid.sh              # Start, compile, validate
+├── docs/
+│   ├── tandem-opseeq-protocol.md  # MERMATE ↔ Opseeq tracing and packaging
+│   └── specula-integration.md     # Formal / Specula artifact layout
 ├── server/                 # Express API (port 3333)
 │   ├── routes/render.js    # Analyze, enhance, render, list, and delete diagrams
 │   ├── routes/agent.js     # Agent planning, preview, and finalize flows
+│   ├── routes/trace.js     # Stage trace ingest/readback (/api/mermate/*)
+│   ├── routes/rust.js      # Rust compile, .app bundle, desktop deploy
+│   ├── routes/guide.js     # Auto Guide /api/guide/evaluate
 │   └── services/
 │       ├── mermaid-compiler.js    # mmdc wrapper, high-res PNG/SVG
 │       ├── mermaid-classifier.js  # Diagram type detection
@@ -499,11 +529,16 @@ mermaid/
 │       ├── diagram-selector.js    # Axiom-based diagram type selection
 │       ├── mermaid-validator.js   # Pre-compile structural validation
 │       ├── axiom-prompts.js       # System prompts for each pipeline stage
-│       ├── inference-provider.js  # Premium API, Ollama, enhancer provider chain
+│       ├── inference-provider.js  # Premium API, Ollama, enhancer; X-Request-Id; fallback events
+│       ├── opseeq-bridge.js       # Opseeq health, inference proxy helpers, reportStage
+│       ├── trace-store.js         # In-memory + runs/*.trace.json stage store
+│       ├── icon-generator.js      # DALL·E / GPT Image icons + macOS bundle helpers
+│       ├── landing-page-generator.js  # Packaged-app dashboard + skill.json
 │       └── gpt-enhancer-bridge.js # HTTP bridge to the enhancer service
 ├── public/                 # Frontend (served statically)
 │   ├── js/mermaid-gpt-copilot.js  # Ghost-text copilot for Simple Idea mode
 │   ├── js/mermaid-gpt-agent.js    # Frontend agent orchestration and SSE handling
+│   ├── js/mermate-autoguide.js    # Auto Guide + /api/guide/evaluate polling
 │   └── css/mermaid-gpt.css
 ├── .cursor/
 │   ├── assets/             # Mode prompt skeletons used by /api/agent/*
@@ -512,7 +547,8 @@ mermaid/
 ├── archs/                  # Archived diagram sources (.mmd, .md)
 │   └── flows/              # Compiled output from ./mermaid.sh compile
 ├── flows/                  # Compiled output from the web app (served at /flows)
-├── test/                   # Node test suite
+├── runs/                   # Run JSON + *.trace.json lineage (served at /runs)
+├── test/                   # Node test suite (incl. test-e2e-tandem.js)
 └── archs/mermaid_axioms.md # The intelligence model (read this)
 ```
 
@@ -561,10 +597,18 @@ Environment variables:
 
 ```bash
 PORT=3333                                   # App server port (default 3333)
-MERMATE_AI_API_KEY=<key>                    # Premium provider API key
-MERMATE_AI_PROVIDER=openai                  # Premium provider (recommended)
-MERMATE_AI_MODEL=gpt-4o-mini                # Default premium model
-MERMATE_AI_MAX_MODEL=gpt-4o                 # Stronger model used by Max mode
+OPENAI_API_KEY=<key>                        # Primary hosted-model key
+MERMATE_AI_API_KEY=<key>                    # Backward-compatible alias
+OPSEEQ_URL=http://localhost:9090            # Opseeq origin — no /v1 (see docs/tandem-opseeq-protocol.md)
+OPENAI_BASE_URL=http://localhost:9090/v1    # Optional: inference base override (must include /v1)
+DALLE_API_KEY=<key>                         # OpenAI Images for packaged-app assets (fallback: OPENAI_API_KEY)
+MERMATE_IMAGE_MODEL=gpt-image-1             # Image model for icons/hero
+CLAUDE_API_KEY=<key>                        # Anthropic: TLA+ authoring + optional TS review
+MERMATE_ORCHESTRATOR_MODEL=gpt-5.4          # Strongest model for final synthesis
+MERMATE_WORKER_MODEL=gpt-5.2                # Default worker model
+MERMATE_FAST_STRUCTURED_MODEL=gpt-4.1-mini  # Fast structured / repair model
+MERMATE_AI_MODEL=gpt-5.2                    # Backward-compatible worker alias
+MERMATE_AI_MAX_MODEL=gpt-5.4                # Stronger model used by Max mode
 MERMATE_AI_MAX_ENABLED=true                 # Enable Max mode
 MERMATE_OLLAMA_URL=http://localhost:11434   # Optional Ollama base URL
 MERMATE_OLLAMA_MODEL=gpt-oss:20b            # Optional Ollama model

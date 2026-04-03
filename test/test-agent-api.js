@@ -58,7 +58,7 @@ describe('agent routes', () => {
     assert.ok(Array.isArray(res.body.modes));
     assert.deepEqual(
       res.body.modes.map((mode) => mode.id).sort(),
-      ['code-review', 'optimize-mmd', 'thinking']
+      ['code-review', 'full-build', 'optimize-mmd', 'thinking', 'tla-optimize', 'tla-verify', 'ts-generate', 'ts-optimize']
     );
   });
 

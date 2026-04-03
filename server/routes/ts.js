@@ -13,7 +13,9 @@ const fsp = require('node:fs/promises');
 
 const tsCompiler = require('../services/ts-compiler');
 const tsValidator = require('../services/ts-validator');
+const speculaLlm = require('../services/specula-llm');
 const provider = require('../services/inference-provider');
+const opseeq = require('../services/opseeq-bridge');
 const logger = require('../utils/logger');
 const {
   buildTsRepairPrompt,
@@ -21,32 +23,15 @@ const {
 } = require('../services/axiom-prompts-ts');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
-const RUNS_DIR = path.join(PROJECT_ROOT, 'runs');
 const FLOWS_DIR = path.join(PROJECT_ROOT, 'flows');
+const {
+  resolveArtifactPath: _resolveArtifactPath,
+  persistRunData,
+  extractFactsAndPlan: _extractFactsAndPlan,
+  loadRunData: _loadRunData,
+} = require('../services/run-artifact-loader');
 
 const router = Router();
-
-function _resolveArtifactPath(urlPath) {
-  if (!urlPath || typeof urlPath !== 'string') return null;
-  const clean = urlPath.replace(/^\/+/, '');
-  return path.join(PROJECT_ROOT, clean);
-}
-
-function _extractFactsAndPlan(runData) {
-  let facts = null;
-  let plan = null;
-
-  for (const call of (runData.agent_calls || [])) {
-    if (call.stage === 'fact_extraction' && call.success) {
-      try { facts = JSON.parse(call.output_text); } catch { /* ignore parse miss */ }
-    }
-    if (call.stage === 'diagram_plan' && call.success) {
-      try { plan = JSON.parse(call.output_text); } catch { /* ignore parse miss */ }
-    }
-  }
-
-  return { facts, plan };
-}
 
 function _safeJsonParse(text) {
   if (!text || typeof text !== 'string') return null;
@@ -93,12 +78,13 @@ router.post('/render/ts', async (req, res) => {
     });
   }
 
-  const runPath = path.join(RUNS_DIR, `${run_id}.json`);
+  let runPath;
   let runData;
 
   try {
-    const raw = await fsp.readFile(runPath, 'utf8');
-    runData = JSON.parse(raw);
+    const loaded = await _loadRunData(run_id);
+    runPath = loaded.runPath;
+    runData = loaded.runData;
   } catch {
     return res.status(404).json({ success: false, error: `Run ${run_id} not found` });
   }
@@ -153,6 +139,12 @@ router.post('/render/ts', async (req, res) => {
 
   const tlaPath = _resolveArtifactPath(runData.tla_artifacts.tla);
   const cfgPath = _resolveArtifactPath(runData.tla_artifacts.cfg);
+  if (!tlaPath || !cfgPath) {
+    return res.status(422).json({
+      success: false,
+      error: 'Invalid or unsafe TLA+ artifact path in run data',
+    });
+  }
 
   let tlaSource = '';
   let cfgSource = '';
@@ -171,6 +163,7 @@ router.post('/render/ts', async (req, res) => {
   const flowDir = path.join(FLOWS_DIR, name, 'ts-runtime');
   await fsp.mkdir(flowDir, { recursive: true });
 
+  provider.setTraceId(run_id);
   try {
     const moduleName = path.basename(tlaPath, path.extname(tlaPath)) || 'Spec';
     const compilationContext = {
@@ -195,7 +188,27 @@ router.post('/render/ts', async (req, res) => {
       failurePaths: (facts.failurePaths || []).length,
     });
 
-    const compiled = tsCompiler.compileCompilationContext(compilationContext);
+    let compiled = tsCompiler.compileCompilationContext(compilationContext);
+
+    // Claude review: check TS against TLA+ spec for semantic correctness
+    if (speculaLlm.isAvailable() && tlaSource) {
+      logger.info('ts.claude_review_start', { className: compiled.className });
+      const reviewResult = await speculaLlm.inferTlaStage('review_ts', {
+        systemPrompt: 'You are a TypeScript/TLA+ alignment reviewer. Given a TLA+ spec and a TypeScript runtime class, check that every TLA+ action is implemented as a method, every invariant is checked, and all state transitions match. If corrections are needed, output the COMPLETE corrected TypeScript source. If the code is correct, output "LGTM" and nothing else.',
+        userPrompt: `TLA+ SPEC:\n${tlaSource.slice(0, 8000)}\n\nTYPESCRIPT SOURCE:\n${compiled.tsSource.slice(0, 12000)}\n\nReview and correct if needed.`,
+        maxTokens: 16384,
+      });
+      if (reviewResult.output && !reviewResult.output.trim().startsWith('LGTM')) {
+        let reviewed = reviewResult.output.trim();
+        if (reviewed.startsWith('```')) reviewed = reviewed.replace(/^```(?:typescript|ts)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+        if (reviewed.length > compiled.tsSource.length * 0.5) {
+          compiled = { ...compiled, tsSource: reviewed };
+          logger.info('ts.claude_review_applied', { className: compiled.className, len: reviewed.length, ms: reviewResult.latencyMs });
+        }
+      } else {
+        logger.info('ts.claude_review_lgtm', { ms: reviewResult.latencyMs });
+      }
+    }
 
     const repairFn = async (input) => {
       const { system } = buildTsRepairPrompt();
@@ -263,7 +276,7 @@ router.post('/render/ts', async (req, res) => {
       validation: `/flows/${name}/ts-runtime/${compiled.fileBase}.validation.json`,
     };
 
-    await fsp.writeFile(runPath, JSON.stringify(runData, null, 2), 'utf8');
+    await persistRunData(runPath, runData);
 
     logger.info('ts.compile_complete', {
       runId: run_id.slice(0, 8),
@@ -298,17 +311,27 @@ router.post('/render/ts', async (req, res) => {
       },
     };
 
+    opseeq.reportStage(run_id, {
+      stage: validation.success ? 'ts_complete' : 'ts_partial',
+      class_name: compiled.className,
+      compile_success: validation.compile?.success,
+      tests_passed: validation.tests?.passed,
+      confidence: tsConfidence,
+    });
     if (!validation.success) {
       return res.status(422).json(responsePayload);
     }
     return res.json(responsePayload);
   } catch (err) {
     logger.error('ts.compile_error', { error: err.message, stack: err.stack });
+    opseeq.reportStage(run_id, { stage: 'ts_failed', error: err.message });
     return res.status(500).json({
       success: false,
       error: 'TypeScriptRuntime compilation failed',
       details: err.message,
     });
+  } finally {
+    provider.setTraceId(null);
   }
 });
 

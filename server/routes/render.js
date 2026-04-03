@@ -14,6 +14,7 @@ const { buildPrompt } = require('../services/axiom-prompts');
 const { analyze } = require('../services/input-analyzer');
 const { compileMarkdownArtifact } = require('../services/markdown-compiler');
 const { deriveDiagramName } = require('../utils/naming');
+const opseeq = require('../services/opseeq-bridge');
 const logger = require('../utils/logger');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
@@ -23,6 +24,24 @@ const ENHANCER_TIMEOUT_MS = parseInt(process.env.MERMAID_ENHANCER_TIMEOUT || '15
 
 const router = Router();
 const COPILOT_STAGES = new Set(['copilot_suggest', 'copilot_enhance']);
+
+// #region agent log
+function _dbgPipeline(hypothesisId, location, message, data) {
+  if (process.env.MERMATE_DEBUG_PIPELINE !== '1') return;
+  fetch('http://127.0.0.1:7647/ingest/a2d7b582-6018-42c8-abf3-55f08db02976', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '984aae' },
+    body: JSON.stringify({
+      sessionId: '984aae',
+      hypothesisId,
+      location,
+      message,
+      data,
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+}
+// #endregion
 
 async function callEnhancer(body) {
   const controller = new AbortController();
@@ -300,6 +319,14 @@ router.post('/render', async (req, res) => {
     });
     runTracker.setProfile(runId, profile);
 
+    const _tAfterCreate = Date.now();
+    _dbgPipeline('H-E', 'render.js:/render', 'phase_init', {
+      runId: runId.slice(0, 8),
+      ms: _tAfterCreate - startMs,
+      contentState: profile.contentState,
+      enhance: !!enhance,
+    });
+
     logger.info('render.analyzed', {
       maturity: profile.maturity,
       quality: profile.qualityScore,
@@ -345,6 +372,11 @@ router.post('/render', async (req, res) => {
           }
         } catch { /* parse failed — facts will be extracted by HPC-GoT if applicable */ }
       }
+      _dbgPipeline('H-E', 'render.js:/render', 'phase_fact_extraction', {
+        runId: runId.slice(0, 8),
+        ms: Date.now() - _factStart,
+        attempted: true,
+      });
     }
 
     if (shouldUseProvider) {
@@ -386,11 +418,14 @@ router.post('/render', async (req, res) => {
         _setAuditEmitter((type, data) => auditTracker.emit(auditRunId, type, data));
       }
 
-      // Wire run-tracker context
+      // Wire run-tracker context + trace ID for Opseeq correlation
       _setRunId(runId);
+      provider.setTraceId(runId);
       runTracker.setPipeline(runId, pipelineName);
       runTracker.recordUIStage(runId, { stage: pipelineName, message: `Pipeline: ${pipelineName}` });
+      opseeq.reportStage(runId, { stage: 'render_start', pipeline: pipelineName, input_length: source.length });
 
+      const _prepStart = Date.now();
       let prepResult;
       try {
       if (useDecompose) {
@@ -410,9 +445,17 @@ router.post('/render', async (req, res) => {
 
       } finally {
         _setRunId(null);
+        provider.setTraceId(null);
         if (auditRunId) _setAuditEmitter(null);
       }
       runTracker.completeUIStage(runId, pipelineName);
+
+      _dbgPipeline('H-B', 'render.js:/render', 'phase_prep_pipeline', {
+        runId: runId.slice(0, 8),
+        prepMs: Date.now() - _prepStart,
+        wallMs: Date.now() - startMs,
+        pipeline: pipelineName,
+      });
 
       routeResult = {
         mmdSource: prepResult.mmdSource,
@@ -473,13 +516,26 @@ router.post('/render', async (req, res) => {
 
     // 4+5. Archive and compile in parallel — they write to different directories
     const outputDir = path.join(FLOWS_DIR, diagramName);
+    const _acStart = Date.now();
     const [archivePaths, compileOutcome] = await Promise.all([
       archive(source, diagramName, diagramType),
       compileWithRetry(mmdSource, outputDir, diagramName),
     ]);
+    _dbgPipeline('H-C', 'render.js:/render', 'phase_archive_compile', {
+      runId: runId ? runId.slice(0, 8) : null,
+      acMs: Date.now() - _acStart,
+      wallMs: Date.now() - startMs,
+    });
 
     if (!compileOutcome.result.ok) {
-      if (runId) await runTracker.finalize(runId, 'failed').catch(() => {});
+      if (runId) {
+        opseeq.reportStage(runId, {
+          stage: 'render_failed',
+          reason: 'compilation_failed',
+          error: _sanitizeError(compileOutcome.result.error),
+        });
+        await runTracker.finalize(runId, 'failed').catch(() => {});
+      }
       return res.status(422).json({
         success: false,
         error: 'compilation_failed',
@@ -500,7 +556,9 @@ router.post('/render', async (req, res) => {
     // 6. Post-render: archive compiled + organize subviews + copy .md (all in parallel)
     const compiledAt = new Date().toISOString();
     const finalMmd = compileOutcome.mmdSource;
-    const finalDiagramType = require('../services/mermaid-classifier').classify(finalMmd);
+    const finalDiagramType = finalMmd === mmdSource
+      ? diagramType
+      : require('../services/mermaid-classifier').classify(finalMmd);
 
     const _organizeSubviews = async () => {
       const paths = [];
@@ -546,6 +604,7 @@ router.post('/render', async (req, res) => {
       await fsp.copyFile(mdSourcePath, mdDestPath).catch(() => {});
     };
 
+    const _cmStart = Date.now();
     const canonicalMarkdown = compileMarkdownArtifact({
       diagramName,
       inputMode: input_mode || profile.contentState || 'idea',
@@ -555,11 +614,17 @@ router.post('/render', async (req, res) => {
       plan: routeResult.plan || null,
       mmdSource: finalMmd,
     });
+    _dbgPipeline('H-D', 'render.js:/render', 'phase_compile_markdown_sync', {
+      runId: runId ? runId.slice(0, 8) : null,
+      cmMs: Date.now() - _cmStart,
+      mdChars: canonicalMarkdown.markdownSource?.length || 0,
+    });
     const canonicalMarkdownPath = path.join(outputDir, 'architecture.md');
     const _writeCanonicalMarkdown = async () => {
       await fsp.writeFile(canonicalMarkdownPath, canonicalMarkdown.markdownSource, 'utf8');
     };
 
+    const _postStart = Date.now();
     const [compiledArchivePath, subviewPaths] = await Promise.all([
       archiveCompiled(finalMmd, diagramName, {
         provider: enhanceMeta?.provider || null,
@@ -570,6 +635,12 @@ router.post('/render', async (req, res) => {
       _copyMd(),
       _writeCanonicalMarkdown(),
     ]);
+    _dbgPipeline('H-F', 'render.js:/render', 'phase_post_compile_parallel', {
+      runId: runId ? runId.slice(0, 8) : null,
+      postMs: Date.now() - _postStart,
+      wallMs: Date.now() - startMs,
+      subviewCount: routeResult.subviews?.length || 0,
+    });
 
     const postRenderValidation = validateMmd(finalMmd);
     const mmdMetrics = {
@@ -634,8 +705,24 @@ router.post('/render', async (req, res) => {
         compileAttempts: compileOutcome.attempts,
         provider: enhanceMeta?.provider || 'local',
       });
+      opseeq.reportStage(runId, {
+        stage: 'render_complete',
+        diagram_name: diagramName,
+        nodes: mmdMetrics?.nodeCount,
+        edges: mmdMetrics?.edgeCount,
+        valid: postRenderValidation.valid,
+        provider: enhanceMeta?.provider || 'local',
+        elapsed_ms: compiledAt ? Date.now() - new Date(classifiedAt).getTime() : undefined,
+      });
       await runTracker.finalize(runId, 'completed');
     }
+
+    _dbgPipeline('H-B', 'render.js:/render', 'phase_render_total', {
+      runId: runId ? runId.slice(0, 8) : null,
+      totalMs: Date.now() - startMs,
+      enhanced: wasEnhanced,
+      diagramName,
+    });
 
     return res.json({
       success: true,
@@ -694,6 +781,8 @@ router.post('/render', async (req, res) => {
       },
       run_id: runId || undefined,
       run_json_path: runId ? `/runs/${runId}.json` : undefined,
+      fallback_events: provider.getFallbackEvents().length > 0
+        ? provider.getFallbackEvents() : undefined,
       progressionUpdate: runId ? {
         stage: 'mmd',
         unlockedStages: ['idea', 'md', 'mmd', 'tsx', 'tla'],
@@ -702,7 +791,10 @@ router.post('/render', async (req, res) => {
       } : undefined,
     });
   } catch (err) {
-    if (runId) await runTracker.finalize(runId, 'failed').catch(() => {});
+    if (runId) {
+      opseeq.reportStage(runId, { stage: 'render_failed', error: err.message });
+      await runTracker.finalize(runId, 'failed').catch(() => {});
+    }
     logger.error('render.error', { error: err.message });
     return res.status(500).json({
       success: false,

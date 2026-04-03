@@ -63,6 +63,7 @@ function _exec(cmd, args, opts = {}) {
   return new Promise((resolve) => {
     const timeout = opts.timeout || 30000;
     const cwd = opts.cwd || PROJECT_ROOT;
+    const start = Date.now();
 
     let stdout = '';
     let stderr = '';
@@ -80,12 +81,12 @@ function _exec(cmd, args, opts = {}) {
 
     proc.on('close', (code) => {
       clearTimeout(timer);
-      resolve({ exitCode: code ?? 1, stdout, stderr, killed, wallClockMs: 0 });
+      resolve({ exitCode: code ?? 1, stdout, stderr, killed, wallClockMs: Date.now() - start });
     });
 
     proc.on('error', (err) => {
       clearTimeout(timer);
-      resolve({ exitCode: 1, stdout, stderr: err.message, killed: false, wallClockMs: 0 });
+      resolve({ exitCode: 1, stdout, stderr: err.message, killed: false, wallClockMs: Date.now() - start });
     });
   });
 }
@@ -159,58 +160,94 @@ async function runTlc(tlaFilePath, cfgFilePath) {
   const wallClockMs = Date.now() - start;
   const combined = result.stdout + '\n' + result.stderr;
 
-  // Parse TLC output
   const violations = [];
   const invariantsChecked = [];
+  const errors = [];
   let statesExplored = 0;
+  let deadlockReached = false;
 
-  // Extract states explored
   const statesMatch = combined.match(/(\d+)\s+states?\s+generated/i);
   if (statesMatch) statesExplored = parseInt(statesMatch[1], 10);
 
-  // Extract invariant violations
+  // Invariant violations
   const violationRe = /Invariant\s+(\w+)\s+is\s+violated/gi;
   let vm;
   while ((vm = violationRe.exec(combined)) !== null) {
-    violations.push(vm[1]);
+    violations.push({ type: 'invariant_violation', name: vm[1] });
   }
 
-  // Extract checked invariants
+  // Temporal property violations
+  const temporalRe = /Temporal properties were violated/gi;
+  if (temporalRe.test(combined)) {
+    const propRe = /Property\s+(\w+)\s+is\s+violated/gi;
+    let pm;
+    while ((pm = propRe.exec(combined)) !== null) {
+      violations.push({ type: 'temporal_violation', name: pm[1] });
+    }
+    if (violations.length === 0 || !violations.some(v => v.type === 'temporal_violation')) {
+      violations.push({ type: 'temporal_violation', name: 'unknown' });
+    }
+  }
+
+  // Deadlock detection
+  if (/Deadlock\s+reached/i.test(combined)) {
+    deadlockReached = true;
+    violations.push({ type: 'deadlock', name: 'Deadlock' });
+  }
+
+  // Assertion failures
+  const assertRe = /Error:\s*Assertion\s+.*?failed/gi;
+  if (assertRe.test(combined)) {
+    violations.push({ type: 'assertion_failure', name: 'Assertion' });
+  }
+
+  // General TLC errors (evaluation errors, type mismatches at runtime)
+  const evalErrorRe = /Error:\s*(.*?)(?:\n|$)/gi;
+  let em;
+  while ((em = evalErrorRe.exec(combined)) !== null) {
+    const msg = em[1].trim();
+    if (msg && !/^TLC threw/i.test(msg) && !violations.some(v => msg.includes(v.name))) {
+      errors.push(msg);
+    }
+  }
+
   const checkedRe = /Checking\s+(?:invariant|temporal property)\s+(\w+)/gi;
   let cm;
   while ((cm = checkedRe.exec(combined)) !== null) {
     invariantsChecked.push(cm[1]);
   }
 
-  // Try to read the JSON trace file
   let trace = null;
   try {
     const traceRaw = await fsp.readFile(tracePath, 'utf8');
     trace = JSON.parse(traceRaw);
   } catch { /* trace file may not exist if no violation */ }
 
-  // Build structured violation traces
-  const structuredViolations = violations.map(inv => ({
-    type: 'tla_invariant_violation',
-    invariant: inv,
+  const traceSteps = (trace?.states || []).map((s, i) => ({
+    step: i,
+    variables: s?.val || s || {},
+    action: s?.action?.name || 'unknown',
+  }));
+
+  const structuredViolations = violations.map(v => ({
+    type: `tla_${v.type}`,
+    invariant: v.name,
     stateCount: statesExplored,
-    traceLength: trace?.states?.length || 0,
-    trace: (trace?.states || []).map((s, i) => ({
-      step: i,
-      variables: s?.val || s || {},
-      action: s?.action?.name || 'unknown',
-    })),
+    traceLength: traceSteps.length,
+    trace: traceSteps,
     tlcExitCode: result.exitCode,
     wallClockMs,
   }));
 
   const checked = !result.killed;
-  const success = checked && violations.length === 0 && result.exitCode === 0;
+  const success = checked && violations.length === 0 && errors.length === 0 && result.exitCode === 0;
 
   logger.info('tla_validator.tlc', {
     success,
     exitCode: result.exitCode,
     violations: violations.length,
+    deadlockReached,
+    errors: errors.length,
     statesExplored,
     wallClockMs,
     timedOut: result.killed,
@@ -221,6 +258,8 @@ async function runTlc(tlaFilePath, cfgFilePath) {
     success,
     invariantsChecked,
     violations: structuredViolations,
+    errors,
+    deadlockReached,
     statesExplored,
     wallClockMs,
     timedOut: result.killed,

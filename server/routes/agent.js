@@ -27,6 +27,7 @@ const narrator = require('../services/terminal-narrator');
 const runTracker = require('../services/run-tracker');
 const rmBridge = require('../services/rate-master-bridge');
 const catalog = require('../services/model-catalog');
+const opseeq = require('../services/opseeq-bridge');
 const logger = require('../utils/logger');
 
 // Render timeout: separate from inference timeout so long HPC-GoT pipelines
@@ -93,6 +94,14 @@ const AGENT_MODES = {
     icon: 'tune',
     file: 'TS-OPTIMIZE-MODE.txt',
     stage: 'ts',
+  },
+  'full-build': {
+    id: 'full-build',
+    label: 'Full Build',
+    description: 'Idea \u2192 Diagram \u2192 TLA+ \u2192 TypeScript \u2192 Bundle',
+    icon: 'build_all',
+    file: 'FULL-BUILD-MODE.txt',
+    stage: 'mmd',
   },
 };
 
@@ -173,6 +182,7 @@ function _extractText(output) {
 
 const MODE_ROLE_DOMAINS = {
   'thinking':     ['formal_reasoning', 'systems_compilers', 'human_centric_systems'],
+  'full-build':   ['formal_reasoning', 'systems_compilers', 'human_centric_systems'],
   'optimize-mmd': ['structural_precision', 'minimal_structure', 'programmatic_complexity'],
   'code-review':  ['systems_compilers', 'formal_reasoning', 'narrative_orchestration'],
 };
@@ -286,6 +296,7 @@ router.post('/agent/run', async (req, res) => {
     // ---- Planning ----
     if (abort.signal.aborted) return;
     auditTracker.emit(auditId, 'agent:stage_enter', { stage: 'planning' });
+    opseeq.reportStage(parentRunId, { stage: 'agent_planning', mode: agentMode, entities: profile.shadow?.entities?.length || 0 });
     sendEvent('stage', { stage: 'planning', message: 'Analyzing architecture and generating plan...' });
     sendEvent('analysis', {
       maturity: profile.maturity,
@@ -550,6 +561,7 @@ router.post('/agent/run', async (req, res) => {
     if (abort.signal.aborted) return;
     auditTracker.emit(auditId, 'agent:stage_enter', { stage: 'preview' });
     auditTracker.emit(auditId, 'render:prepare', { maxMode: false });
+    opseeq.reportStage(parentRunId, { stage: 'agent_preview', mode: agentMode });
     sendEvent('stage', { stage: 'preview', message: 'Running preview render...' });
 
     // Heartbeat keeps the SSE connection alive during long renders.
@@ -569,7 +581,7 @@ router.post('/agent/run', async (req, res) => {
         diagram_name: userDiagramName,
         enhance: previewInputMode !== 'mmd',
         input_mode: previewInputMode,
-        max_mode: false,
+        max_mode: true,
         audit_run_id: auditId,
         parent_run_id: parentRunId,
         agent_mode: mode,
@@ -732,6 +744,7 @@ router.post('/agent/finalize', async (req, res) => {
     auditTracker.emit(finalizeAuditId, 'agent:stage_enter', { stage: 'finalizing' });
     auditTracker.emit(finalizeAuditId, 'render:prepare', { maxMode: true });
     auditTracker.emit(finalizeAuditId, 'agent:convergence', { pct: 85 });
+    opseeq.reportStage(req.body.agent_parent_run_id, { stage: 'agent_finalize', mode: req.body.mode });
     sendEvent('stage', { stage: 'finalizing', message: 'Running final Max render...' });
 
     const heartbeatInterval = setInterval(() => {
@@ -780,6 +793,84 @@ router.post('/agent/finalize', async (req, res) => {
         attempts: finalData.render_meta?.attempts,
         provider: finalData.enhance_meta?.provider,
       });
+
+      // ---- Full Build: chain TLA+ and TS after successful MMD render ----
+      if (mode === 'full-build' && finalData.diagram_name && (agentParentRunId || finalData.run_id)) {
+        const fbRunId = agentParentRunId || finalData.run_id;
+        const fbName = finalData.diagram_name;
+
+        if (!abort.signal.aborted) {
+          sendEvent('stage', { stage: 'tla_build', message: 'Generating TLA+ specification via Specula...' });
+          try {
+            const tlaData = await _fetchRender('/api/render/tla', {
+              diagram_name: fbName,
+              run_id: fbRunId,
+            }, abort);
+
+            sendEvent('pipeline_stage', {
+              stage: 'tla',
+              success: tlaData.success,
+              sany_valid: tlaData.sany?.valid,
+              tlc_checked: tlaData.tlc?.checked,
+              violations: tlaData.tlc?.violations?.length || 0,
+              tla_source: tlaData.tla_source ? tlaData.tla_source.slice(0, 200) + '...' : null,
+            });
+
+            if (tlaData.success && tlaData.sany?.valid && !abort.signal.aborted) {
+              sendEvent('stage', { stage: 'ts_build', message: 'Compiling TypeScript runtime from TLA+ spec...' });
+              try {
+                const tsData = await _fetchRender('/api/render/ts', {
+                  diagram_name: fbName,
+                  run_id: fbRunId,
+                }, abort);
+
+                sendEvent('pipeline_stage', {
+                  stage: 'ts',
+                  success: tsData.success,
+                  compile_ok: tsData.compile?.success,
+                  tests_ok: tsData.tests?.success,
+                  ts_source: tsData.ts_source ? tsData.ts_source.slice(0, 200) + '...' : null,
+                });
+
+                sendEvent('bundle_ready', {
+                  diagram_name: fbName,
+                  run_id: fbRunId,
+                  stages_completed: ['mmd', 'tla', 'ts'],
+                  tla_valid: tlaData.sany?.valid,
+                  ts_compiled: tsData.compile?.success,
+                });
+              } catch (tsErr) {
+                sendEvent('pipeline_stage', { stage: 'ts', success: false, error: tsErr.message });
+                sendEvent('bundle_ready', {
+                  diagram_name: fbName,
+                  run_id: fbRunId,
+                  stages_completed: ['mmd', 'tla'],
+                  tla_valid: tlaData.sany?.valid,
+                  ts_compiled: false,
+                });
+              }
+            } else {
+              sendEvent('bundle_ready', {
+                diagram_name: fbName,
+                run_id: fbRunId,
+                stages_completed: ['mmd'],
+                tla_valid: tlaData.sany?.valid || false,
+                ts_compiled: false,
+              });
+            }
+          } catch (tlaErr) {
+            sendEvent('pipeline_stage', { stage: 'tla', success: false, error: tlaErr.message });
+            sendEvent('bundle_ready', {
+              diagram_name: fbName,
+              run_id: fbRunId,
+              stages_completed: ['mmd'],
+              tla_valid: false,
+              ts_compiled: false,
+            });
+          }
+        }
+      }
+
     } else {
       auditTracker.emit(finalizeAuditId, 'render:failed', { error: finalData.details || finalData.error });
       sendEvent('final_render', {

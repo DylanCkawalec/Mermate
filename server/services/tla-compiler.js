@@ -134,8 +134,24 @@ function factsToTlaModule(facts, plan, moduleName) {
 
   const variables = Object.values(entityMap).filter(v => v.isStateful);
   const constants = Object.values(entityMap).filter(v => v.isConstant);
-  const actions = relationships.map(r => mapRelationshipToAction(r, entityMap));
-  const invariants = failurePaths.map((fp, i) => mapFailurePathToInvariant(fp, entityMap, i));
+  const varIdSet = new Set(variables.map(v => v.id));
+
+  // Only include relationships where BOTH endpoints are declared variables —
+  // referencing undefined variables is the primary cause of SANY failures.
+  const validRels = relationships.filter(r => {
+    const fId = _sanitizeId(r.from);
+    const tId = _sanitizeId(r.to);
+    return varIdSet.has(fId) && varIdSet.has(tId) && fId !== tId;
+  });
+  const actions = validRels.map(r => mapRelationshipToAction(r, entityMap));
+
+  // Only include invariants where trigger and handler are declared variables
+  const validFPs = failurePaths.filter(fp => {
+    const tId = _sanitizeId(fp.trigger);
+    const hId = _sanitizeId(fp.handler);
+    return varIdSet.has(tId) && varIdSet.has(hId);
+  });
+  const invariants = validFPs.map((fp, i) => mapFailurePathToInvariant(fp, entityMap, i));
 
   const lines = [];
   const date = new Date().toISOString().split('T')[0];
@@ -166,7 +182,7 @@ function factsToTlaModule(facts, plan, moduleName) {
   lines.push(` * VERIFICATION: SANY (syntax) + TLC (model checking)`);
   lines.push(` ${'*'.repeat(74)})`);
   lines.push(``);
-  lines.push(`EXTENDS Naturals, Sequences, FiniteSets`);
+  lines.push(`EXTENDS Naturals`);
   lines.push(``);
 
   // ---- VARIABLES ----
@@ -239,12 +255,13 @@ function factsToTlaModule(facts, plan, moduleName) {
   for (const b of boundaries) {
     for (const member of (b.members || [])) {
       boundaryMembers.set(member, b.name);
+      boundaryMembers.set(_sanitizeId(member), b.name);
     }
   }
 
   const actionsByBoundary = new Map();
   for (const action of actions) {
-    const boundary = boundaryMembers.get(action.fromId) || 'Global';
+    const boundary = boundaryMembers.get(action.fromId) || boundaryMembers.get(action.verb) || 'Global';
     if (!actionsByBoundary.has(boundary)) actionsByBoundary.set(boundary, []);
     actionsByBoundary.get(boundary).push(action);
   }
@@ -299,23 +316,6 @@ function factsToTlaModule(facts, plan, moduleName) {
   lines.push(``);
   lines.push(`Spec == Init /\\ [][Next]_vars`);
   lines.push(``);
-
-  // ---- Formal Verification Theorems (Lamport style) ----
-  lines.push(`\\* ${'='.repeat(70)}`);
-  lines.push(`\\* FORMAL VERIFICATION THEOREMS`);
-  lines.push(`\\* ${'='.repeat(70)}`);
-  lines.push(``);
-  lines.push(`THEOREM Spec => []TypeInvariant`);
-  lines.push(`  \\* Type safety: all entities remain in legal state sets`);
-  lines.push(``);
-  lines.push(`THEOREM Spec => []MasterSafety`);
-  lines.push(`  \\* Comprehensive safety: all invariants hold in all reachable states`);
-  lines.push(``);
-  for (const inv of invariants) {
-    lines.push(`THEOREM Spec => []${inv.name}`);
-    lines.push(`  \\* ${inv.trigger} ${inv.condition}: ${inv.handler} handles with ${inv.recovery}`);
-    lines.push(``);
-  }
 
   // ---- Footer ----
   lines.push(`${'='.repeat(68)}`);
@@ -531,7 +531,7 @@ function factsToTlaSubmodules(facts, plan, masterModuleName) {
   masterLines.push(` * Submodules: ${submodules.map(s => s.name).join(', ')}`);
   masterLines.push(` ${'*'.repeat(74)})`);
   masterLines.push(``);
-  masterLines.push(`EXTENDS Naturals, Sequences, FiniteSets`);
+  masterLines.push(`EXTENDS Naturals`);
   masterLines.push(``);
 
   masterLines.push(`\\* All variables across all subsystems`);
