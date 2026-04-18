@@ -43,6 +43,9 @@ COPY .cursor/assets/ ./.cursor/assets/
 # TLA+ toolchain
 COPY vendor/ ./vendor/
 
+# Rate-Master OODA rate limiter (required by rate-master-bridge.js)
+COPY rate-master/dist/ ./rate-master/dist/
+
 RUN mkdir -p flows runs && chown -R mermate:mermate /app
 
 USER mermate
