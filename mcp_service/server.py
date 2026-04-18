@@ -16,7 +16,7 @@ from .client import MermateClient, MermateHttpError, summarize_sse_events
 
 
 SERVER_NAME = "mermate-openclaw-mcp"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "5.0.0"
 DEFAULT_BASE_URL = os.environ.get("MERMATE_URL", "http://127.0.0.1:3333")
 DEFAULT_OPENCLAW_URL = os.environ.get("OPENCLAW_URL", "http://127.0.0.1:8787")
 
@@ -38,6 +38,12 @@ STAGE_MAP = {
         "description": "Generate and validate a TLA+ specification from a render run.",
         "requires": "run_id from /api/render",
         "next_stage": "ts",
+        "management": {
+            "check": "/api/render/tla/check — Quick SANY syntax check on raw TLA+ source",
+            "errors": "/api/render/tla/errors/:run_id — Read structured SANY/TLC errors",
+            "revalidate": "/api/render/tla/revalidate — Re-run SANY+TLC with repair on existing spec",
+            "edit": "/api/render/tla/edit — Edit spec source, validate, and persist",
+        },
     },
     "ts": {
         "route": "/api/render/ts",
@@ -77,6 +83,10 @@ TOOL_ROUTE_MAP = {
     "mermate_analyze": ["/api/analyze"],
     "mermate_render": ["/api/render"],
     "mermate_render_tla": ["/api/render/tla"],
+    "mermate_tla_check": ["/api/render/tla/check"],
+    "mermate_tla_errors": ["/api/render/tla/errors/:run_id"],
+    "mermate_tla_revalidate": ["/api/render/tla/revalidate"],
+    "mermate_tla_edit": ["/api/render/tla/edit"],
     "mermate_render_ts": ["/api/render/ts"],
     "mermate_full_pipeline": ["/api/render", "/api/render/tla", "/api/render/ts", "/api/projects/:id", "/api/projects/:id/pipeline"],
     "mermate_agent_modes": ["/api/agent/modes"],
@@ -339,6 +349,57 @@ def mermate_render_ts(
         "/api/render/ts",
         body={"run_id": run_id, "diagram_name": diagram_name},
         timeout_s=timeout_s or DEFAULT_TS_TIMEOUT_S,
+    )
+
+
+@mcp.tool(description="Quick SANY syntax check on raw TLA+ source without requiring a run_id. Returns parse errors immediately.")
+def mermate_tla_check(
+    tla_source: str,
+    module_name: str = "CheckSpec",
+) -> dict[str, Any]:
+    return _call_json(
+        "POST",
+        "/api/render/tla/check",
+        body={"tla_source": tla_source, "module_name": module_name},
+        timeout_s=DEFAULT_TLA_TIMEOUT_S,
+    )
+
+
+@mcp.tool(description="Read structured TLA+ validation errors and metrics for an existing run. Use to inspect SANY/TLC results without re-running.")
+def mermate_tla_errors(
+    run_id: str,
+) -> dict[str, Any]:
+    return _call_json("GET", f"/api/render/tla/errors/{run_id}")
+
+
+@mcp.tool(description="Re-run SANY + TLC validation on existing TLA+ artifacts with optional LLM repair. Does not regenerate the spec.")
+def mermate_tla_revalidate(
+    run_id: str,
+    timeout_s: int | None = None,
+) -> dict[str, Any]:
+    return _call_json(
+        "POST",
+        "/api/render/tla/revalidate",
+        body={"run_id": run_id},
+        timeout_s=timeout_s or DEFAULT_TLA_TIMEOUT_S,
+    )
+
+
+@mcp.tool(description="Edit a TLA+ spec source, validate it with SANY + TLC, and persist the result. Like a document save with automatic compilation.")
+def mermate_tla_edit(
+    run_id: str,
+    tla_source: str,
+    cfg_source: str | None = None,
+    timeout_s: int | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {"run_id": run_id, "tla_source": tla_source}
+    if cfg_source:
+        body["cfg_source"] = cfg_source
+    return _call_json(
+        "POST",
+        "/api/render/tla/edit",
+        body=body,
+        timeout_s=timeout_s or DEFAULT_TLA_TIMEOUT_S,
     )
 
 

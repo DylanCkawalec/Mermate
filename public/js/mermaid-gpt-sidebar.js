@@ -14,11 +14,14 @@ window.MermaidSidebar = class MermaidSidebar {
     this.render();
   }
 
+  getLatestWithRunId() {
+    return this.items.find(i => i.run_id && i.name);
+  }
+
   _load() {
     try {
       const raw = localStorage.getItem(this.STORAGE_KEY);
       if (!raw) return [];
-      // Drop stale pending entries from prior sessions
       return JSON.parse(raw).filter(i => !i._pending);
     } catch {
       return [];

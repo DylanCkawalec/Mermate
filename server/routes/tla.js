@@ -26,6 +26,7 @@ const {
   loadCanonicalMarkdown,
   readTextArtifact,
 } = require('../services/run-artifact-loader');
+const opseeq = require('../services/opseeq-bridge');
 const logger = require('../utils/logger');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
@@ -87,6 +88,8 @@ router.post('/render/tla', async (req, res) => {
     } catch {
       return res.status(404).json({ success: false, error: `Run ${run_id} not found` });
     }
+
+    provider.setTraceId(run_id);
 
     // Extract facts and plan from agent_calls (HPC-GoT path)
     let { facts, plan } = extractFactsAndPlan(runData);
@@ -207,7 +210,7 @@ router.post('/render/tla', async (req, res) => {
         );
         await fsp.writeFile(path.join(subDir, `${sub.name}.tla`), subSany.tlaSource, 'utf8');
         await fsp.writeFile(path.join(subDir, `${sub.name}.cfg`), sub.cfgSource, 'utf8');
-        return { name: sub.name, boundary: sub.boundary, sany: subSany.sany };
+        return { name: sub.name, boundary: sub.boundary, sany: subSany.sanyResult, repairAttempts: subSany.repairAttempts };
       }));
 
       submoduleResults = subValidations;
@@ -215,20 +218,42 @@ router.post('/render/tla', async (req, res) => {
       // Write and validate master module with TLC
       const master = splitResult.masterModule;
       cfgSource = master.cfgSource;
-      validation = await tlaValidator.fullValidation(master.tlaSource, cfgSource, tlaDir, moduleName, repairFn);
+
+      let masterTlaSource = master.tlaSource;
+      if (speculaLlm.isAvailable()) {
+        const claudeResult = await speculaLlm.generateTlaSpec(facts, plan, moduleName, masterTlaSource);
+        if (claudeResult.tlaSource) masterTlaSource = claudeResult.tlaSource;
+      }
+
+      validation = await tlaValidator.fullValidation(masterTlaSource, cfgSource, tlaDir, moduleName, repairFn);
 
       const masterResult = tlaCompiler.factsToTlaModule(facts, plan, moduleName);
       variables = masterResult.variables;
       actions = masterResult.actions;
       invariants = masterResult.invariants;
     } else {
-      // Single-module path (no splitting)
+      // Single-module path: deterministic seed -> Claude refinement -> validation
       const result = tlaCompiler.factsToTlaModule(facts, plan, moduleName);
       variables = result.variables;
       actions = result.actions;
       invariants = result.invariants;
       cfgSource = tlaCompiler.factsToTlaCfg(invariants, moduleName);
-      validation = await tlaValidator.fullValidation(result.tlaSource, cfgSource, tlaDir, moduleName, repairFn);
+
+      let tlaSource = result.tlaSource;
+
+      // Promote Claude to primary TLA+ writer when available
+      if (speculaLlm.isAvailable()) {
+        logger.info('tla.claude_primary', { moduleName, seedLen: tlaSource.length });
+        const claudeResult = await speculaLlm.generateTlaSpec(facts, plan, moduleName, tlaSource);
+        if (claudeResult.tlaSource) {
+          tlaSource = claudeResult.tlaSource;
+          logger.info('tla.claude_spec_accepted', { moduleName, len: tlaSource.length, ms: claudeResult.latencyMs });
+        } else {
+          logger.info('tla.claude_unavailable_fallback', { error: claudeResult.error });
+        }
+      }
+
+      validation = await tlaValidator.fullValidation(tlaSource, cfgSource, tlaDir, moduleName, repairFn);
     }
 
     // Phase: PERSIST — write artifacts to flows/
@@ -355,6 +380,20 @@ router.post('/render/tla', async (req, res) => {
       ? (validation.tlc.success ? 0.95 : 0.7)
       : 0.3;
 
+    opseeq.reportStage(run_id, {
+      stage: 'tla_complete',
+      module_name: moduleName,
+      sany_valid: validation.sany.valid,
+      sany_repair_attempts: validation.sany.repairAttempts,
+      tlc_success: validation.tlc.success,
+      tlc_violations: (validation.tlc.violations || []).length,
+      tlc_errors: validation.tlc.errors || [],
+      tlc_deadlock: validation.tlc.deadlockReached || false,
+      states_explored: validation.tlc.statesExplored,
+      wall_clock_ms: validation.tlc.wallClockMs,
+      confidence: tlaConfidence,
+    });
+
     // Phase: OUTPUT — structured response
     res.json({
       success: true,
@@ -367,6 +406,8 @@ router.post('/render/tla', async (req, res) => {
         success: validation.tlc.success,
         invariantsChecked: validation.tlc.invariantsChecked,
         violations: validation.tlc.violations,
+        errors: validation.tlc.errors || [],
+        deadlockReached: validation.tlc.deadlockReached || false,
         statesExplored: validation.tlc.statesExplored,
         wallClockMs: validation.tlc.wallClockMs,
         timedOut: validation.tlc.timedOut,
@@ -427,7 +468,262 @@ router.post('/render/tla', async (req, res) => {
     });
   } catch (err) {
     logger.error('tla.compile_error', { error: err.message, stack: err.stack });
+    opseeq.reportStage(run_id, { stage: 'tla_failed', error: err.message });
     res.status(500).json({ success: false, error: err.message });
+  } finally {
+    provider.setTraceId(null);
+  }
+});
+
+// ---- TLA+ errors: structured read-back for a run -------------------------
+
+router.get('/render/tla/errors/:run_id', async (req, res) => {
+  const { run_id } = req.params;
+
+  try {
+    const { runData } = await loadRunData(run_id);
+
+    if (!runData.tla_artifacts?.tla) {
+      return res.status(404).json({ success: false, error: 'No TLA+ artifacts for this run' });
+    }
+
+    const tlaPath = path.join(PROJECT_ROOT, runData.tla_artifacts.tla.replace(/^\//, ''));
+    let tlaSource = '';
+    try { tlaSource = await fsp.readFile(tlaPath, 'utf8'); } catch { /* missing file */ }
+
+    const metrics = runData.tla_metrics || {};
+    const speculaCfg = runData.tla_env?.claude || {};
+
+    return res.json({
+      success: true,
+      run_id,
+      tla_source: tlaSource,
+      artifacts: runData.tla_artifacts,
+      metrics,
+      sany: {
+        passed_first: metrics.sanyPassedFirstAttempt ?? null,
+      },
+      tlc: {
+        completed: metrics.tlcCompleted ?? null,
+        violations: metrics.tlcViolations ?? 0,
+        states_explored: metrics.tlcStatesExplored ?? 0,
+        wall_clock_ms: metrics.tlcWallClockMs ?? 0,
+      },
+      specula: speculaCfg,
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---- TLA+ revalidate: re-run SANY+TLC on existing spec without regenerating
+
+router.post('/render/tla/revalidate', async (req, res) => {
+  const { run_id } = req.body || {};
+
+  if (!run_id) {
+    return res.status(400).json({ success: false, error: 'run_id is required' });
+  }
+
+  const available = await tlaValidator.isAvailable();
+  if (!available) {
+    return res.status(503).json({ success: false, error: 'TLA+ toolchain not available' });
+  }
+
+  try {
+    const { runPath, runData } = await loadRunData(run_id);
+
+    if (!runData.tla_artifacts?.tla || !runData.tla_artifacts?.cfg) {
+      return res.status(422).json({ success: false, error: 'No TLA+ artifacts to revalidate' });
+    }
+
+    const tlaArtPath = path.join(PROJECT_ROOT, runData.tla_artifacts.tla.replace(/^\//, ''));
+    const cfgArtPath = path.join(PROJECT_ROOT, runData.tla_artifacts.cfg.replace(/^\//, ''));
+    const tlaDir = path.dirname(tlaArtPath);
+    const moduleName = path.basename(tlaArtPath, '.tla');
+
+    const tlaSource = await fsp.readFile(tlaArtPath, 'utf8');
+    const cfgSource = await fsp.readFile(cfgArtPath, 'utf8');
+
+    provider.setTraceId(run_id);
+    try {
+      const repairFn = async (source, errors) => {
+        const { system } = buildTlaRepairPrompt();
+        const userPrompt = buildTlaRepairUserPrompt(source, errors);
+        const result = await speculaLlm.inferTlaStage('repair_tla', { systemPrompt: system, userPrompt });
+        if (result.output) {
+          let repaired = result.output.trim();
+          if (repaired.startsWith('```')) {
+            repaired = repaired.replace(/^```(?:tla\+?)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+          }
+          return repaired;
+        }
+        return null;
+      };
+
+      const validation = await tlaValidator.fullValidation(tlaSource, cfgSource, tlaDir, moduleName, repairFn);
+
+      if (validation.tlaSource !== tlaSource) {
+        await fsp.writeFile(tlaArtPath, validation.tlaSource, 'utf8');
+      }
+
+      runData.tla_metrics = {
+        ...(runData.tla_metrics || {}),
+        revalidated_at: new Date().toISOString(),
+        sanyPassedFirstAttempt: validation.sany.repairAttempts === 0 && validation.sany.valid,
+        tlcCompleted: validation.tlc.checked,
+        tlcViolations: validation.tlc.violations.length,
+        tlcStatesExplored: validation.tlc.statesExplored,
+        tlcWallClockMs: validation.tlc.wallClockMs,
+      };
+      await persistRunData(runPath, runData);
+
+      opseeq.reportStage(run_id, {
+        stage: validation.sany.valid ? 'tla_revalidated' : 'tla_revalidate_failed',
+        sany_valid: validation.sany.valid,
+        tlc_success: validation.tlc.success,
+        repair_attempts: validation.sany.repairAttempts,
+        states_explored: validation.tlc.statesExplored,
+        errors: validation.tlc.errors || [],
+      });
+
+      return res.json({
+        success: validation.sany.valid,
+        repaired: validation.tlaSource !== tlaSource,
+        sany: validation.sany,
+        tlc: {
+          checked: validation.tlc.checked,
+          success: validation.tlc.success,
+          violations: validation.tlc.violations,
+          errors: validation.tlc.errors || [],
+          statesExplored: validation.tlc.statesExplored,
+          wallClockMs: validation.tlc.wallClockMs,
+        },
+        tla_source: validation.tlaSource,
+      });
+    } finally {
+      provider.setTraceId(null);
+    }
+  } catch (err) {
+    logger.error('tla.revalidate_error', { error: err.message, stack: err.stack });
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---- TLA+ spec edit: update source, revalidate, persist -------------------
+
+router.post('/render/tla/edit', async (req, res) => {
+  const { run_id, tla_source, cfg_source } = req.body || {};
+
+  if (!run_id || !tla_source) {
+    return res.status(400).json({ success: false, error: 'run_id and tla_source are required' });
+  }
+
+  const available = await tlaValidator.isAvailable();
+  if (!available) {
+    return res.status(503).json({ success: false, error: 'TLA+ toolchain not available' });
+  }
+
+  try {
+    const { runPath, runData } = await loadRunData(run_id);
+
+    if (!runData.tla_artifacts?.tla) {
+      return res.status(422).json({ success: false, error: 'No TLA+ artifacts to edit' });
+    }
+
+    const tlaArtPath = path.join(PROJECT_ROOT, runData.tla_artifacts.tla.replace(/^\//, ''));
+    const cfgArtPath = path.join(PROJECT_ROOT, runData.tla_artifacts.cfg.replace(/^\//, ''));
+    const tlaDir = path.dirname(tlaArtPath);
+    const moduleName = path.basename(tlaArtPath, '.tla');
+
+    const effectiveCfg = cfg_source || await fsp.readFile(cfgArtPath, 'utf8');
+
+    provider.setTraceId(run_id);
+    try {
+      const validation = await tlaValidator.fullValidation(tla_source, effectiveCfg, tlaDir, moduleName);
+
+      await fsp.writeFile(tlaArtPath, validation.tlaSource, 'utf8');
+      if (cfg_source) {
+        await fsp.writeFile(cfgArtPath, effectiveCfg, 'utf8');
+      }
+
+      runData.tla_metrics = {
+        ...(runData.tla_metrics || {}),
+        edited_at: new Date().toISOString(),
+        sanyPassedFirstAttempt: validation.sany.repairAttempts === 0 && validation.sany.valid,
+        tlcCompleted: validation.tlc.checked,
+        tlcViolations: validation.tlc.violations.length,
+        tlcStatesExplored: validation.tlc.statesExplored,
+        tlcWallClockMs: validation.tlc.wallClockMs,
+      };
+      await persistRunData(runPath, runData);
+
+      opseeq.reportStage(run_id, {
+        stage: validation.sany.valid ? 'tla_edited' : 'tla_edit_failed',
+        sany_valid: validation.sany.valid,
+        tlc_success: validation.tlc.success,
+        states_explored: validation.tlc.statesExplored,
+        errors: validation.tlc.errors || [],
+      });
+
+      return res.json({
+        success: validation.sany.valid,
+        sany: validation.sany,
+        tlc: {
+          checked: validation.tlc.checked,
+          success: validation.tlc.success,
+          violations: validation.tlc.violations,
+          errors: validation.tlc.errors || [],
+          statesExplored: validation.tlc.statesExplored,
+          wallClockMs: validation.tlc.wallClockMs,
+        },
+        tla_source: validation.tlaSource,
+        cfg_source: effectiveCfg,
+      });
+    } finally {
+      provider.setTraceId(null);
+    }
+  } catch (err) {
+    logger.error('tla.edit_error', { error: err.message, stack: err.stack });
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---- TLA+ SANY-only check: quick syntax validation without TLC -----------
+
+router.post('/render/tla/check', async (req, res) => {
+  const { tla_source, module_name } = req.body || {};
+
+  if (!tla_source) {
+    return res.status(400).json({ success: false, error: 'tla_source is required' });
+  }
+
+  const available = await tlaValidator.isAvailable();
+  if (!available) {
+    return res.status(503).json({ success: false, error: 'TLA+ toolchain not available' });
+  }
+
+  try {
+    const tmpDir = path.join(PROJECT_ROOT, 'flows', '_tla_check_tmp');
+    await fsp.mkdir(tmpDir, { recursive: true });
+    const name = module_name || 'CheckSpec';
+    const tlaPath = path.join(tmpDir, `${name}.tla`);
+    await fsp.writeFile(tlaPath, tla_source, 'utf8');
+
+    const sanyResult = await tlaValidator.runSany(tlaPath);
+
+    try { await fsp.rm(tmpDir, { recursive: true }); } catch { /* best-effort cleanup */ }
+
+    return res.json({
+      success: sanyResult.valid,
+      sany: {
+        valid: sanyResult.valid,
+        errors: sanyResult.errors,
+        wallClockMs: sanyResult.wallClockMs,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 

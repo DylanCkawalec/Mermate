@@ -1,12 +1,12 @@
 {
   "name": "mermaid-gpt",
-  "version": "1.0.0",
+  "version": "5.0.0",
   "description": "Local Mermaid diagram renderer with chat-style UI and optional GPT enhancement",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
-    "nemoclaw:launch": "npm --prefix ./nemoclaw run desktop:launch",
-    "nemoclaw:mcp": "npm --prefix ./nemoclaw run mcp",
+    "opseeq:status": "curl -sf http://localhost:9090/api/status | python3 -m json.tool",
+    "opseeq:docker:build": "docker build -f ../opseeq/Dockerfile.service -t opseeq:v5 ../opseeq",
     "test": "node --test test/test-*.js",
     "test:fast": "node --test test/test-agent-api.js test/test-classifier.js test/test-enhanced-validation.js test/test-enhancer-bridge.js test/test-image-validation.js test/test-input-analyzer.js test/test-mermaid-repairer.js test/test-rate-master-bridge.js test/test-run-tracker.js test/test-structural-signature.js test/test-tla-compiler.js test/test-ts-compiler.js test/test-ts-validator.js test/test-perf-optimizations.js",
     "test:compile": "node --test --test-concurrency=2 test/test-compiler.js test/test-compile-retry.js test/test-all-fixtures.js test/test-render-api.js",
@@ -14,13 +14,9 @@
   },
   "dependencies": {
     "@mermaid-js/mermaid-cli": "^11.4.0",
-    "@tailwindcss/cli": "^4.2.1",
-    "dotenv": "^17.3.1",
     "duckdb": "^1.4.4",
     "express": "^5.1.0",
     "multer": "^2.1.1",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
     "three": "^0.183.2"
   },
   "engines": {
@@ -28,12 +24,6 @@
   },
   "private": true,
   "devDependencies": {
-    "@types/react": "^19.2.14",
-    "@types/react-dom": "^19.2.3",
-    "autoprefixer": "^10.4.27",
-    "esbuild": "^0.27.4",
-    "postcss": "^8.5.8",
-    "tailwindcss": "^4.2.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }

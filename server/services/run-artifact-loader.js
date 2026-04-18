@@ -7,9 +7,18 @@ const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const RUNS_DIR = path.join(PROJECT_ROOT, 'runs');
 const FLOWS_DIR = path.join(PROJECT_ROOT, 'flows');
 
+/**
+ * Resolve a repo-relative URL path (e.g. /flows/x/a.tla) to an absolute path under PROJECT_ROOT.
+ * Rejects traversal so run JSON cannot escape the repo.
+ */
 function resolveArtifactPath(urlPath) {
   if (!urlPath || typeof urlPath !== 'string') return null;
-  return path.join(PROJECT_ROOT, urlPath.replace(/^\/+/, ''));
+  const clean = urlPath.replace(/^\/+/, '').trim();
+  if (!clean) return null;
+  const resolved = path.resolve(PROJECT_ROOT, clean);
+  const rel = path.relative(PROJECT_ROOT, resolved);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return resolved;
 }
 
 async function readTextArtifact(urlPath) {
@@ -28,7 +37,10 @@ async function loadRunData(runId) {
 }
 
 function persistRunData(runPath, runData) {
-  return fsp.writeFile(runPath, JSON.stringify(runData, null, 2), 'utf8');
+  const body = process.env.MERMATE_RUN_JSON_PRETTY === '1'
+    ? JSON.stringify(runData, null, 2)
+    : JSON.stringify(runData);
+  return fsp.writeFile(runPath, body, 'utf8');
 }
 
 function extractFactsAndPlan(runData) {

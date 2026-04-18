@@ -12,6 +12,7 @@ archs/*
 .venv-mcp/
 __pycache__/
 *.py[cod]
+.tmp/
 
 # Ignore outputs and temp artifacts
 prompt-example.md
@@ -23,9 +24,13 @@ tla-dump/
 server/backend/*.duckdb
 server/backend/*.duckdb.wal
 
-# Ignore experiment outputs
+# Ignore experiment outputs and stale build artifacts
 mermate-arch-GoT.txt
 GoT.tex
+public/js/bundle.js
+public/js/bundle.js.map
+public/js/bundle.css
+public/js/bundle.css.map
 
 # Ignore prompts and media (no risk material)
 push-to-limit.prompt

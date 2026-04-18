@@ -43,9 +43,56 @@ const _estimateCost = catalog.estimateCost;
 
 async function _atomicWrite(filePath, data) {
   const tmpPath = filePath + '.tmp';
-  const json = JSON.stringify(data, null, 2);
+  const tSer = Date.now();
+  // Compact JSON: faster stringify + smaller writes for large manifests (many agent_calls).
+  // Parsers are unaffected; use jq or MERMATE_RUN_JSON_PRETTY=1 only if you need diffs.
+  const json = process.env.MERMATE_RUN_JSON_PRETTY === '1'
+    ? JSON.stringify(data, null, 2)
+    : JSON.stringify(data);
+  const serMs = Date.now() - tSer;
+  // #region agent log
+  if (process.env.MERMATE_DEBUG_PIPELINE === '1') fetch('http://127.0.0.1:7647/ingest/a2d7b582-6018-42c8-abf3-55f08db02976', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '984aae' },
+    body: JSON.stringify({
+      sessionId: '984aae',
+      hypothesisId: 'H-A',
+      location: 'run-tracker.js:_atomicWrite',
+      message: 'manifest_serialize_write',
+      data: {
+        serMs,
+        jsonChars: json.length,
+        jsonKb: Math.round(json.length / 1024),
+        status: data.status,
+        agentCalls: (data.agent_calls && data.agent_calls.length) || 0,
+        runId: (data.run_id || '').slice(0, 8),
+      },
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+  // #endregion
+  const tWr = Date.now();
   await fsp.writeFile(tmpPath, json, 'utf8');
+  const writeMs = Date.now() - tWr;
+  const tRen = Date.now();
   await fsp.rename(tmpPath, filePath);
+  const renameMs = Date.now() - tRen;
+  // #region agent log
+  if (process.env.MERMATE_DEBUG_PIPELINE === '1' && (writeMs + renameMs > 5 || json.length > 20_000)) {
+    fetch('http://127.0.0.1:7647/ingest/a2d7b582-6018-42c8-abf3-55f08db02976', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '984aae' },
+      body: JSON.stringify({
+        sessionId: '984aae',
+        hypothesisId: 'H-A',
+        location: 'run-tracker.js:_atomicWrite',
+        message: 'manifest_fs_io',
+        data: { writeMs, renameMs, runId: (data.run_id || '').slice(0, 8) },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+  }
+  // #endregion
 }
 
 // ---- Run lifecycle ---------------------------------------------------------
@@ -494,6 +541,9 @@ async function finalize(runId, status = 'completed') {
 
   await _atomicWrite(path.join(RUNS_DIR, `${m.run_id}.json`), m);
   _activeRuns.delete(runId);
+
+  // Persist trace store events to disk
+  try { require('./trace-store').persist(runId); } catch { /* optional */ }
 
   // Non-blocking post-finalization hooks (fire-and-forget)
   if (status === 'completed') {

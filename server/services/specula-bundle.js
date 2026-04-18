@@ -3,6 +3,12 @@
 const tlaCompiler = require('./tla-compiler');
 const SPECULA_REFERENCE = require('./specula-reference');
 
+function _jsonSpecula(obj) {
+  return process.env.MERMATE_SPECULA_JSON_PRETTY === '1'
+    ? JSON.stringify(obj, null, 2)
+    : JSON.stringify(obj);
+}
+
 function _slug(text) {
   return String(text || '')
     .toLowerCase()
@@ -51,9 +57,13 @@ function _boundaryCrossings(facts) {
 
 function deriveBugFamilies(ctx) {
   const families = [];
-  const crossings = _boundaryCrossings(ctx.facts);
-  const asyncRelationships = (ctx.facts?.relationships || []).filter((relationship) => relationship.edgeType === 'async');
-  const statefulEntities = (ctx.facts?.entities || []).filter((entity) => (
+  const facts = ctx.facts || {};
+  const relationships = facts.relationships || [];
+  const failurePaths = facts.failurePaths || [];
+  const entities = facts.entities || [];
+  const crossings = _boundaryCrossings(facts);
+  const asyncRelationships = relationships.filter((relationship) => relationship.edgeType === 'async');
+  const statefulEntities = entities.filter((entity) => (
     ['service', 'gateway', 'store', 'cache', 'queue', 'broker', 'actor', 'external'].includes(entity.type)
   ));
   const interactionBindings = ctx.tsxManifest?.interactions || [];
@@ -84,21 +94,21 @@ function deriveBugFamilies(ctx) {
     });
   }
 
-  if ((ctx.facts?.failurePaths || []).length > 0) {
+  if (failurePaths.length > 0) {
     families.push({
       id: 'family-recovery-guards',
       name: 'Recovery Guard Coverage',
       mechanism: 'Failure and recovery logic can drift unless every named failure path becomes an explicit invariant and recovery expectation.',
       evidence: {
         historical: ['Design-time evidence only: recovery paths were extracted from the authored architecture.'],
-        code_analysis: (ctx.facts?.failurePaths || []).map((failurePath) => (
+        code_analysis: failurePaths.map((failurePath) => (
           `${failurePath.trigger}: ${failurePath.condition} -> ${failurePath.handler} / ${failurePath.recovery}`
         )),
       },
-      affectedCodePaths: (ctx.facts?.failurePaths || []).map((failurePath) => `planned:${failurePath.trigger}`),
+      affectedCodePaths: failurePaths.map((failurePath) => `planned:${failurePath.trigger}`),
       suggestedModelingApproach: {
         variables: ['recoveryState'],
-        actions: (ctx.facts?.failurePaths || []).map((failurePath) => failurePath.trigger || 'unknown'),
+        actions: failurePaths.map((failurePath) => failurePath.trigger || 'unknown'),
         granularity: 'Keep trigger and recovery as separate action steps so TLC can distinguish normal flow from degraded flow.',
       },
       priority: 'High',
@@ -155,6 +165,7 @@ function deriveBugFamilies(ctx) {
 }
 
 function buildModelingBrief(ctx) {
+  const facts = ctx.facts || {};
   const families = deriveBugFamilies(ctx);
   const extensions = families.map((family) => ({
     extension: family.name,
@@ -185,9 +196,9 @@ function buildModelingBrief(ctx) {
       systemName: ctx.diagramName,
       language: 'TypeScript-first architecture scaffold with Python and Rust synthesis targets',
       scale: {
-        entities: (ctx.facts?.entities || []).length,
-        relationships: (ctx.facts?.relationships || []).length,
-        boundaries: (ctx.facts?.boundaries || []).length,
+        entities: (facts.entities || []).length,
+        relationships: (facts.relationships || []).length,
+        boundaries: (facts.boundaries || []).length,
       },
       protocol: 'Mermate artifact pipeline from idea to markdown, Mermaid, TSX scaffold, and TLA+ specification bundle',
       keyArchitecturalChoices: [
@@ -523,6 +534,7 @@ function buildTraceModule(ctx) {
 }
 
 function buildInstrumentationSpec(ctx, modelingBrief) {
+  const planned = ctx.tsxManifest?.plannedModules || [];
   const lines = [
     '# Instrumentation Spec',
     '',
@@ -539,8 +551,25 @@ function buildInstrumentationSpec(ctx, modelingBrief) {
   ];
 
   for (const action of ctx.actions) {
-    const binding = (ctx.tsxManifest?.plannedModules || []).find((modulePlan) => modulePlan.purpose?.includes(action.fromId))
-      || (ctx.tsxManifest?.plannedModules || []).find((modulePlan) => modulePlan.path?.includes(_slug(action.fromId)));
+    const fromId = action.fromId;
+    const slugFrom = _slug(fromId);
+    let binding = null;
+    for (let i = 0; i < planned.length; i++) {
+      const modulePlan = planned[i];
+      if (modulePlan.purpose?.includes(fromId)) {
+        binding = modulePlan;
+        break;
+      }
+    }
+    if (!binding) {
+      for (let i = 0; i < planned.length; i++) {
+        const modulePlan = planned[i];
+        if (modulePlan.path?.includes(slugFrom)) {
+          binding = modulePlan;
+          break;
+        }
+      }
+    }
     const codeLocation = binding?.path || `planned:src/runtime/${_slug(action.actionName)}.ts`;
     lines.push(`| ${action.actionName} | ${codeLocation} | after state transition | ${action.actionName} | source,target,state | Derived from Mermaid relationship ${action.fromId} -> ${action.toId} |`);
   }
@@ -632,7 +661,7 @@ function buildSpeculaBundle(ctx) {
 
   const files = [
     { relativePath: 'specula/modeling-brief.md', content: modelingBriefMarkdown },
-    { relativePath: 'specula/modeling-brief.json', content: JSON.stringify(modelingBrief, null, 2) },
+    { relativePath: 'specula/modeling-brief.json', content: _jsonSpecula(modelingBrief) },
     { relativePath: 'specula/base.tla', content: ctx.baseTlaSource },
     { relativePath: 'specula/base.cfg', content: ctx.baseCfgSource },
     { relativePath: 'specula/MC.tla', content: mc.source },
@@ -640,8 +669,8 @@ function buildSpeculaBundle(ctx) {
     { relativePath: 'specula/Trace.tla', content: trace.source },
     { relativePath: 'specula/Trace.cfg', content: trace.cfgSource },
     { relativePath: 'specula/instrumentation-spec.md', content: instrumentationMarkdown },
-    { relativePath: 'specula/validation-loop.json', content: JSON.stringify(validationLoop, null, 2) },
-    { relativePath: 'specula/index.json', content: JSON.stringify({
+    { relativePath: 'specula/validation-loop.json', content: _jsonSpecula(validationLoop) },
+    { relativePath: 'specula/index.json', content: _jsonSpecula({
       upstream: SPECULA_REFERENCE,
       generatedAt: new Date().toISOString(),
       files: [
@@ -657,7 +686,7 @@ function buildSpeculaBundle(ctx) {
         'validation-loop.json',
         ...huntConfigs.map((config) => config.fileName),
       ],
-    }, null, 2) },
+    }) },
     ...huntConfigs.map((config) => ({
       relativePath: `specula/${config.fileName}`,
       content: config.cfgSource,

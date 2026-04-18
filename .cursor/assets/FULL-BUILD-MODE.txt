@@ -1,0 +1,100 @@
+Run in **FULL BUILD MODE** for Mermate.
+
+This mode chains the entire pipeline in one pass: Idea → Architecture → Mermaid Diagram → TLA+ Specification → TypeScript Runtime → Downloadable Bundle.
+
+## Model policy
+Use [MODEL] as the main reasoning model for problem interpretation, decomposition, and architecture drafting.
+Use local copilot reasoning and cheap/default renders during the architecture phase.
+Use Max mode for the final Mermaid render before entering the TLA+ pipeline.
+TLA+ generation uses Specula (Anthropic Claude) via CLAUDE_API_KEY for formal specification synthesis.
+TypeScript compilation uses the deterministic ts-compiler with tsc validation and harness testing.
+
+## Inputs
+Problem statement:
+[PROBLEM_STATEMENT]
+
+System goal / outcome:
+[SYSTEM_GOAL]
+
+Known constraints:
+[CONSTRAINTS]
+
+Known actors / users:
+[ACTORS]
+
+Known services / components:
+[KNOWN_COMPONENTS]
+
+Known failure/risk/policy concerns:
+[FAILURE_POLICY_NOTES]
+
+## Mission
+Take a simple idea and produce a complete, verified, downloadable codebase through five automated stages.
+The human provides the idea and optional steering notes between stages. Everything else is autonomous.
+
+## Pipeline stages
+
+### Stage 1: Architecture (Thinking)
+1. Understand the problem being solved.
+2. Extract actors, services, stores, constraints, flows, failure paths.
+3. Create an architecture draft through iterative Mermate reasoning.
+4. Run multi-role planning with up to 3 domain-expert agents.
+5. Apply graduated refinement (heavy rewrite < 0.5, gap-fill 0.5-0.7, skip > 0.7).
+6. Preview render with cheap/default mode for validation.
+7. Pause for optional user notes.
+8. Final Max render to produce the definitive Mermaid diagram.
+
+### Stage 2: TLA+ Specification (Specula)
+After the Mermaid diagram is finalized:
+1. Extract architectural facts (entities, relationships, boundaries, failure paths).
+2. Map entities to TLA+ variables, relationships to actions, failure paths to invariants.
+3. Generate modeling brief and bug family analysis via Specula.
+4. Compile TLA+ module (MC.tla) and configuration (spec.cfg).
+5. Validate with SANY parser — repair loop if syntax errors found.
+6. Run TLC model checker — analyze violations or confirm invariant satisfaction.
+7. Store all Specula artifacts (modeling brief, MC spec, trace spec, instrumentation spec).
+
+### Stage 3: TypeScript Runtime (Compilation)
+After TLA+ verification passes (SANY valid):
+1. Build compilation context from architectural facts + TLA+ source + metrics.
+2. Generate TypeScript runtime class via ts-compiler deterministic mapping.
+3. Generate test harness aligned to TLA+ invariants.
+4. Compile with tsc — repair loop if type errors found.
+5. Run harness — repair loop if tests fail.
+6. Compute coverage (entity, action, invariant coverage percentages).
+7. Store TypeScript source and harness artifacts.
+
+### Stage 4: Bundle Assembly
+After TypeScript compilation succeeds:
+1. Assemble structured directory: diagram.mmd, spec/MC.tla, spec/spec.cfg, src/index.ts, src/harness.ts.
+2. Include Specula artifacts (modeling brief, trace spec) in spec/.
+3. Generate README.md with pipeline summary and structure description.
+4. Generate manifest.json with metrics, cost, wall clock time.
+5. Emit bundle_ready event with all artifact paths.
+6. Frontend triggers ZIP download of the full codebase.
+
+## Required operating behavior during Full Build
+- Each stage gates the next: architecture must render before TLA+, SANY must pass before TypeScript.
+- Stream narration events for every sub-stage so the user sees real-time progress.
+- If any stage fails, report the error clearly and stop — do not proceed to the next stage with invalid inputs.
+- The user should not need to type anything after the initial idea. Every input is auto-sourced from the previous stage.
+- After the bundle is ready, the user has one action: download.
+
+## System capabilities (active in pipeline)
+- **Multi-role planning:** Up to 3 domain-expert agents reason concurrently. Best plan wins by quality + completeness.
+- **Graduated refinement:** Pressure gated by scoring — heavy/targeted/skip.
+- **2-branch composition:** Two competing Mermaid layouts scored and merged.
+- **Specula formal specification:** Bug family analysis, modeling brief, bounded model-checking scaffold.
+- **SANY/TLC verification:** Parser validation + state-space exploration with invariant checking.
+- **TypeScript deterministic mapping:** Facts + TLA+ → monolithic TS runtime with full harness.
+- **Bounded repair loops:** Each stage (TLA+ and TS) has a repair budget before declaring failure.
+- **GoT controller budget:** State count capped at 40, branching halts when budget reached.
+
+## Judgment standard
+The result must feel like a professional architect and formal methods engineer collaborated to produce:
+1. A correct architecture diagram that reflects the actual problem.
+2. A TLA+ specification that formally verifies the architecture's invariants.
+3. A TypeScript runtime that implements the specified behavior with passing tests.
+4. A structured, downloadable codebase ready for engineering use.
+
+Do not reward surface complexity. Reward correctness, formal rigor, and end-to-end completeness.
