@@ -43,6 +43,15 @@ const _useDirectFallback = OPENAI_BASE_URL !== OPENAI_DIRECT_URL;
 let _traceId = null;
 function setTraceId(id) { _traceId = id; _fallbackEvents.length = 0; }
 
+// Architecture depth tier for the active run — `shallow` | `medium` | `deep`.
+// Set by render.js before the pipeline starts; cleared in `finally`.
+// Drives _selectModelForStage so deeper architectures escalate the final
+// composition / merge / max stages to the orchestrator tier even when the
+// user did NOT explicitly request Max mode.
+let _depthTier = null;
+function setDepthTier(tier) { _depthTier = tier || null; }
+function getDepthTier() { return _depthTier; }
+
 // Accumulates direct-fallback events for the current run so the render
 // response can include them in the UI payload.
 const _fallbackEvents = [];
@@ -97,6 +106,44 @@ const STAGE_MODEL_MAP = Object.freeze({
   compose_rust:        MODELS.worker,       // Rust codegen — gpt-5.2
   repair_rust:         MODELS.fast,         // cargo error repair — gpt-4.1-mini
 });
+
+// Stages that benefit most from local AI bootstrapping. The premium chain
+// remains a fallback when local providers are unavailable, but giving local
+// AI first crack at extracting facts and proposing a diagram plan builds the
+// "depth of model" before the premium API does final composition.
+//
+// Note: `copilot_suggest` and `copilot_enhance` are deliberately NOT in this
+// set. They are interactive UX features that must respond in under 2 seconds.
+// Routing them to a 20B local model on cold-start would block the textarea
+// for tens of seconds and feel broken to the user. Premium-first keeps the
+// click-to-result latency in the 700–1500ms range while local remains a
+// fallback if no premium key is configured.
+const LOCAL_PREFERRED_STAGES = new Set([
+  'fact_extraction',
+  'diagram_plan',
+]);
+
+// Stages where the final architectural quality is most sensitive — these
+// escalate to the orchestrator tier whenever the run's depth tier is
+// `medium` or `deep`, even without the user-facing Max toggle.
+const DEPTH_ESCALATING_STAGES = new Set([
+  'composition',
+  'max_composition',
+  'merge_composition',
+]);
+
+/**
+ * Pick the model for a stage, taking the current depth tier into account.
+ * Falls back to STAGE_MODEL_MAP, then to PREMIUM_MODEL.
+ */
+function _selectModelForStage(stage) {
+  const baseModel = STAGE_MODEL_MAP[stage] || PREMIUM_MODEL;
+  if (!DEPTH_ESCALATING_STAGES.has(stage)) return baseModel;
+  if (_depthTier === 'medium' || _depthTier === 'deep') {
+    return MODELS.orchestrator;
+  }
+  return baseModel;
+}
 
 // P5: Per-stage token caps — right-size output budget to reduce waste
 const STAGE_TOKEN_CAP = Object.freeze({
@@ -506,10 +553,10 @@ async function infer(stage, context = {}) {
   const userPrompt = context.userPrompt || '';
   const rateEvents = [];
 
-  const stageModel = STAGE_MODEL_MAP[stage] || PREMIUM_MODEL;
+  const stageModel = _selectModelForStage(stage);
   const stageTokenCap = STAGE_TOKEN_CAP[stage] || undefined;
 
-  const preferLocal = stage === 'copilot_suggest' || stage === 'copilot_enhance';
+  const preferLocal = LOCAL_PREFERRED_STAGES.has(stage);
 
   // Lazy health checks — skip network probes for providers we won't need
   const premiumOk = await _checkHealth('premium');
@@ -745,4 +792,8 @@ async function inferWithRole(stage, context, roleName) {
   }
 }
 
-module.exports = { infer, inferMax, inferWithRole, checkProviders, isMaxAvailable, setTraceId, getFallbackEvents, clearFallbackEvents };
+module.exports = {
+  infer, inferMax, inferWithRole, checkProviders, isMaxAvailable,
+  setTraceId, setDepthTier, getDepthTier,
+  getFallbackEvents, clearFallbackEvents,
+};

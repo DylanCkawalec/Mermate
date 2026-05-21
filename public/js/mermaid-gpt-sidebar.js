@@ -3,9 +3,10 @@
  * Manages diagram history, context menu deletion, and localStorage persistence.
  */
 window.MermaidSidebar = class MermaidSidebar {
-  constructor(listEl, onSelect) {
+  constructor(listEl, onSelect, onToast) {
     this.listEl = listEl;
     this.onSelect = onSelect;
+    this.onToast = onToast || (() => {}); // Optional toast callback
     this.STORAGE_KEY = 'mermaid-gpt-history';
     this.items = this._load();
     this.activeIndex = -1;
@@ -22,7 +23,7 @@ window.MermaidSidebar = class MermaidSidebar {
     try {
       const raw = localStorage.getItem(this.STORAGE_KEY);
       if (!raw) return [];
-      return JSON.parse(raw).filter(i => !i._pending);
+      return JSON.parse(raw);
     } catch {
       return [];
     }
@@ -54,8 +55,13 @@ window.MermaidSidebar = class MermaidSidebar {
       this.dialog.close();
 
       try {
-        await fetch(`/api/diagrams/${encodeURIComponent(name)}`, { method: 'DELETE' });
-      } catch { /* best effort */ }
+        const res = await fetch(`/api/diagrams/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(`Server responded ${res.status}`);
+        this.onToast(`"${this._humanize(name)}" deleted`, 'success', 2500);
+      } catch (err) {
+        console.error('Delete failed:', err);
+        this.onToast(`Failed to delete "${this._humanize(name)}" — ${err.message}`, 'error', 5000);
+      }
 
       this.items = this.items.filter(i => i.name !== name);
       if (this.activeIndex >= this.items.length) this.activeIndex = -1;
@@ -77,11 +83,15 @@ window.MermaidSidebar = class MermaidSidebar {
       if (i._pending && (!i.name || i.name === entry.name)) return false;
       return i.name !== entry.name;
     });
+    const isNew = !this.items.some(i => i.name === entry.name);
     this.items.unshift(entry);
     if (this.items.length > 50) this.items.length = 50;
     this._save();
     this.activeIndex = 0;
     this.render();
+    if (isNew && entry.name) {
+      this.onToast(`"${this._humanize(entry.name)}" saved to history`, 'success', 2500);
+    }
   }
 
   /**
@@ -175,6 +185,22 @@ window.MermaidSidebar = class MermaidSidebar {
 
   render() {
     this.listEl.innerHTML = '';
+    if (this.items.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'sidebar-empty';
+      empty.innerHTML = `
+        <div class="sidebar-empty-icon">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="2" y="2" width="12" height="12" rx="2"/>
+            <path d="M6 6h4M8 6v5"/>
+          </svg>
+        </div>
+        <div class="sidebar-empty-text">No diagrams yet</div>
+        <div class="sidebar-empty-hint">Render your first diagram to see it here</div>
+      `;
+      this.listEl.appendChild(empty);
+      return;
+    }
     this.items.forEach((item, idx) => {
       const btn = document.createElement('button');
       btn.className = 'sidebar-item' + (idx === this.activeIndex ? ' active' : '') + (item._pending ? ' pending' : '');
@@ -277,8 +303,14 @@ window.MermaidSidebar = class MermaidSidebar {
           item.name = data.new_name;
           if (item.paths) item.paths = data.paths;
           this._save();
+          this.onToast(`Renamed to "${this._humanize(newName)}"`, 'success', 2500);
+        } else {
+          throw new Error(data.error || 'Rename failed');
         }
-      } catch { /* best effort */ }
+      } catch (err) {
+        console.error('Rename failed:', err);
+        this.onToast(`Failed to rename — ${err.message}`, 'error', 5000);
+      }
       this.render();
     };
 

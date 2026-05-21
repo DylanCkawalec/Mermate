@@ -85,6 +85,7 @@ const guideRouter = require('./routes/guide');
 const artifactsRouter = require('./routes/artifacts');
 const rustRouter = require('./routes/rust');
 const traceRouter = require('./routes/trace');
+const runsRouter = require('./routes/runs');
 app.use('/api', renderRouter);
 app.use('/api', agentRouter);
 app.use('/api', transcribeRouter);
@@ -98,6 +99,7 @@ app.use('/api', guideRouter);
 app.use('/api', artifactsRouter);
 app.use('/api', rustRouter);
 app.use('/api', traceRouter);
+app.use('/api', runsRouter);
 
 // Run retention cleanup on startup (non-blocking)
 const runTracker = require('./services/run-tracker');
@@ -171,8 +173,15 @@ if (require.main === module) {
     if (_metaCronTimer.unref) _metaCronTimer.unref();
   }
 
-  process.on('SIGTERM', () => { if (_metaCronTimer) clearInterval(_metaCronTimer); rmBridge.destroy(); server.close(() => process.exit(0)); });
-  process.on('SIGINT',  () => { if (_metaCronTimer) clearInterval(_metaCronTimer); rmBridge.destroy(); server.close(() => process.exit(0)); });
+  const opseeqWsBridge = require('./services/opseeq-ws-bridge');
+  const _shutdown = () => {
+    if (_metaCronTimer) clearInterval(_metaCronTimer);
+    try { rmBridge.destroy(); } catch {}
+    try { opseeqWsBridge.close(); } catch {}
+    server.close(() => process.exit(0));
+  };
+  process.on('SIGTERM', _shutdown);
+  process.on('SIGINT', _shutdown);
 }
 
 module.exports = app;

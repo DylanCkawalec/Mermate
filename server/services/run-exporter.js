@@ -17,9 +17,25 @@ const path = require('node:path');
 const logger = require('../utils/logger');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
-const DUMP_DIR = process.env.MERMATE_DUMP_DIR
-  || path.resolve(require('node:os').homedir(), 'Desktop', 'MERMATE', 'dumps');
+const DEFAULT_DUMP_DIR = path.resolve(require('node:os').homedir(), 'Desktop', 'MERMATE', 'dumps');
+const DUMP_DIR = process.env.MERMATE_DUMP_DIR || DEFAULT_DUMP_DIR;
 const RETENTION_DAYS = parseInt(process.env.MERMATE_DUMP_RETENTION_DAYS || '30', 10);
+
+// Warn once at startup if MERMATE_DUMP_DIR points outside the writable home tree.
+// Silent failures here are a major debugging trap when dumps don't appear.
+let _warnedDumpDir = false;
+function _warnIfUnsafeDumpDir() {
+  if (_warnedDumpDir) return;
+  _warnedDumpDir = true;
+  const home = require('node:os').homedir();
+  if (!DUMP_DIR.startsWith(home)) {
+    logger.warn('run_exporter.unsafe_dump_dir', {
+      dump_dir: DUMP_DIR,
+      home,
+      hint: 'MERMATE_DUMP_DIR is outside the user home tree. Mermate may not have write permission. Set MERMATE_DUMP_DIR to a path under your home directory.',
+    });
+  }
+}
 
 async function _safeCopy(src, dest) {
   try {
@@ -33,6 +49,7 @@ async function _safeCopy(src, dest) {
 async function exportRun(runId, runData) {
   if (!runData || !runId) return;
 
+  _warnIfUnsafeDumpDir();
   const dumpPath = path.join(DUMP_DIR, runId);
 
   try {
@@ -97,18 +114,105 @@ async function exportRun(runId, runData) {
       }
     }
 
+    // Three labeled outcomes — the canonical Mermate output set.
+    // Each entry only appears when its artifacts exist on disk.
+    const outcomes = [];
+
+    if (diagramName) {
+      outcomes.push({
+        artifact_type: 'architecture_diagram',
+        diagram_name: diagramName,
+        files: {
+          mmd: copied.includes('diagram.mmd') ? `dumps/${runId}/diagram.mmd` : null,
+          svg: copied.includes('diagram.svg') ? `dumps/${runId}/diagram.svg` : null,
+          png: copied.includes('diagram.png') ? `dumps/${runId}/diagram.png` : null,
+        },
+        metrics: runData.final_artifact?.metrics || null,
+        depth_tier: runData.controller?.depth_tier || null,
+      });
+    }
+
+    if (runData.tla_artifacts?.tla) {
+      outcomes.push({
+        artifact_type: 'tla_specification',
+        module_name: runData.tla_metrics?.module_name || null,
+        files: {
+          tla: copied.includes('spec.tla') ? `dumps/${runId}/spec.tla` : null,
+          cfg: copied.includes('spec.cfg') ? `dumps/${runId}/spec.cfg` : null,
+        },
+        metrics: runData.tla_metrics || null,
+      });
+    }
+
+    if (runData.ts_artifacts?.source) {
+      outcomes.push({
+        artifact_type: 'typescript_runtime',
+        class_name: runData.ts_metrics?.class_name || null,
+        files: {
+          source: copied.includes('runtime.ts') ? `dumps/${runId}/runtime.ts` : null,
+          harness: copied.includes('runtime.harness.ts') ? `dumps/${runId}/runtime.harness.ts` : null,
+        },
+        metrics: runData.ts_metrics || null,
+      });
+    }
+
+    if (runData.tsx_artifacts?.app) {
+      outcomes.push({
+        artifact_type: 'tsx_scaffold',
+        diagram_name: diagramName,
+        files: {
+          app: runData.tsx_artifacts.app,
+          spec: runData.tsx_artifacts.spec,
+          manifest: runData.tsx_artifacts.manifest,
+        },
+        metrics: runData.tsx_metrics || null,
+      });
+    }
+
+    // Axiomatic dump manifest. Order is intentional — top-level scannable
+    // identity first (run_id, schema_version, tags), then sequenced
+    // lifecycle, then composition, then sum_check, then materialized
+    // outcomes. A consumer should be able to answer most questions from
+    // the first ~40 lines without descending into agent_calls.
     const manifest = {
+      // -- Identity --------------------------------------------------------
       run_id: runId,
+      schema_version: runData.schema_version || '1.0.0',
       exported_at: new Date().toISOString(),
       status: runData.status,
-      pipeline: runData.controller?.pipeline,
-      diagram_name: runData.final_artifact?.diagram_name,
+      diagram_name: runData.final_artifact?.diagram_name || null,
+
+      // -- Tags (flat scannable labels) ------------------------------------
+      tags: runData.tags || null,
+
+      // -- Lifecycle (ordered phases) --------------------------------------
+      lifecycle: runData.lifecycle || null,
+
+      // -- Composition (architecture instance combination metric) ----------
+      composition: runData.composition || null,
+
+      // -- Sum check (single-glance integrity verdict) ---------------------
+      sum_check: runData.sum_check || null,
+
+      // -- Routing decisions ----------------------------------------------
+      pipeline: runData.controller?.pipeline || null,
+      depth_score: runData.controller?.depth_score ?? null,
+      depth_tier: runData.controller?.depth_tier ?? null,
+      opseeq_session_id: runData.opseeq_session_id || null,
+
+      // -- Outcomes (materialized artifacts on disk) ----------------------
+      outcomes,
+
+      // -- Coarse stats ----------------------------------------------------
       agent_calls: runData.agent_calls?.length || 0,
       total_cost: runData.totals?.total_cost_est || 0,
       wall_clock_ms: runData.totals?.wall_clock_ms || 0,
       artifacts: copied,
+
+      // -- Downstream module metrics (preserved for backward compat) ------
       tla_metrics: runData.tla_metrics || null,
       ts_metrics: runData.ts_metrics || null,
+      tsx_metrics: runData.tsx_metrics || null,
     };
 
     await fsp.writeFile(

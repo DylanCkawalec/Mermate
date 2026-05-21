@@ -18,7 +18,6 @@
   }
 
   let cachedBaseUrl = 'http://127.0.0.1:8787';
-  let _btnDownTs = 0;
 
   function setChip(text, state) {
     chip.textContent = text;
@@ -62,39 +61,13 @@
     }
   }
 
-  function _updateGuideButton(active) {
-    if (active) {
-      btnOpen.classList.add('guide-active');
-      btnOpen.querySelector('span')?.remove();
-      const span = document.createElement('span');
-      span.textContent = 'Guide';
-      btnOpen.textContent = '';
-      btnOpen.appendChild(span);
-    } else {
-      btnOpen.classList.remove('guide-active');
-      btnOpen.querySelector('span')?.remove();
-      btnOpen.textContent = 'Opseeq';
-    }
-  }
-
-  btnOpen.addEventListener('mousedown', () => { _btnDownTs = Date.now(); });
-
-  btnOpen.addEventListener('mouseup', async (e) => {
-    const held = Date.now() - _btnDownTs;
-    _btnDownTs = 0;
-
-    if (held >= 400) {
-      await loadStatus();
-      if (typeof dialog.showModal === 'function') dialog.showModal();
-    } else {
-      if (window.MermateAutoGuide) {
-        const active = window.MermateAutoGuide.toggle();
-        _updateGuideButton(active);
-      }
-    }
+  // Opseeq button: single click opens the dialog. Guide auto-starts on first
+  // visit and re-arms when the project name changes — no manual toggle here.
+  btnOpen.addEventListener('click', async (e) => {
+    e.preventDefault();
+    await loadStatus();
+    if (typeof dialog.showModal === 'function') dialog.showModal();
   });
-
-  btnOpen.addEventListener('click', (e) => { e.preventDefault(); });
 
   btnClose.addEventListener('click', () => { dialog.close(); });
   btnRefresh.addEventListener('click', async () => { await loadStatus(); });
@@ -106,12 +79,12 @@
 
   void loadStatus();
 
+  // First-visit auto-start of the Guide is handled inside MermateAutoGuide
+  // (shouldAutoStart() consults localStorage + project-name change). The
+  // bridge only triggers the legacy "user explicitly enabled" path here.
   if (localStorage.getItem('mermate_guide_enabled') === 'true') {
     setTimeout(() => {
-      if (window.MermateAutoGuide) {
-        window.MermateAutoGuide.start();
-        _updateGuideButton(true);
-      }
+      if (window.MermateAutoGuide) window.MermateAutoGuide.start();
     }, 1000);
   }
 
@@ -126,8 +99,14 @@
     btnFlipToOpseeq.addEventListener('click', () => {
       sidebar.classList.add('flipped');
       if (sidebarOpseeqFrame && !sidebarOpseeqFrame.src) {
+        if (sidebarOpseeqStatus) sidebarOpseeqStatus.textContent = `Connecting to ${cachedBaseUrl}…`;
+        sidebarOpseeqFrame.onload = () => {
+          if (sidebarOpseeqStatus) sidebarOpseeqStatus.textContent = `Connected to ${cachedBaseUrl}`;
+        };
+        sidebarOpseeqFrame.onerror = () => {
+          if (sidebarOpseeqStatus) sidebarOpseeqStatus.textContent = `Failed to connect to ${cachedBaseUrl}`;
+        };
         sidebarOpseeqFrame.src = `${cachedBaseUrl}/?embed=mermate&mode=guide`;
-        if (sidebarOpseeqStatus) sidebarOpseeqStatus.textContent = `Connected to ${cachedBaseUrl}`;
       }
     });
     btnFlipBack.addEventListener('click', () => {

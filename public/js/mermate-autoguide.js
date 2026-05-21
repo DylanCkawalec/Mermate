@@ -23,6 +23,8 @@
   let _currentTarget = null;
   let _currentRuleId = null;
   let _completedActions = new Set();
+  let _dismissedActions = new Set();
+  let _actionTimestamps = new Map();
 
   // Opseeq AI-backed guide state
   let _opseeqSuggestions = [];
@@ -125,10 +127,31 @@
       results.push({ id: 'refine', target: '#mermaid-input', weight: 20, hint: 'Edit and re-render to refine' });
     }
 
+    const now = Date.now();
+    const COOLDOWN_MS = 30000; // 30 second cooldown for dismissed actions
+
     for (const r of results) {
-      if (_completedActions.has(r.id)) r.weight = Math.floor(r.weight / 2);
+      // Skip dismissed actions during cooldown
+      if (_dismissedActions.has(r.id)) {
+        const lastShown = _actionTimestamps.get(r.id) || 0;
+        if (now - lastShown < COOLDOWN_MS) {
+          r.weight = 0;
+          continue;
+        } else {
+          _dismissedActions.delete(r.id);
+        }
+      }
+
+      // Reduce weight for completed actions
+      if (_completedActions.has(r.id)) r.weight = Math.floor(r.weight / 3);
+
+      // Track timestamp for this action
+      if (r.weight > 0) {
+        _actionTimestamps.set(r.id, now);
+      }
     }
 
+    results = results.filter(r => r.weight > 0);
     results.sort((a, b) => b.weight - a.weight);
     return results;
   }
@@ -362,6 +385,11 @@
 
     if (_currentTarget && e.target && (_currentTarget === e.target || _currentTarget.contains(e.target))) {
       if (_currentRuleId) _completedActions.add(_currentRuleId);
+    } else if (_currentRuleId && _currentTarget) {
+      // User clicked elsewhere while a suggestion was active - mark as dismissed
+      if (e.target && !_currentTarget.contains(e.target)) {
+        _dismissedActions.add(_currentRuleId);
+      }
     }
 
     _clearHighlight(false);
@@ -429,15 +457,69 @@
 
   function resetSession() {
     _completedActions.clear();
+    _dismissedActions.clear();
+    _actionTimestamps.clear();
     _cascadeIndex = 0;
     if (_active) _evaluate();
   }
 
-  window.MermateAutoGuide = Object.freeze({ start, stop, toggle, isActive, resetSession });
+  // ---- First-visit auto-start ----------------------------------------------
 
-  if (localStorage.getItem('mermate_guide_enabled') === 'true') {
-    window.addEventListener('DOMContentLoaded', () => {
-      setTimeout(start, 800);
-    });
+  /**
+   * Determine if the Guide should auto-start.
+   *
+   * Two trigger paths:
+   *   1. First visit (no localStorage flag) → auto-start.
+   *   2. Project-name changed from a previous non-empty value to a new
+   *      non-empty value within this session → re-arm and auto-start.
+   *
+   * After completing a guided run OR explicit dismissal, the seen flag is
+   * set and the Guide stays quiet until path #2 fires again.
+   */
+  function shouldAutoStart() {
+    try {
+      const seen = localStorage.getItem('mermate_guide_seen') === 'true';
+      if (!seen) return true;
+
+      const lastName = sessionStorage.getItem('mermate_guide_last_name') || '';
+      const currentName = (document.getElementById('diagram-name-input')?.value || '').trim();
+      if (currentName && lastName && currentName !== lastName) return true;
+    } catch { /* storage unavailable */ }
+    return false;
   }
+
+  function _markSeen() {
+    try { localStorage.setItem('mermate_guide_seen', 'true'); } catch {}
+  }
+
+  function _trackProjectName() {
+    const input = document.getElementById('diagram-name-input');
+    if (!input) return;
+    const update = () => {
+      const v = (input.value || '').trim();
+      if (v) {
+        try { sessionStorage.setItem('mermate_guide_last_name', v); } catch {}
+      }
+    };
+    input.addEventListener('change', update);
+    input.addEventListener('blur', update);
+    update();
+  }
+
+  window.MermateAutoGuide = Object.freeze({
+    start, stop, toggle, isActive, resetSession, shouldAutoStart,
+    markSeen: _markSeen,
+  });
+
+  // Auto-start path: first visit or project-name change.
+  // Manual "guide_enabled" path is preserved for users who explicitly opted in.
+  window.addEventListener('DOMContentLoaded', () => {
+    _trackProjectName();
+    setTimeout(() => {
+      if (localStorage.getItem('mermate_guide_enabled') === 'true' || shouldAutoStart()) {
+        start();
+        _markSeen();
+      }
+    }, 800);
+  });
 })();

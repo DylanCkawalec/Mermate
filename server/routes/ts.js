@@ -269,7 +269,16 @@ router.post('/render/ts', async (req, res) => {
       success: validation.success,
     };
 
-    runData.ts_metrics = metrics;
+    const tsConfidence = validation.success ? 0.95 : (validation.compile.success ? 0.6 : 0.2);
+
+    runData.ts_metrics = {
+      ...metrics,
+      stage: 'ts',
+      diagram_name: name,
+      artifact_type: 'typescript_runtime',
+      class_name: compiled.className,
+      confidence: tsConfidence,
+    };
     runData.ts_artifacts = {
       source: `/flows/${name}/ts-runtime/${compiled.fileBase}.ts`,
       harness: `/flows/${name}/ts-runtime/${compiled.fileBase}.harness.ts`,
@@ -286,8 +295,6 @@ router.post('/render/ts', async (req, res) => {
       testRepairs: validation.tests.repairs,
       traces: validation.traces.length,
     });
-
-    const tsConfidence = validation.success ? 0.95 : (validation.compile.success ? 0.6 : 0.2);
 
     const responsePayload = {
       success: validation.success,

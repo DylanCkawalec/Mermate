@@ -419,7 +419,13 @@ function generateHint(recommendation, maturity, gaps, contentState) {
 
 const DOMAIN_BREADTH_RE = /\b(security|observability|event.?driven|infrastructure|deployment|auth|monitoring|tracing|resilience|compliance|governance|scaling|caching|load.?balancing)\b/gi;
 
-function scoreComplexity(shadow, intent, qualityScore = 0) {
+// Deep-domain keywords — when present, push the architecture toward "deep" tier
+// regardless of raw entity count. Covers high-rigor domains (fab/chip, safety,
+// real-time/concurrency, compliance) and high-coverage domains (multi-tenant,
+// distributed-systems).
+const DEEP_DOMAIN_RE = /\b(fabrication|semiconductor|wafer|lithograph|chip|fab|foundry|safety[- ]?critical|real[- ]?time|concurrency|consensus|raft|paxos|distributed|multi[- ]?tenant|sharding|throughput|latency|deadline|pipeline|compliance|regulatory|gdpr|hipaa|pci|audit|fault.?tolerance|byzantine|orchestration|orchestrator|kubernetes|k8s)\b/gi;
+
+function scoreComplexity(shadow, intent, qualityScore = 0, rawSource = '') {
   const factors = {};
 
   factors.entityDensity = Math.min(1.0, shadow.entities.length / 12);
@@ -433,10 +439,17 @@ function scoreComplexity(shadow, intent, qualityScore = 0) {
   factors.boundaryPresence = Math.min(1.0, shadow.boundaryTerms.length / 3);
 
   const domainTerms = new Set();
-  const fullText = shadow.entities.map(e => e.name).join(' ') + ' ' + (intent?.problemDomain || '');
+  const fullText = shadow.entities.map(e => e.name).join(' ') + ' ' + (intent?.problemDomain || '') + ' ' + (rawSource || '');
   const domainMatches = fullText.match(DOMAIN_BREADTH_RE) || [];
   domainMatches.forEach(d => domainTerms.add(d.toLowerCase()));
   factors.domainBreadth = Math.min(1.0, domainTerms.size / 3);
+
+  // Deep-domain coverage: counts unique deep-domain keywords across the source.
+  // A dog-walking app scores 0; a chip-fab description scores 1.0 quickly.
+  const deepTerms = new Set();
+  const deepMatches = fullText.match(DEEP_DOMAIN_RE) || [];
+  deepMatches.forEach(d => deepTerms.add(d.toLowerCase()));
+  factors.deepDomainCoverage = Math.min(1.0, deepTerms.size / 3);
 
   const decisionCount = countMatches(
     shadow.entities.map(e => e.name).join(' '),
@@ -449,6 +462,8 @@ function scoreComplexity(shadow, intent, qualityScore = 0) {
     factors.intentComplexity = 1.0;
   }
 
+  // Legacy complexity score — kept for backward compatibility with the
+  // shouldDecompose gate.
   const score = +(
     0.22 * factors.entityDensity
     + 0.15 * factors.relationshipDensity
@@ -460,6 +475,36 @@ function scoreComplexity(shadow, intent, qualityScore = 0) {
     + 0.10 * factors.intentComplexity
   ).toFixed(3);
 
+  // Architecture Depth Score — first-class metric used for tier selection.
+  // Weights are tuned so that:
+  //   • A two-line "dog walking app" stays shallow (sub-0.20).
+  //   • A description rich in deep-domain keywords (chip-fab, real-time,
+  //     distributed consensus, multi-tenant, compliance, …) reaches at
+  //     least the medium tier even when entity/relationship density is low.
+  //   • Dense, well-formed architecture descriptions reach `deep`.
+  const baseDepth =
+      0.16 * factors.entityDensity
+    + 0.10 * factors.relationshipDensity
+    + 0.07 * factors.relationshipDiversity
+    + 0.11 * factors.failurePathDensity
+    + 0.09 * factors.boundaryPresence
+    + 0.09 * factors.domainBreadth
+    + 0.28 * factors.deepDomainCoverage     // dominant signal for rigor domains
+    + 0.04 * factors.decisionDensity
+    + 0.06 * factors.intentComplexity;
+
+  // Floor: any prompt with strong deep-domain coverage (≥2 distinct
+  // keywords) is at least `medium`, even if it lacks explicit entities.
+  // This is the difference between routing a chip-fab description through
+  // the cheap fast tier and routing it through the orchestrator tier.
+  const deepDomainFloor = factors.deepDomainCoverage >= 0.66 ? 0.40 : 0;
+  const depthScore = +Math.max(baseDepth, deepDomainFloor).toFixed(3);
+
+  let depthTier;
+  if (+depthScore >= 0.65) depthTier = 'deep';
+  else if (+depthScore >= 0.35) depthTier = 'medium';
+  else depthTier = 'shallow';
+
   const meetsQualityFloor = qualityScore >= 0.3;
   const shouldDecompose = meetsQualityFloor && (
     +score > 0.65
@@ -467,7 +512,13 @@ function scoreComplexity(shadow, intent, qualityScore = 0) {
     || (shadow.entities.length >= 12)
   );
 
-  return { score: +score, shouldDecompose, factors };
+  return {
+    score: +score,
+    shouldDecompose,
+    factors,
+    architectureDepthScore: +depthScore,
+    architectureDepthTier: depthTier,
+  };
 }
 
 // ---- Main entry point -----------------------------------------------------
@@ -494,6 +545,9 @@ function analyze(text, mode = 'idea') {
       recommendation: 'suggest',
       hint: 'Describe what you want to diagram \u00b7 start with the problem you\'re solving',
       diagramSelection: null,
+      architectureDepthScore: 0,
+      architectureDepthTier: 'shallow',
+      architectureDepthFactors: null,
     };
   }
 
@@ -513,7 +567,7 @@ function analyze(text, mode = 'idea') {
   const intent = inferIntent(source);
   const diagramSelection = contentState === 'text' ? selectDiagramType(source) : null;
 
-  const complexity = scoreComplexity(shadow, intent, quality.score);
+  const complexity = scoreComplexity(shadow, intent, quality.score, source);
 
   const recommendation = decideAction(
     contentState, maturity, quality.score, completeness.score, validationResult,
@@ -538,6 +592,9 @@ function analyze(text, mode = 'idea') {
     complexity: complexity.score,
     complexityFactors: complexity.factors,
     shouldDecompose: complexity.shouldDecompose,
+    architectureDepthScore: complexity.architectureDepthScore,
+    architectureDepthTier: complexity.architectureDepthTier,
+    architectureDepthFactors: complexity.factors,
   };
 }
 

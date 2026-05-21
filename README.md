@@ -18,7 +18,7 @@ Describe a system in plain English. Mermate compiles it into production-quality 
 
 Mermate ships **without an AI model**. It is a diagram compilation engine with a copilot layer. You bring the model.
 
-**Tandem protocol (MERMATE ↔ Opseeq):** shared `run_id` / `X-Request-Id`, stage traces, URL rules, gateway fallback, and idea-to-binary packaging are documented in [docs/tandem-opseeq-protocol.md](docs/tandem-opseeq-protocol.md).
+**Tandem protocol (MERMATE ↔ Opseeq):** shared `run_id` / `X-Request-Id`, stage traces, optional WebSocket telemetry, URL rules, gateway fallback, run lineage, and idea-to-binary packaging are documented in [docs/tandem-opseeq-protocol.md](docs/tandem-opseeq-protocol.md).
 
 ---
 
@@ -30,23 +30,15 @@ Typical local stack:
 - **Ollama** (optional): local inference on `http://127.0.0.1:11434`
 - **Mermate**: idea → markdown → Mermaid → **TLA+** → **TypeScript runtime** → optional **Rust binary** and **macOS `.app`** on `http://127.0.0.1:3333`
 - **MCP**: Python bridge under `mcp_service/` with repo `.mcp.json` (virtualenv path may need adjusting after clone)
-- **Outputs**: diagram and formal artifacts under `flows/`; run lineage and traces under `runs/` (including `*.trace.json`); successful Rust packaging can copy a `.app` to the Desktop with a generated landing page and `skill.json` for agent consumption
+- **Outputs**: diagram and formal artifacts under `flows/`; run lineage and traces under `runs/` (including `*.trace.json`); optional export dumps under `~/Desktop/MERMATE/dumps` or `MERMATE_DUMP_DIR`; successful Rust packaging can copy a `.app` to the Desktop with a generated landing page and `skill.json` for agent consumption
 
 External OpenClaw desktop integrations can attach over MCP and HTTP using the `/api` routes listed below; they are not required for core Mermate operation.
 
-## Verified model reality on this machine
+## Model resolution caveat
 
-Observed on March 26, 2026:
+Mermate records the provider/model returned by the inference layer for each agent call. That matters because a gateway can legally resolve one requested model name to another serving model.
 
-- Local Ollama `gpt-oss:20b`: working
-- Local Ollama `nemotron-3-nano:4b`: working
-- Local Ollama `kimi-k2.5:cloud`: listed by Ollama, but direct chat currently returns `unauthorized`
-- Managed `inference.local` route: currently advertises `kimi-k2.5:cloud`, `nemotron-3-nano:4b`, and `gpt-oss:20b`
-- Managed-route requests for `kimi-k2.5:cloud`: currently resolve back to `nemotron-3-nano:4b`
-
-Important caveat:
-
-- The managed route can resolve to a different actual model than the requested one, so any wrapper should trust the response `model` field over the request payload.
+Developer rule: when debugging quality, cost, or latency, trust the response `model` field and the run JSON `agent_calls[*].model`, not only the model name in the request payload.
 
 ---
 
@@ -215,6 +207,9 @@ Representative HTTP surfaces:
 - `POST /api/render` (response may include `run_id`, `fallback_events`)
 - `GET /api/mermate/trace/:run_id` — stage event timeline (local store; see [docs/tandem-opseeq-protocol.md](docs/tandem-opseeq-protocol.md))
 - `POST /api/mermate/stage` — ingest stage event (same store)
+- `GET /api/runs`, `GET /api/runs/:run_id`, `GET /api/runs/:run_id/summary` — run lineage and per-stage agent-call summaries
+- `GET /api/runs/:runId/bundle` — downloadable full artifact bundle from export dump or live `flows/`/`runs/`
+- `GET /api/openclaw/ws-status` — local snapshot of the Mermate -> Opseeq WebSocket bridge
 - `GET /api/render/tla/status`, `POST /api/render/tla`
 - `GET /api/render/ts/status`, `POST /api/render/ts`
 - Rust packaging (e.g. compile + `.app`): routes under `server/routes/rust.js` as mounted in `server/index.js`
@@ -373,14 +368,9 @@ curl http://localhost:8100/health
 
 When the enhancer is healthy, the app shows "Enhancer: healthy" on startup and the `Enhance` checkbox becomes active.
 
-### Kimi 2.5 note
+### Non-OpenAI model note
 
-Kimi can fit in two ways, but the current local state matters:
-
-- If Ollama cloud auth is configured, Mermate can target `kimi-k2.5:cloud` through the existing Ollama path by setting `MERMATE_OLLAMA_MODEL=kimi-k2.5:cloud`
-- If you want to use Kimi through an OpenAI-compatible remote API, that needs a premium-provider base-url path that is not currently configurable in `server/services/inference-provider.js`
-
-So on this machine right now, Kimi is discoverable but not yet usable through either the local Ollama path or the managed NemoClaw route.
+Any OpenAI-compatible gateway can be used for hosted inference by setting `OPENAI_BASE_URL` to a `/v1` base and providing the matching API key. Ollama-backed models use `MERMATE_OLLAMA_URL` and `MERMATE_OLLAMA_MODEL`. In both cases, debug against the returned response model and the run JSON, because gateways may alias or route model names internally.
 
 ---
 
@@ -439,6 +429,13 @@ There is also:
 - `thinking`: build architecture from ideas, notes, or problem statements
 - `code-review`: recover architecture from an existing codebase
 - `optimize-mmd`: improve existing Mermaid or markdown without breaking intent
+- `tla-verify`: validate and repair the current TLA+ artifact
+- `tla-optimize`: strengthen invariants and state coverage in TLA+
+- `ts-generate`: compile the current run context to TypeScript
+- `ts-optimize`: improve generated TypeScript quality
+- `full-build`: run idea/Markdown/Mermaid through diagram, TLA+, TypeScript, and bundle handoff
+
+Agent calls are stage-aware. When the UI is on Markdown, Mermaid, TLA+, or TypeScript, the client passes `current_stage` and `current_run_id`; the server resumes from that artifact instead of forcing every run back through Simple Idea mode.
 
 ### How prompting behavior is controlled
 
@@ -473,7 +470,7 @@ The `.cursor/scripts/` directory contains Python modules for a **local AI enhanc
 
 ## Route overview
 
-Multiple routers are mounted under `/api` in `server/index.js` (render, agent, tla, ts, tsx, transcribe, search, openclaw, bundle, guide, artifacts, rust, trace, and others).
+Multiple routers are mounted under `/api` in `server/index.js` (render, agent, tla, ts, tsx, transcribe, search, openclaw, bundle, guide, artifacts, rust, trace, runs, and others).
 
 ### `server/routes/render.js`
 
@@ -505,6 +502,17 @@ Handles the staged architecture-agent workflow:
 
 This route makes Mermate more than a one-shot Mermaid compiler: it turns the app into a review-and-refine architecture copilot.
 
+### `server/routes/runs.js` and `server/routes/bundle.js`
+
+Run lineage is queryable after a render starts:
+
+- `GET /api/runs?limit=20`: recent run IDs
+- `GET /api/runs/:run_id`: full run manifest, loaded from memory or `runs/<run_id>.json`
+- `GET /api/runs/:run_id/summary`: per-stage agent-call counts, provider mix, token/cost estimates, lifecycle, composition, and `sum_check`
+- `GET /api/runs/:runId/bundle`: base64 file map for ZIP download; prefers `MERMATE_DUMP_DIR/<run_id>` when exported, otherwise reconstructs from live artifacts
+
+`run-tracker` writes flat `tags`, ordered `lifecycle` phases, `composition`, and `sum_check` so an external tool can answer what happened, what was produced, and whether the run is internally coherent without reverse-engineering every agent call.
+
 ---
 
 ## Project structure (brief)
@@ -519,6 +527,8 @@ mermaid/
 │   ├── routes/render.js    # Analyze, enhance, render, list, and delete diagrams
 │   ├── routes/agent.js     # Agent planning, preview, and finalize flows
 │   ├── routes/trace.js     # Stage trace ingest/readback (/api/mermate/*)
+│   ├── routes/runs.js      # Run lineage list/read/summary endpoints
+│   ├── routes/bundle.js    # Full run artifact bundle endpoint
 │   ├── routes/rust.js      # Rust compile, .app bundle, desktop deploy
 │   ├── routes/guide.js     # Auto Guide /api/guide/evaluate
 │   └── services/
@@ -531,7 +541,10 @@ mermaid/
 │       ├── axiom-prompts.js       # System prompts for each pipeline stage
 │       ├── inference-provider.js  # Premium API, Ollama, enhancer; X-Request-Id; fallback events
 │       ├── opseeq-bridge.js       # Opseeq health, inference proxy helpers, reportStage
+│       ├── opseeq-ws-bridge.js    # Optional WebSocket stage telemetry to Opseeq
 │       ├── trace-store.js         # In-memory + runs/*.trace.json stage store
+│       ├── run-tracker.js         # Run manifest, lifecycle, composition, sum_check
+│       ├── run-exporter.js        # Optional completed-run dumps
 │       ├── icon-generator.js      # DALL·E / GPT Image icons + macOS bundle helpers
 │       ├── landing-page-generator.js  # Packaged-app dashboard + skill.json
 │       └── gpt-enhancer-bridge.js # HTTP bridge to the enhancer service
@@ -615,6 +628,11 @@ MERMATE_OLLAMA_MODEL=gpt-oss:20b            # Optional Ollama model
 MERMAID_ENHANCER_URL=http://localhost:8100  # Enhancer service URL
 MERMAID_ENHANCER_TIMEOUT=15000              # Enhancer request timeout in ms
 MERMAID_ENHANCER_START_CMD="<command>"      # Auto-start command for the enhancer
+MERMATE_DUMP_DIR=~/Desktop/MERMATE/dumps    # Optional completed-run export directory
+MERMATE_DUMP_RETENTION_DAYS=30              # Export cleanup horizon
+OPSEEQ_WS_ENABLED=true                      # Optional low-latency Opseeq stage telemetry
+OPSEEQ_WS_URL=ws://localhost:9090/api/mermate/ws
+OPSEEQ_WS_TOKEN=<optional-token>
 ```
 
 ---

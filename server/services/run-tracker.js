@@ -112,6 +112,18 @@ async function _atomicWrite(filePath, data) {
  * @param {object} [opts.models]     - { orchestrator, worker, fast }
  * @returns {Promise<string>} runId
  */
+// Canonical lifecycle phases — every run progresses through these in order.
+// Recorded explicitly so any consumer (Opseeq Studio, dashboards, replays)
+// can answer "where is/was this run?" without parsing stages_executed.
+const LIFECYCLE_PHASES = Object.freeze([
+  'ingest',    // user input received, profile analyzed
+  'analyze',   // depth score, complexity, intent inferred
+  'plan',      // pipeline chosen, decompose / single-shot decided
+  'compose',   // LLM(s) produce mmd source(s)
+  'compile',   // mermaid-cli renders SVG/PNG, repair loop
+  'finalize',  // totals, exports, downstream artifacts
+]);
+
 async function create(opts = {}) {
   await fsp.mkdir(RUNS_DIR, { recursive: true });
   const runId = randomUUID();
@@ -124,6 +136,24 @@ async function create(opts = {}) {
     created_at: now,
     completed_at: null,
     status: 'running',
+
+    // Flat scannable labels — initialized at create, refreshed at finalize.
+    // Every consumer can index/filter by these without descending into the
+    // sub-objects below. This is the axiomatic identity of the run.
+    tags: {
+      mode: opts.mode || 'direct',
+      max_mode: !!opts.maxMode,
+      enhance: !!opts.enhance,
+      input_mode: opts.inputMode || null,
+      domain: 'unknown',           // refreshed once profile is set
+      depth_tier: 'unknown',       // refreshed when depth is set
+      pipeline: null,              // refreshed by setPipeline
+      was_decomposed: false,       // refreshed when subviews exist
+      has_diagram: false,          // refreshed at finalize
+      has_tla: false,              // refreshed when TLA artifacts attach
+      has_typescript: false,       // refreshed when TS artifacts attach
+      has_tsx: false,              // refreshed when TSX artifacts attach
+    },
 
     settings: {
       mode: opts.mode || 'direct',
@@ -148,7 +178,29 @@ async function create(opts = {}) {
       depth_reached: 0,
       max_depth: opts.gotConfig?.maxDepth || 3,
       stages_executed: [],
+      depth_score: null,
+      depth_tier: null,
+      depth_factors: null,
     },
+
+    // Ordered lifecycle phases. Each is { phase, started_at, completed_at, ok }.
+    // _recordPhase() appends a phase as it begins; _completePhase() closes it.
+    // Computed at finalize so partial runs still produce a coherent timeline.
+    lifecycle: {
+      phases: [],
+      current_phase: null,
+      phase_seq: 0,
+    },
+
+    // Architecture composition metrics — quantifies how many distinct
+    // architecture instances the run combined and how cleanly they merged.
+    // Filled in by _computeComposition() at finalize.
+    composition: null,
+
+    // Single-glance integrity verdict — { ok, issues[] } computed at finalize.
+    sum_check: null,
+
+    opseeq_session_id: opts.opseeqSessionId || null,
 
     agent_calls: [],
     branches: [],
@@ -191,6 +243,8 @@ function setProfile(runId, profile) {
     content_state: profile.contentState,
     complexity: profile.complexity,
     should_decompose: profile.shouldDecompose,
+    architecture_depth_score: profile.architectureDepthScore ?? null,
+    architecture_depth_tier: profile.architectureDepthTier ?? null,
     entity_count: profile.shadow?.entities?.length || 0,
     shadow: {
       entities: (profile.shadow?.entities || []).slice(0, 30).map(e => ({ name: e.name, type: e.type })),
@@ -198,6 +252,19 @@ function setProfile(runId, profile) {
       gaps: (profile.shadow?.gaps || []).slice(0, 10),
     },
   };
+
+  if (profile.architectureDepthScore != null) {
+    m.controller.depth_score = profile.architectureDepthScore;
+    m.controller.depth_tier = profile.architectureDepthTier || null;
+    m.controller.depth_factors = profile.architectureDepthFactors || null;
+    m.tags.depth_tier = profile.architectureDepthTier || 'unknown';
+  }
+
+  // Surface inferred problem domain on the tags so consumers see a flat
+  // label like 'fabrication' or 'distributed-systems' without descending.
+  if (profile.intent?.problemDomain) {
+    m.tags.domain = profile.intent.problemDomain;
+  }
 }
 
 // ---- Pipeline recording ----------------------------------------------------
@@ -206,6 +273,69 @@ function setPipeline(runId, pipeline) {
   const m = _activeRuns.get(runId);
   if (!m) return;
   m.controller.pipeline = pipeline;
+  m.tags.pipeline = pipeline || null;
+}
+
+function setDepth(runId, { score, tier, factors }) {
+  const m = _activeRuns.get(runId);
+  if (!m) return;
+  if (typeof score === 'number') m.controller.depth_score = score;
+  if (tier) {
+    m.controller.depth_tier = tier;
+    m.tags.depth_tier = tier;
+  }
+  if (factors) m.controller.depth_factors = factors;
+}
+
+// ---- Lifecycle phase tracking ----------------------------------------------
+
+/**
+ * Mark the start of a lifecycle phase. Closes any prior open phase first
+ * (idempotent — calling twice on the same phase is a no-op). Phase names
+ * outside LIFECYCLE_PHASES are still accepted but logged so we notice
+ * drift between code and the canonical list.
+ */
+function recordPhase(runId, phase) {
+  const m = _activeRuns.get(runId);
+  if (!m) return;
+  if (!LIFECYCLE_PHASES.includes(phase)) {
+    logger.debug('run_tracker.phase_unknown', { runId: runId.slice(0, 8), phase });
+  }
+
+  // Close any in-flight phase before opening the new one.
+  const open = m.lifecycle.phases.find(p => !p.completed_at);
+  if (open && open.phase === phase) return;
+  if (open) open.completed_at = new Date().toISOString();
+
+  m.lifecycle.phases.push({
+    phase,
+    seq: m.lifecycle.phase_seq,
+    started_at: new Date().toISOString(),
+    completed_at: null,
+    ok: null,
+  });
+  m.lifecycle.current_phase = phase;
+  m.lifecycle.phase_seq += 1;
+}
+
+/**
+ * Mark a phase complete. `ok` is optional — when omitted we infer from
+ * the run's status at finalize time.
+ */
+function completePhase(runId, phase, ok = true) {
+  const m = _activeRuns.get(runId);
+  if (!m) return;
+  const p = [...m.lifecycle.phases].reverse().find(x => x.phase === phase && !x.completed_at);
+  if (!p) return;
+  p.completed_at = new Date().toISOString();
+  p.ok = ok;
+  if (m.lifecycle.current_phase === phase) m.lifecycle.current_phase = null;
+}
+
+function setOpseeqSession(runId, sessionId) {
+  const m = _activeRuns.get(runId);
+  if (!m) return;
+  m.opseeq_session_id = sessionId || null;
 }
 
 function addStage(runId, stage) {
@@ -229,6 +359,7 @@ function recordAgentCall(runId, {
   validation = null, decision = 'retained',
   parentStateId = 'root', batchId = null,
   rateLimit = null,
+  depthTier = null, contextEst = null, actionTag = null,
 }) {
   const m = _activeRuns.get(runId);
   if (!m) return null;
@@ -244,6 +375,7 @@ function recordAgentCall(runId, {
     role,
     model,
     provider,
+    depth_tier: depthTier || m.controller.depth_tier || null,
     prompt_hash: _hash16(promptText),
     prompt_tokens_est: tokensIn,
     output_tokens_est: tokensOut,
@@ -259,9 +391,69 @@ function recordAgentCall(runId, {
     decision,
     parent_state_id: parentStateId,
     batch_id: batchId,
+    context_est: contextEst || null,
+    action_tag: actionTag || null,
   });
 
   return callId;
+}
+
+/**
+ * Summarize agent calls for a run: per-stage counts and totals.
+ * Used by GET /api/runs/:run_id/summary (Opseeq Studio).
+ */
+function summarizeAgentCalls(runId) {
+  const m = _activeRuns.get(runId);
+  if (!m) return null;
+
+  const byStage = {};
+  let totalTokensIn = 0, totalTokensOut = 0, totalCost = 0, totalLatency = 0;
+
+  for (const call of m.agent_calls) {
+    const stage = call.stage || 'unknown';
+    if (!byStage[stage]) {
+      byStage[stage] = { count: 0, success: 0, failed: 0, tokens_in: 0, tokens_out: 0, cost_est: 0, latency_ms: 0, providers: {} };
+    }
+    const s = byStage[stage];
+    s.count += 1;
+    if (call.success) s.success += 1; else s.failed += 1;
+    s.tokens_in += call.prompt_tokens_est || 0;
+    s.tokens_out += call.output_tokens_est || 0;
+    s.cost_est += call.cost_est || 0;
+    s.latency_ms += call.latency_ms || 0;
+    const prov = call.provider || 'unknown';
+    s.providers[prov] = (s.providers[prov] || 0) + 1;
+
+    totalTokensIn += call.prompt_tokens_est || 0;
+    totalTokensOut += call.output_tokens_est || 0;
+    totalCost += call.cost_est || 0;
+    totalLatency += call.latency_ms || 0;
+  }
+
+  for (const s of Object.values(byStage)) {
+    s.cost_est = +s.cost_est.toFixed(6);
+  }
+
+  return {
+    run_id: runId,
+    status: m.status,
+    tags: m.tags || null,
+    depth_score: m.controller.depth_score,
+    depth_tier: m.controller.depth_tier,
+    pipeline: m.controller.pipeline,
+    opseeq_session_id: m.opseeq_session_id || null,
+    lifecycle: m.lifecycle || null,
+    composition: m.composition || null,
+    sum_check: m.sum_check || null,
+    totals: {
+      agent_calls: m.agent_calls.length,
+      tokens_in: totalTokensIn,
+      tokens_out: totalTokensOut,
+      cost_est: +totalCost.toFixed(6),
+      latency_ms: totalLatency,
+    },
+    by_stage: byStage,
+  };
 }
 
 // ---- Branch recording ------------------------------------------------------
@@ -313,6 +505,7 @@ function addSubview(runId, {
     seq: m.subviews.length,
     view_name: viewName,
     view_description: viewDescription.slice(0, 500),
+    artifact_type: 'architecture_subview',
     agent_call_ids: agentCallIds,
     mmd_source: mmdField,
     score: score || null,
@@ -321,6 +514,9 @@ function addSubview(runId, {
     retained,
     merge_eligible: mergeEligible,
   });
+
+  // Flip the decomposition tag so the run is filterable as multi-instance.
+  m.tags.was_decomposed = true;
 
   return subviewId;
 }
@@ -494,6 +690,119 @@ function _computeTotals(m) {
 }
 
 /**
+ * Quantify how many distinct architecture instances were combined and how
+ * cleanly they merged. This is the single number that answers
+ * "did the system actually combine multiple architectures into one?".
+ *
+ *   architecture_instances           = retained subviews count (≥1, =1 for single-shot)
+ *   instance_combination_factor      = post_merge_score / max(pre_merge_score, ε)
+ *                                      → ≥1.0 when merge improved on the best subview
+ *                                      → <1.0 when merge underperformed (regression)
+ *   merge_quality                    = 'unattempted' | 'accepted' | 'rejected' | 'regression'
+ */
+function _computeComposition(m) {
+  const subviewCount = m.subviews.length;
+  const retainedCount = m.subviews.filter(s => s.retained).length;
+  const isSingleShot = subviewCount <= 1;
+
+  let combinationFactor = null;
+  let mergeQuality = 'unattempted';
+
+  if (m.merge?.required) {
+    const pre = +m.merge.pre_merge_best_score || 0;
+    const post = +m.merge.post_merge_score || 0;
+    if (pre > 0) {
+      combinationFactor = +(post / pre).toFixed(3);
+    }
+
+    if (m.merge.accepted) {
+      mergeQuality = combinationFactor != null && combinationFactor < 1
+        ? 'regression' // accepted but quality dropped — still worth flagging
+        : 'accepted';
+    } else {
+      mergeQuality = 'rejected';
+    }
+  }
+
+  // Subview score variance — a low variance after retention means the
+  // model produced consistent quality across instances; a high variance
+  // means one instance dominated. Useful for tuning concurrency caps.
+  const scores = m.subviews
+    .map(s => +(s.score || 0))
+    .filter(x => Number.isFinite(x) && x > 0);
+  let scoreVariance = null;
+  if (scores.length >= 2) {
+    const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
+    const variance = scores.reduce((s, x) => s + (x - mean) ** 2, 0) / scores.length;
+    scoreVariance = +variance.toFixed(4);
+  }
+
+  return {
+    is_single_shot: isSingleShot,
+    architecture_instances: retainedCount,
+    subview_count: subviewCount,
+    subview_retained_count: retainedCount,
+    merge_strategy: m.merge?.strategy || null,
+    merge_quality: mergeQuality,
+    instance_combination_factor: combinationFactor,
+    subview_score_variance: scoreVariance,
+  };
+}
+
+/**
+ * End-to-end sum check — flat boolean + concrete issues list. Designed so
+ * a downstream consumer (Opseeq Studio, dashboards, CI smoke tests) can
+ * answer "is this run trustworthy?" with one field read.
+ *
+ * Issues are advisory; they do not change the run status. A finalized
+ * run with `ok=false` issues is still a valid record — the issues call
+ * out gaps in tagging, missing artifacts, or partial pipelines.
+ */
+function _computeSumCheck(m) {
+  const issues = [];
+
+  // Tagging: every finalized run should know its mode, depth tier, and
+  // pipeline. 'unknown' values usually mean a stage was skipped.
+  if (!m.tags.mode) issues.push('tags.mode missing');
+  if (m.tags.depth_tier === 'unknown') issues.push('tags.depth_tier was never set');
+  if (!m.tags.pipeline) issues.push('tags.pipeline was never set');
+
+  // Lifecycle: at least ingest + finalize phases must exist.
+  const phaseSet = new Set(m.lifecycle.phases.map(p => p.phase));
+  if (!phaseSet.has('ingest')) issues.push('lifecycle.ingest phase missing');
+  if (!phaseSet.has('finalize')) issues.push('lifecycle.finalize phase missing');
+
+  // Composition consistency: if subviews exist, was_decomposed must be true.
+  if (m.subviews.length > 1 && !m.tags.was_decomposed) {
+    issues.push('subviews present but tags.was_decomposed is false');
+  }
+
+  // Artifact presence vs tags consistency.
+  if (m.tags.has_diagram && !m.final_artifact) {
+    issues.push('tags.has_diagram=true but final_artifact is null');
+  }
+
+  // Token / cost sanity: a successful run with zero agent calls is suspicious.
+  if (m.status === 'completed' && m.agent_calls.length === 0) {
+    issues.push('completed status with zero agent_calls');
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues,
+    counts: {
+      agent_calls: m.agent_calls.length,
+      branches: m.branches.length,
+      subviews: m.subviews.length,
+      stages_executed: m.controller.stages_executed.length,
+      lifecycle_phases: m.lifecycle.phases.length,
+      rate_events: m.rate_events.length,
+      warnings: m.warnings.length,
+    },
+  };
+}
+
+/**
  * Finalize a run: mark complete, compute totals, run completeness check, persist.
  * @param {string} runId
  * @param {string} [status='completed']
@@ -504,8 +813,28 @@ async function finalize(runId, status = 'completed') {
 
   m.status = status;
   m.completed_at = new Date().toISOString();
+
+  // Open the finalize phase (and close any prior in-flight phase) so the
+  // lifecycle timeline is always closed-out, even on early exits.
+  recordPhase(runId, 'finalize');
+
+  // Refresh artifact-presence tags from whatever made it onto the manifest.
+  // These tags are the cheapest possible filter for downstream tools.
+  m.tags.has_diagram = !!(m.final_artifact && m.final_artifact.diagram_name);
+  m.tags.has_tla = !!(m.tla_artifacts && (m.tla_artifacts.tla || m.tla_artifacts.cfg));
+  m.tags.has_typescript = !!(m.ts_artifacts && (m.ts_artifacts.source || m.ts_artifacts.harness));
+  m.tags.has_tsx = !!(m.tsx_artifacts && m.tsx_artifacts.app);
+  m.tags.was_decomposed = m.subviews.length > 1;
+
   m.warnings = _runCompletenessCheck(m);
   m.totals = _computeTotals(m);
+  m.composition = _computeComposition(m);
+
+  // Mark the finalize phase complete before the sum_check evaluates the
+  // lifecycle, so the closure timestamp is included in the count.
+  completePhase(runId, 'finalize', status === 'completed');
+
+  m.sum_check = _computeSumCheck(m);
 
   // Compute structural signature for the final artifact
   if (m.final_artifact?.mmd_source) {
@@ -626,8 +955,13 @@ module.exports = {
   getManifest,
   setProfile,
   setPipeline,
+  setDepth,
+  setOpseeqSession,
   addStage,
+  recordPhase,
+  completePhase,
   recordAgentCall,
+  summarizeAgentCalls,
   recordBranch,
   addSubview,
   recordMerge,
@@ -641,6 +975,7 @@ module.exports = {
   cleanup,
   listRuns,
   loadRun,
+  LIFECYCLE_PHASES,
   get RUNS_DIR() { return RUNS_DIR; },
   _setRunsDir,
 };

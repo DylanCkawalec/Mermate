@@ -47,6 +47,9 @@ window.MermaidAgent = class MermaidAgent {
     this.onError = opts.onError || (() => {});
     this.onStateChange = opts.onStateChange || (() => {});
     this.onContinue = opts.onContinue || (() => {});
+    this.onAgentFocus = opts.onAgentFocus || (() => {});
+    this.onPipelineStage = opts.onPipelineStage || (() => {});
+    this.onBundleReady = opts.onBundleReady || (() => {});
 
     this._abortController = null;
     this._running = false;
@@ -59,6 +62,7 @@ window.MermaidAgent = class MermaidAgent {
     this._thinkingEffectDot = null;
     this._thinkingEffectToken = 0;
     this._thinkingEffectLoader = null;
+    this._paused = false;
 
     this._currentPhaseGroup = null;
     this._currentPhaseBody = null;
@@ -75,11 +79,12 @@ window.MermaidAgent = class MermaidAgent {
 
   // ---- Phase 1: Run through planning, refinement, preview ----
 
-  async run(mode, diagramName) {
+  async run(mode, diagramName, currentStage = 'idea', currentRunId = null) {
     if (this._running) return;
     this._running = true;
     this._mode = mode;
     this._userDiagramName = diagramName || null;
+    this._currentStage = currentStage || 'idea';
 
     const prompt = this.input.value.trim();
     if (!prompt) {
@@ -96,13 +101,19 @@ window.MermaidAgent = class MermaidAgent {
 
     this.panel.hidden = false;
     this.panelMode.textContent = mode;
-    this.panelLog.innerHTML = '';
+    if (this._paused) {
+      this._addNarrationLog(`Resuming from ${this._currentStage || 'current'} artifact`, 'system', 'agent:resumed');
+    } else {
+      this.panelLog.innerHTML = '';
+    }
+    this.panelLog.classList.add('is-loading');
     this.notesWrap.hidden = true;
     this._draftText = '';
     this._previewDiagramName = null;
     this._currentPhaseGroup = null;
     this._currentPhaseBody = null;
     this._currentPhaseName = null;
+    this._paused = false;
 
     this._buildMetricsBar();
     this._openPhase('ingest');
@@ -114,6 +125,8 @@ window.MermaidAgent = class MermaidAgent {
     try {
       await this._streamSSE('/api/agent/run', {
         prompt, mode, current_text: prompt,
+        current_stage: this._currentStage,
+        current_run_id: currentRunId || undefined,
         diagram_name: this._userDiagramName || undefined,
       });
     } catch (err) {
@@ -123,13 +136,16 @@ window.MermaidAgent = class MermaidAgent {
       }
     } finally {
       this._running = false;
+      this.panelLog.classList.remove('is-loading');
     }
   }
 
   // ---- Phase 2: Finalize with optional notes ----
 
-  async finalize() {
-    if (!this._draftText) return;
+  async finalize(currentText, currentStage, currentRunId = null) {
+    const finalText = (currentText || this._draftText || '').trim();
+    if (!finalText) return;
+    if (currentStage) this._currentStage = currentStage;
 
     const notes = this.notesInput?.value?.trim() || '';
     this.notesWrap.hidden = true;
@@ -141,8 +157,10 @@ window.MermaidAgent = class MermaidAgent {
 
     try {
       await this._streamSSE('/api/agent/finalize', {
-        current_text: this._draftText,
+        current_text: finalText,
         mode: this._mode,
+        current_stage: this._currentStage || 'idea',
+        current_run_id: currentRunId || undefined,
         user_notes: notes,
         diagram_name: this._userDiagramName || this._previewDiagramName,
       });
@@ -173,6 +191,16 @@ window.MermaidAgent = class MermaidAgent {
       this.input.dispatchEvent(new Event('input', { bubbles: true }));
     }
     this.panel.hidden = true;
+  }
+
+  stopAndPause() {
+    if (this._abortController) this._abortController.abort();
+    this._teardownThinkingEffect();
+    this._running = false;
+    this.notesWrap.hidden = true;
+    this._addNarrationLog('Agent paused — current artifact and tabs preserved. Edit any tab, then run again to continue from that context.', 'system', 'agent:paused');
+    this._paused = true;
+    this.onStateChange('idle');
   }
 
   // ---- Metrics bar ----
@@ -325,16 +353,26 @@ window.MermaidAgent = class MermaidAgent {
   // ---- SSE streaming ----
 
   async _streamSSE(url, body) {
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: this._abortController.signal,
-    });
+    let resp;
+    try {
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: this._abortController.signal,
+      });
+    } catch (err) {
+      if (err.name === 'AbortError') throw err;
+      const errorMsg = err.message || 'Network error — failed to connect to server';
+      console.error('[MermaidAgent] Fetch failed:', errorMsg, err);
+      throw new Error(`Failed to connect to server: ${errorMsg}. Check if Mermaid-GPT is running.`);
+    }
 
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));
-      throw new Error(err.error || `Request failed: ${resp.status}`);
+      const errorMsg = err.error || `Request failed: ${resp.status} ${resp.statusText}`;
+      console.error('[MermaidAgent] Agent run failed:', errorMsg, err);
+      throw new Error(errorMsg);
     }
 
     const reader = resp.body.getReader();
@@ -370,6 +408,11 @@ window.MermaidAgent = class MermaidAgent {
         if (event.stage && event.stage !== this._currentPhaseName) {
           this._openPhase(event.stage);
         }
+        this.onAgentFocus({
+          stage: event.stage,
+          role: 'MERMATE',
+          summary: event.message,
+        });
         if (!this._narratorActive) {
           this._markPreviousLogDone();
           this._addLog(event.message, 'active');
@@ -383,6 +426,12 @@ window.MermaidAgent = class MermaidAgent {
         this._narratorActive = true;
         this._phaseStepCount++;
         this._addThinkingLog(event.role, event.summary, event.domain);
+        this.onAgentFocus({
+          stage: event.stage,
+          role: event.role,
+          domain: event.domain,
+          summary: event.summary,
+        });
         break;
 
       case 'phase_metric':
@@ -462,11 +511,13 @@ window.MermaidAgent = class MermaidAgent {
             tlaOk ? `TLA+ spec verified — SANY passed, ${event.violations || 0} violations` : `TLA+ stage ${event.success ? 'completed' : 'failed'}`,
             'system', tlaOk ? 'tla:pass' : 'tla:fail',
           );
+          this.onPipelineStage(event);
         } else if (event.stage === 'ts') {
           this._addNarrationLog(
             event.success ? `TypeScript compiled — tsc ${event.compile_ok ? 'pass' : 'fail'}, tests ${event.tests_ok ? 'pass' : 'fail'}` : `TypeScript stage failed`,
             'system', event.success ? 'ts:pass' : 'ts:fail',
           );
+          this.onPipelineStage(event);
         }
         break;
 
@@ -739,9 +790,12 @@ window.MermaidAgent = class MermaidAgent {
   _addThinkingLog(role, summary, domain) {
     const target = this._getLogTarget();
 
+    // Stop rotating substeps on any previously-thinking entry — only the
+    // newest entry should be cycling through sub-thoughts.
     target.querySelectorAll('.agent-log-entry.thinking').forEach(e => {
       e.classList.remove('thinking');
       e.classList.add('done');
+      this._stopRotatingSubstep(e);
     });
 
     const entry = document.createElement('div');
@@ -761,9 +815,106 @@ window.MermaidAgent = class MermaidAgent {
     text.className = 'agent-log-text';
     text.textContent = summary || '';
 
-    entry.append(dot, badge, text);
+    // Rotating sub-step text — surfaces the agent's internal sub-thoughts
+    // while the LLM is mid-stream. Cycles every ~2.5s through a list of
+    // contextual thinking phrases derived from the role/domain.
+    const substep = document.createElement('span');
+    substep.className = 'agent-log-substep';
+    substep.setAttribute('aria-live', 'polite');
+    entry.append(dot, badge, text, substep);
     target.appendChild(entry);
+    this._startRotatingSubstep(entry, substep, role, domain, summary);
+
     this.panelLog.scrollTop = this.panelLog.scrollHeight;
+  }
+
+  /**
+   * Cycle through a list of contextual sub-thought phrases inside the
+   * thinking log entry. Stops automatically when the entry is no longer
+   * `.thinking` (i.e. it has been marked done by the next event).
+   */
+  _startRotatingSubstep(entry, substepEl, role, domain, summary) {
+    const roleStr = (role || '').toLowerCase();
+    const domainStr = (domain || '').toLowerCase();
+    const summaryStr = (summary || '').toLowerCase();
+
+    // Build a contextual phrase pool. Domain/role specific phrases get
+    // higher priority. Generic phrases fill the rest.
+    const phrases = [];
+    if (domainStr.includes('formal') || roleStr.includes('turing') || summaryStr.includes('formal')) {
+      phrases.push(
+        'Building invariant set…',
+        'Checking temporal logic constraints…',
+        'Composing TLA+-friendly state space…',
+        'Tracing safety/liveness properties…',
+      );
+    }
+    if (domainStr.includes('systems compilers') || roleStr.includes('hopper') || summaryStr.includes('compiler')) {
+      phrases.push(
+        'Sketching control-flow graph…',
+        'Pinning down call boundaries…',
+        'Resolving subsystem contracts…',
+        'Walking dependency edges…',
+      );
+    }
+    if (domainStr.includes('human centric') || roleStr.includes('bardi') || summaryStr.includes('human')) {
+      phrases.push(
+        'Reading user pathways…',
+        'Locating decision touchpoints…',
+        'Mapping handoffs between humans and services…',
+      );
+    }
+    if (domainStr.includes('structural') || roleStr.includes('mies') || summaryStr.includes('structur')) {
+      phrases.push(
+        'Tightening structural skeleton…',
+        'Auditing layer boundaries…',
+        'Eliminating redundant edges…',
+      );
+    }
+    if (domainStr.includes('data flow') || summaryStr.includes('data')) {
+      phrases.push(
+        'Tracing data lineage…',
+        'Composing provenance chain…',
+        'Inspecting claim → fact promotions…',
+      );
+    }
+    // Generic baseline phrases — always available so we never run dry.
+    phrases.push(
+      'Analyzing architecture…',
+      'Cross-referencing prior artifact…',
+      'Drafting next sub-step…',
+      'Refining structural plan…',
+      'Validating against doctrine…',
+    );
+
+    // Stop any prior rotation on this entry (defensive)
+    this._stopRotatingSubstep(entry);
+
+    let idx = 0;
+    substepEl.textContent = phrases[0];
+    const intervalId = window.setInterval(() => {
+      if (!entry.isConnected || !entry.classList.contains('thinking')) {
+        this._stopRotatingSubstep(entry);
+        return;
+      }
+      idx = (idx + 1) % phrases.length;
+      // Fade-swap for smoother visual cadence
+      substepEl.classList.add('is-swapping');
+      window.setTimeout(() => {
+        if (!entry.isConnected) return;
+        substepEl.textContent = phrases[idx];
+        substepEl.classList.remove('is-swapping');
+      }, 180);
+    }, 2500);
+
+    entry._substepIntervalId = intervalId;
+  }
+
+  _stopRotatingSubstep(entry) {
+    if (entry && entry._substepIntervalId) {
+      window.clearInterval(entry._substepIntervalId);
+      entry._substepIntervalId = null;
+    }
   }
 
   _markPreviousLogDone() {
@@ -772,6 +923,13 @@ window.MermaidAgent = class MermaidAgent {
     target.querySelectorAll('.agent-log-entry.active').forEach(e => {
       e.classList.remove('active');
       e.classList.add('done');
+    });
+    // Stop any rotating substeps on still-thinking entries as the next
+    // phase concludes — otherwise they'd keep cycling in the background.
+    target.querySelectorAll('.agent-log-entry.thinking').forEach(e => {
+      e.classList.remove('thinking');
+      e.classList.add('done');
+      this._stopRotatingSubstep(e);
     });
   }
 

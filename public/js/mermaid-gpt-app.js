@@ -15,7 +15,7 @@
   //  WorkflowOrchestrator — FSM + artifact graph + pub/sub
   // =========================================================================
 
-  const STAGES = ['idea', 'md', 'mmd', 'tla', 'ts', 'rust'];
+  const STAGES = ['idea', 'md', 'mmd', 'tla', 'ts'];
   const INPUT_STAGES = new Set(['idea', 'md', 'mmd']);
   const RENDER_ICON_SVGS = {
     idea: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5a4.5 4.5 0 0 1 2.25 8.4v1.85a1.25 1.25 0 0 1-1.25 1.25h-2a1.25 1.25 0 0 1-1.25-1.25V9.9A4.5 4.5 0 0 1 8 1.5z"/></svg>',
@@ -23,7 +23,6 @@
     mmd:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="5 4 2 8 5 12"/><polyline points="11 4 14 8 11 12"/><line x1="9" y1="2" x2="7" y2="14"/></svg>',
     tla:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5l5.5 3v7L8 14.5 2.5 11.5v-7z"/><path d="M5 8h6"/><path d="M8 5.5v5"/></svg>',
     ts:   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M6 6h4M8 6v5"/></svg>',
-    rust: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M5 8h6M8 5v6"/><circle cx="8" cy="8" r="2"/></svg>',
   };
 
   class WorkflowOrchestrator {
@@ -53,12 +52,16 @@
     switchTo(stage) {
       if (!this.isUnlocked(stage)) return false;
       this.state.currentStage = stage;
+      this._persist();
       this._notify();
       return true;
     }
 
     setArtifact(stage, source) {
       this.artifacts[stage] = source || '';
+      // Auto-persist on every artifact change. Critical for ensuring data
+      // is never lost across refresh, agent runs, or tab switches.
+      this._persist();
     }
 
     getArtifact(stage) {
@@ -125,16 +128,24 @@
 
     _persist() {
       try {
-        sessionStorage.setItem('mermate_workflow', JSON.stringify({
+        const payload = JSON.stringify({
           state: this.state,
           artifacts: this.artifacts,
-        }));
+        });
+        // localStorage survives browser restart; sessionStorage is a
+        // secondary write so older code paths that still read it keep
+        // working until the entire app moves to localStorage.
+        localStorage.setItem('mermate_workflow', payload);
+        sessionStorage.setItem('mermate_workflow', payload);
       } catch { /* storage full or unavailable */ }
     }
 
     restore() {
       try {
-        const raw = sessionStorage.getItem('mermate_workflow');
+        // Prefer localStorage (durable across restarts). Fall back to
+        // sessionStorage for users who only have data in the old store.
+        const raw = localStorage.getItem('mermate_workflow')
+          || sessionStorage.getItem('mermate_workflow');
         if (!raw) return;
         const saved = JSON.parse(raw);
         if (saved.state) this.state = { ...this.state, ...saved.state };
@@ -150,6 +161,8 @@
   // =========================================================================
 
   const input = document.getElementById('mermaid-input');
+  const copilotWrap = input?.closest('.copilot-wrap') || null;
+  const pipelineProgress = document.getElementById('pipeline-progress');
   const btnRender = document.getElementById('btn-render');
   const renderIcon = document.getElementById('render-icon');
   const btnNewDiagram = document.getElementById('btn-new-diagram');
@@ -167,6 +180,9 @@
   const artifactResults = document.getElementById('artifact-results');
   const tlaResultsEl = document.getElementById('tla-results');
   const tsResultsEl = document.getElementById('ts-results');
+  const tlaEmptyEl = document.getElementById('tla-empty');
+  const tsEmptyEl = document.getElementById('ts-empty');
+  const toastContainer = document.getElementById('toast-container');
   const errorBanner = document.getElementById('error-banner');
   const errorMessage = document.getElementById('error-message');
   const typeBadge = document.getElementById('diagram-type-badge');
@@ -190,6 +206,8 @@
 
   const sidebar = new window.MermaidSidebar(sidebarList, (item) => {
     showResult(item.paths, item.name, item.run_id);
+  }, (msg, type = 'info', duration = 3000) => {
+    showToast(msg, type, duration);
   });
 
   const runDetailsEl = document.getElementById('run-details');
@@ -227,6 +245,7 @@
   const agentPanelLog = document.getElementById('agent-panel-log');
   const agentPanelMode = document.getElementById('agent-panel-mode');
   const btnAgentStop = document.getElementById('btn-agent-stop');
+  const stageTrackerEl = document.getElementById('stage-tracker');
   let agentModeActive = false;
   let selectedAgentMode = null;
   let agent = null;
@@ -237,18 +256,25 @@
   let currentDiagramName = '';
   let currentPaths = null;
   let currentRunId = null;
+  let _agentHandoffToken = 0;
+  let _agentGazeTimer = null;
 
   function _persistSession() {
     try {
-      sessionStorage.setItem('mermate_session', JSON.stringify({
+      const payload = JSON.stringify({
         runId: currentRunId, diagramName: currentDiagramName, paths: currentPaths,
-      }));
+      });
+      // localStorage survives browser restart; sessionStorage kept as a
+      // backwards-compatible secondary write.
+      localStorage.setItem('mermate_session', payload);
+      sessionStorage.setItem('mermate_session', payload);
     } catch {}
   }
 
   function _restoreSession() {
     try {
-      const raw = sessionStorage.getItem('mermate_session');
+      const raw = localStorage.getItem('mermate_session')
+        || sessionStorage.getItem('mermate_session');
       if (!raw) return;
       const s = JSON.parse(raw);
       if (s.runId) currentRunId = s.runId;
@@ -273,8 +299,16 @@
       { id: 'code-review',  icon: '\u{1F50D}', name: 'Code Review', desc: 'Recover architecture from a codebase' },
       { id: 'optimize-mmd', icon: '\u26A1',     name: 'Optimize',    desc: 'Improve existing Mermaid or markdown' },
     ],
-    md:  null,
-    mmd: null,
+    md: [
+      { id: 'thinking',     icon: '\u{1F4A1}', name: 'Continue Spec', desc: 'Continue from this Markdown artifact and rebuild preview' },
+      { id: 'optimize-mmd', icon: '\u26A1',     name: 'Optimize Spec', desc: 'Tighten Markdown structure and regenerate Mermaid' },
+      { id: 'full-build',   icon: '\u{1F3D7}', name: 'Full Build',     desc: 'Markdown \u2192 Diagram \u2192 TLA+ \u2192 TypeScript \u2192 Bundle' },
+    ],
+    mmd: [
+      { id: 'optimize-mmd', icon: '\u26A1',     name: 'Optimize Mermaid', desc: 'Repair, simplify, and compile this Mermaid source' },
+      { id: 'thinking',     icon: '\u{1F4A1}', name: 'Explain / Rework',   desc: 'Reinterpret this diagram and regenerate architecture' },
+      { id: 'full-build',   icon: '\u{1F3D7}', name: 'Full Build',         desc: 'Mermaid \u2192 TLA+ \u2192 TypeScript \u2192 Bundle' },
+    ],
     tla: [
       { id: 'tla-verify',   icon: '\u2713',     name: 'Verify Spec',   desc: 'Validate and repair TLA+ specification' },
       { id: 'tla-optimize', icon: '\u26A1',     name: 'Optimize TLA+', desc: 'Strengthen invariants and state coverage' },
@@ -289,12 +323,29 @@
     return AGENT_MODES_BY_STAGE[stage] || AGENT_MODES_BY_STAGE.idea;
   }
 
+  function _defaultAgentModeForStage(stage) {
+    if (stage === 'mmd') return 'optimize-mmd';
+    if (stage === 'tla') return 'tla-verify';
+    if (stage === 'ts') return 'ts-generate';
+    return 'thinking';
+  }
+
   function _rebuildAgentDropdown() {
     const dropdown = document.getElementById('agent-dropdown');
     if (!dropdown) return;
 
     const modes = _getAgentModesForStage(currentMode);
+    const validIds = modes.map(m => m.id);
+    if (selectedAgentMode && !validIds.includes(selectedAgentMode)) {
+      selectedAgentMode = _defaultAgentModeForStage(currentMode);
+    }
     dropdown.innerHTML = '';
+
+    // Add header label for current stage
+    const header = document.createElement('div');
+    header.className = 'agent-dropdown-header';
+    header.textContent = `Agent for ${_stageLabel(currentMode)}`;
+    dropdown.appendChild(header);
 
     for (const mode of modes) {
       const btn = document.createElement('button');
@@ -316,11 +367,20 @@
       dropdown.appendChild(btn);
     }
 
-    if (selectedAgentMode) {
-      const validIds = modes.map(m => m.id);
-      if (!validIds.includes(selectedAgentMode)) {
+    // Add disable option when agent mode is active
+    if (agentModeActive) {
+      const disableBtn = document.createElement('button');
+      disableBtn.className = 'agent-mode-option agent-mode-disable';
+      disableBtn.innerHTML = `<span class="agent-mode-icon">\u2715</span>`
+        + `<span class="agent-mode-info">`
+        + `<span class="agent-mode-name">Disable Agent Mode</span>`
+        + `<span class="agent-mode-desc">Switch back to manual render</span>`
+        + `</span>`;
+      disableBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
         setAgentMode(null);
-      }
+      });
+      dropdown.appendChild(disableBtn);
     }
   }
 
@@ -330,7 +390,7 @@
   //  Mode Configuration (5 stages)
   // =========================================================================
 
-  const MODES = {
+  const MODE_CONFIG = {
     idea: {
       placeholder: 'Describe your system, workflow, or diagram idea...\n\nStart simply:\n  "A user logs in, the server checks credentials, then redirects to dashboard"\n\nOr more structured:\n  "Payment flow: Browser \u2192 API Gateway \u2192 Payment Service \u2192 Stripe \u2192 Bank\n   - on success: return confirmation to browser\n   - on failure: show error, retry up to 3 times \u2192 dead letter queue"\n\nUseful signals: actors, services, arrows (\u2192), steps, decisions, states, failures',
       hint: 'Type an idea \u00b7 \u2318\u23ce / Ctrl+Return to enhance text \u00b7 Tab to accept suggestion',
@@ -338,34 +398,28 @@
       showUpload: false,
     },
     md: {
-      placeholder: 'Paste your markdown architecture specification...',
+      placeholder: 'Paste your Markdown architecture specification...\n\nInclude diagram descriptions in markdown format:\n  ## User Authentication Flow\n  The user submits credentials to the login API...\n\nSupported formats: .md, .markdown, .txt',
       hint: 'Paste or upload a markdown spec with diagram descriptions',
       enhanceDefault: true,
       showUpload: true,
       accept: '.md,.markdown,.txt',
     },
     mmd: {
-      placeholder: 'Paste or upload .mmd Mermaid source...',
+      placeholder: 'Paste or upload Mermaid (.mmd) source code...\n\nExample:\n  graph TD\n    A[User] \u2192|logs in| B[Server]\n    B \u2192|checks| C[Database]\n\nSupported format: .mmd',
       hint: 'Paste Mermaid source directly for compilation',
       enhanceDefault: false,
       showUpload: true,
       accept: '.mmd',
     },
     tla: {
-      placeholder: 'TLA+ specification source...\n\nGenerated after a successful Mermaid render.\nPress Render to verify with SANY and TLC.',
+      placeholder: 'TLA+ specification source...\n\nGenerated after a successful Mermaid render.\nEdit the specification, then press Render to verify with SANY and TLC.\n\nThe spec includes:\n  - State variables\n  - Invariants\n  - Next-state relation',
       hint: 'Edit the TLA+ specification, then Render to verify with SANY/TLC',
       enhanceDefault: false,
       showUpload: false,
     },
     ts: {
-      placeholder: 'TypeScript runtime source...\n\nGenerated after TLA+ verification.\nPress Render to compile and run the test harness.',
+      placeholder: 'TypeScript runtime source...\n\nGenerated after TLA+ verification.\nEdit the runtime code, then press Render to compile and run the test harness.\n\nThe runtime includes:\n  - State machine implementation\n  - Test harness\n  - Coverage reports',
       hint: 'Edit the TypeScript runtime, then Render to compile and test',
-      enhanceDefault: false,
-      showUpload: false,
-    },
-    rust: {
-      placeholder: 'Rust binary source...\n\nGenerated after TypeScript verification.\nPress Render to compile with cargo and produce a standalone binary.',
-      hint: 'Edit the Rust source, then Render to compile the binary',
       enhanceDefault: false,
       showUpload: false,
     },
@@ -378,7 +432,6 @@
     hybrid: 'Repairing and compiling...',
     tla: 'Verifying TLA+ specification...',
     ts: 'Compiling TypeScript runtime...',
-    rust: 'Compiling Rust binary...',
   };
 
   const STATE_LABELS = {
@@ -391,9 +444,14 @@
   };
 
   const AGENT_MODE_LABELS = {
+    'full-build': 'Full Build',
     thinking: 'Thinking',
     'code-review': 'Code Review',
     'optimize-mmd': 'Optimize',
+    'tla-verify': 'Verify Spec',
+    'tla-optimize': 'Optimize TLA+',
+    'ts-generate': 'Generate Runtime',
+    'ts-optimize': 'Optimize TS',
   };
 
   function getAgentModeLabel(modeId) {
@@ -458,14 +516,19 @@
       artifactResults.hidden = !showArtifacts;
       if (tlaResultsEl) tlaResultsEl.hidden = mode !== 'tla';
       if (tsResultsEl) tsResultsEl.hidden = mode !== 'ts';
+      if (tlaEmptyEl) tlaEmptyEl.hidden = mode !== 'tla' || (orchestrator.getArtifact('tla') || '').trim() !== '';
+      if (tsEmptyEl) tsEmptyEl.hidden = mode !== 'ts' || (orchestrator.getArtifact('ts') || '').trim() !== '';
     }
 
-    if (isDiagramMode && currentPaths) {
+    if (isDiagramMode && currentPaths && (currentPaths.png || currentPaths.svg)) {
       resultSection.hidden = false;
     } else if (!isDiagramMode) {
       if (artifactResults && !artifactResults.hidden) {
         resultSection.hidden = false;
       }
+    } else {
+      // Diagram mode but no valid paths — keep result section hidden
+      resultSection.hidden = true;
     }
 
     document.querySelectorAll('.pipeline-segment').forEach(seg => {
@@ -480,30 +543,316 @@
   document.querySelectorAll('.pipeline-segment').forEach(seg => {
     seg.addEventListener('click', () => {
       const stage = seg.dataset.stage;
-      if (orchestrator.isUnlocked(stage)) setMode(stage);
+      if (orchestrator.isUnlocked(stage)) {
+        _agentHandoffToken++;
+        setMode(stage);
+      }
     });
   });
 
   orchestrator.subscribe(renderUI);
 
   // =========================================================================
+  //  Agentic focus choreography — artifact handoff + gaze chip
+  // =========================================================================
+
+  const _agentSleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+  function _stageLabel(stage) {
+    return ({ idea: 'Simple Idea', md: 'Markdown Spec', mmd: 'Mermaid', tla: 'TLA+', ts: 'TypeScript' })[stage] || stage;
+  }
+
+  function _agentTargetForPhase(phase) {
+    if (phase === 'ingest' || phase === 'planning' || phase === 'refining') return 'idea';
+    if (phase === 'preview') return 'mmd';
+    if (phase === 'tla_build') return 'tla';
+    if (phase === 'ts_build') return 'ts';
+    return currentMode || 'idea';
+  }
+
+  function _animateTabHandoff(fromStage, toStage) {
+    if (!pipelineProgress || !fromStage || !toStage || fromStage === toStage) return Promise.resolve();
+    const fromEl = pipelineProgress.querySelector(`.pipeline-segment[data-stage="${fromStage}"]`);
+    const toEl = pipelineProgress.querySelector(`.pipeline-segment[data-stage="${toStage}"]`);
+    if (!fromEl || !toEl) return Promise.resolve();
+
+    pipelineProgress.classList.add('is-handoff-active');
+    fromEl.classList.add('is-handoff-source');
+    toEl.classList.add('is-handoff-target');
+
+    return _agentSleep(950).finally(() => {
+      pipelineProgress.classList.remove('is-handoff-active');
+      fromEl.classList.remove('is-handoff-source');
+      toEl.classList.remove('is-handoff-target');
+    });
+  }
+
+  function _ensureAgentGazeChip() {
+    if (!copilotWrap) return null;
+    let chip = copilotWrap.querySelector('.agent-gaze-chip');
+    if (!chip) {
+      chip = document.createElement('div');
+      chip.className = 'agent-gaze-chip';
+      chip.innerHTML = [
+        '<span class="gaze-pulse"></span>',
+        '<span class="gaze-role"></span>',
+        '<span class="gaze-target"></span>',
+        '<span class="gaze-summary"></span>',
+      ].join('');
+      copilotWrap.appendChild(chip);
+    }
+    return chip;
+  }
+
+  function _showAgentGaze({ role = 'MERMATE', domain = '', stage = '', summary = '', target = null } = {}) {
+    const chip = _ensureAgentGazeChip();
+    if (!chip) return;
+
+    const focusStage = target || _agentTargetForPhase(stage);
+    const shortRole = String(role || 'MERMATE').replace(/^Doctor_/, 'Dr. ').replace(/_/g, ' ');
+    const shortDomain = domain && domain !== 'general' ? ` · ${String(domain).replace(/_/g, ' ')}` : '';
+
+    chip.querySelector('.gaze-role').textContent = shortRole + shortDomain;
+    chip.querySelector('.gaze-target').textContent = `reviewing ${_stageLabel(focusStage)}`;
+    chip.querySelector('.gaze-summary').textContent = summary ? String(summary).slice(0, 96) : 'tracking architecture state';
+    chip.dataset.target = focusStage;
+    chip.hidden = false;
+    chip.classList.remove('pulse-once');
+    void chip.offsetWidth;
+    chip.classList.add('pulse-once');
+
+    if (copilotWrap) copilotWrap.dataset.agentFocus = focusStage;
+    clearTimeout(_agentGazeTimer);
+    _agentGazeTimer = setTimeout(() => {
+      chip.classList.remove('pulse-once');
+    }, 1200);
+  }
+
+  function _hideAgentGaze() {
+    const chip = copilotWrap?.querySelector('.agent-gaze-chip');
+    if (chip) chip.hidden = true;
+    if (copilotWrap) delete copilotWrap.dataset.agentFocus;
+  }
+
+  // Tracks which stages received new content during the current agent run.
+  // Reset on agent start, populated by `_applyAgentArtifacts`, consumed by
+  // the completion banner when the run finishes.
+  let _agentRunPopulatedStages = new Set();
+  let _agentRunMetrics = null;
+
+  function _applyAgentArtifacts(event) {
+    const mdSource = event?.md_source || event?.draft_text || '';
+    const mmdSource = event?.mmd_source || event?.compiled_source || '';
+    const tlaSource = event?.tla_source || '';
+    const tsSource = event?.ts_source || '';
+
+    if (event?.diagram_name) currentDiagramName = event.diagram_name;
+    if (event?.run_id) currentRunId = event.run_id;
+    // Only update currentPaths if the event provides valid, non-empty paths
+    if (event?.paths && (event.paths.png || event.paths.svg)) {
+      currentPaths = event.paths;
+    }
+
+    if (mdSource.trim()) {
+      const prev = orchestrator.getArtifact('md') || '';
+      orchestrator.setArtifact('md', mdSource);
+      orchestrator.updateFromBackend({
+        stage: 'md',
+        unlockedStages: ['idea', 'md', 'mmd'],
+        confidence: 0.86,
+        guidance: 'Markdown spec generated from agent planning/refinement.',
+      });
+      if (prev.trim() !== mdSource.trim()) {
+        showToast(`Markdown tab populated (${mdSource.length.toLocaleString()} chars)`, 'success', 3000);
+        _markTabHasNewContent('md');
+        _agentRunPopulatedStages.add('md');
+      }
+    }
+
+    if (mmdSource.trim()) {
+      const prev = orchestrator.getArtifact('mmd') || '';
+      orchestrator.setArtifact('mmd', mmdSource);
+      orchestrator.updateFromBackend({
+        stage: 'mmd',
+        unlockedStages: ['idea', 'md', 'mmd', 'tla', 'ts'],
+        confidence: 0.94,
+        guidance: 'Mermaid source compiled from the Markdown/architecture plan.',
+      });
+      if (prev.trim() !== mmdSource.trim()) {
+        showToast(`Mermaid tab populated (${mmdSource.length.toLocaleString()} chars)`, 'success', 3000);
+        _markTabHasNewContent('mmd');
+        _agentRunPopulatedStages.add('mmd');
+      }
+    }
+
+    if (tlaSource.trim()) {
+      const prev = orchestrator.getArtifact('tla') || '';
+      orchestrator.setArtifact('tla', tlaSource);
+      orchestrator.updateFromBackend({
+        stage: 'tla',
+        unlockedStages: ['idea', 'md', 'mmd', 'tla', 'ts'],
+        confidence: event?.sany_valid ? 0.9 : 0.45,
+        guidance: 'TLA+ specification generated from the current diagram run.',
+      });
+      if (prev.trim() !== tlaSource.trim()) {
+        showToast(`TLA+ tab populated (${tlaSource.length.toLocaleString()} chars)`, 'success', 3000);
+        _markTabHasNewContent('tla');
+        _agentRunPopulatedStages.add('tla');
+      }
+    }
+
+    if (tsSource.trim()) {
+      const prev = orchestrator.getArtifact('ts') || '';
+      orchestrator.setArtifact('ts', tsSource);
+      orchestrator.updateFromBackend({
+        stage: 'ts',
+        unlockedStages: ['idea', 'md', 'mmd', 'tla', 'ts'],
+        confidence: event?.compile_ok || event?.ts_compiled ? 0.9 : 0.45,
+        guidance: 'TypeScript runtime generated from the verified TLA+ artifact.',
+      });
+      if (prev.trim() !== tsSource.trim()) {
+        showToast(`TypeScript tab populated (${tsSource.length.toLocaleString()} chars)`, 'success', 3000);
+        _markTabHasNewContent('ts');
+        _agentRunPopulatedStages.add('ts');
+      }
+    }
+
+    // Track metrics from the most recent render event for the completion banner
+    if (event?.metrics) _agentRunMetrics = event.metrics;
+
+    // Deterministic auto-switch — guarantees the user lands on the tab
+    // that just received new content, even if the animated walk in
+    // _agenticallyReviewArtifacts gets cancelled by a subsequent event.
+    const stageOrder = ['md', 'mmd', 'tla', 'ts'];
+    let highestNewStage = null;
+    for (const stage of stageOrder) {
+      const src = stage === 'md' ? mdSource
+        : stage === 'mmd' ? mmdSource
+        : stage === 'tla' ? tlaSource
+        : tsSource;
+      if (src.trim()) highestNewStage = stage;
+    }
+    if (highestNewStage && orchestrator.isUnlocked(highestNewStage)) {
+      _scheduleAutoSwitchToStage(highestNewStage);
+    }
+
+    _persistSession();
+  }
+
+  // Debounced auto-switch — only the latest target wins. Survives across
+  // rapid agent events (preview_render → final_render → pipeline_stage)
+  // because each new call just resets the timer.
+  let _autoSwitchTimer = null;
+  let _autoSwitchUserOverride = false;
+  function _scheduleAutoSwitchToStage(targetStage) {
+    if (_autoSwitchUserOverride) return; // user clicked a tab themselves
+    if (_autoSwitchTimer) clearTimeout(_autoSwitchTimer);
+    _autoSwitchTimer = setTimeout(() => {
+      _autoSwitchTimer = null;
+      if (_autoSwitchUserOverride) return;
+      if (currentMode !== targetStage && orchestrator.isUnlocked(targetStage)) {
+        setMode(targetStage);
+        showToast(`Switched to ${_stageLabel(targetStage)} tab`, 'info', 2500);
+      }
+    }, 800);
+  }
+
+  // Marks a tab as having unseen agent-produced content. The badge is
+  // cleared automatically the first time the user visits that tab via
+  // setMode (see clear logic in setMode below).
+  function _markTabHasNewContent(stage) {
+    const btn = document.querySelector(`.mode-btn[data-mode="${stage}"]`);
+    if (!btn) return;
+    // Skip if user is already on this tab — no point flashing the tab
+    // they're already looking at.
+    if (currentMode === stage) return;
+    btn.classList.add('has-new-content');
+  }
+
+  function _clearTabNewContent(stage) {
+    const btn = document.querySelector(`.mode-btn[data-mode="${stage}"]`);
+    if (btn) btn.classList.remove('has-new-content');
+  }
+
+  async function _agenticallyReviewArtifacts(event) {
+    const token = ++_agentHandoffToken;
+    const stages = [];
+    if ((event?.md_source || event?.draft_text || '').trim()) stages.push('md');
+    if ((event?.mmd_source || event?.compiled_source || '').trim()) stages.push('mmd');
+    if ((event?.tla_source || '').trim()) stages.push('tla');
+    if ((event?.ts_source || '').trim()) stages.push('ts');
+    if (stages.length === 0) return;
+
+    await _agentSleep(450);
+    for (const stage of stages) {
+      if (token !== _agentHandoffToken || !orchestrator.isUnlocked(stage)) return;
+      _showAgentGaze({
+        role: 'MERMATE',
+        stage,
+        target: stage,
+        summary: `Populating ${_stageLabel(stage)} artifact from the live agent run`,
+      });
+      // Toast user before tab switch so they understand the move
+      if (currentMode !== stage) {
+        showToast(`Agent moving to ${_stageLabel(stage)} tab — populating artifact`, 'info', 2500);
+      }
+      await _animateTabHandoff(currentMode, stage);
+      if (token !== _agentHandoffToken) return;
+      if (currentMode === stage) {
+        input.value = orchestrator.getArtifact(stage);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        syncUiGuidance();
+      } else {
+        setMode(stage);
+      }
+      copilotWrap?.classList.add('is-agent-reviewing');
+      await _agentSleep(stage === 'md' ? 1800 : 1300);
+      copilotWrap?.classList.remove('is-agent-reviewing');
+    }
+  }
+
+  // =========================================================================
   //  Mode Selector (save/restore per-tab content)
   // =========================================================================
+
+  // Tracks whether the textarea has loaded the current artifact yet. Prevents
+  // setMode from overwriting a stored artifact with an empty input on the
+  // initial page load (when the textarea hasn't yet been populated).
+  let _inputLoaded = false;
 
   function setMode(mode) {
     if (!orchestrator.isUnlocked(mode)) return;
 
-    orchestrator.setArtifact(currentMode, input.value);
+    // Only save current input back to the current-mode artifact if the
+    // textarea has actually loaded that artifact. On initial load, the
+    // textarea is empty regardless of stored artifacts; saving '' here
+    // would wipe the previously stored content.
+    if (_inputLoaded) {
+      orchestrator.setArtifact(currentMode, input.value);
+    }
 
     currentMode = mode;
     orchestrator.switchTo(mode);
 
+    // User is now viewing this tab — clear the "new content" indicator
+    // if it was set by a prior agent run.
+    _clearTabNewContent(mode);
+
     const cfg = MODES[mode] || MODES.idea;
     input.value = orchestrator.getArtifact(mode);
+    _inputLoaded = true;  // Textarea now reflects the artifact for this mode
     input.placeholder = cfg.placeholder;
     chkEnhance.checked = cfg.enhanceDefault;
     const _btnEnh = document.getElementById('btn-enhance');
     if (_btnEnh) _btnEnh.classList.toggle('active', chkEnhance.checked);
+
+    // Always allow editing/pasting in the active tab unless the agent is
+    // actively running. The TLA+/TS auto-generation branch below may
+    // re-enable readOnly when an empty stage is auto-filling itself, but
+    // by default users must be able to paste their own content.
+    if (agentState !== 'running' && agentState !== 'finalizing') {
+      input.readOnly = false;
+    }
 
     if (cfg.showUpload) {
       btnUpload.classList.add('visible');
@@ -512,12 +861,30 @@
       btnUpload.classList.remove('visible');
     }
 
+    // Update input hint text based on mode
+    if (inputHint) inputHint.textContent = cfg.hint || '';
+
+    // Update placeholder text based on mode
+    input.placeholder = cfg.placeholder || '';
+
     try {
       if (mode === 'idea' && window.MermaidCopilot) {
         if (copilot) copilot.destroy();
         copilot = new window.MermaidCopilot(input, {
           apiBase: COPILOT_API_BASE,
           onAccept: updateBadges,
+          onEnhanceStart: ({ inputChars }) => {
+            showToast(`Enhancement started — processing file in tab view (${inputChars.toLocaleString()} chars)`, 'info', 3000);
+          },
+          onEnhanceComplete: ({ applied, error, elapsedMs, outputChars }) => {
+            if (applied) {
+              showToast(`Enhancement completed — data updated (${outputChars.toLocaleString()} chars, ${(elapsedMs / 1000).toFixed(1)}s)`, 'success', 4000);
+            } else if (error) {
+              showToast(`Enhancement failed — ${error}`, 'error', 6000);
+            } else {
+              showToast('Enhancement completed — no changes applied', 'info', 3000);
+            }
+          },
           onProfileUpdate: _onProfileUpdate,
         });
       } else if (copilot) {
@@ -535,7 +902,10 @@
         input.value = mode === 'tla'
           ? `Generating TLA+ specification from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)}\nPress Render or wait for auto-start.`
           : `Generating TypeScript runtime from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)}\nPress Render or wait for auto-start.`;
-        input.readOnly = true;
+        // Only mark readOnly while the auto-generate fetch is in flight.
+        // The render() call below clears readOnly when complete (see lines
+        // ~1842, ~1934). If the user manually pastes/edits before render
+        // fires, they should be allowed to — so we keep readOnly off here.
         setTimeout(() => {
           if (currentMode === mode && !isLoading) render();
         }, 600);
@@ -544,7 +914,18 @@
   }
 
   document.querySelectorAll('.mode-btn').forEach(btn => {
-    btn.addEventListener('click', () => setMode(btn.dataset.mode));
+    btn.addEventListener('click', () => {
+      _agentHandoffToken++;
+      // User manually switched tabs — disable agent auto-switching for
+      // this run. A new agent run resets this flag in `_createAgent` /
+      // the Run-Agent click handler.
+      _autoSwitchUserOverride = true;
+      if (_autoSwitchTimer) {
+        clearTimeout(_autoSwitchTimer);
+        _autoSwitchTimer = null;
+      }
+      setMode(btn.dataset.mode);
+    });
   });
 
   // =========================================================================
@@ -581,9 +962,9 @@
       tone = 'busy';
     } else if (agentModeActive && selectedAgentMode) {
       hint = hasInput
-        ? `Agent: ${getAgentModeLabel(selectedAgentMode)} mode. Run the agent when the prompt is ready.`
+        ? `Agent: ${getAgentModeLabel(selectedAgentMode)} mode. ${agent ? 'Continue from the current artifact.' : 'Run the agent when the prompt is ready.'}`
         : `Agent: ${getAgentModeLabel(selectedAgentMode)} mode. Enter the architecture prompt to begin.`;
-      nextAction = hasInput ? 'Next: run agent' : (hasName ? 'Next: describe the architecture' : 'Next: enter prompt');
+      nextAction = hasInput ? (agent ? `Next: continue from ${_stageLabel(currentMode)}` : 'Next: run agent') : (hasName ? 'Next: describe the architecture' : 'Next: enter prompt');
       tone = 'ready';
     } else if (currentMode === 'tla') {
       const hasRun = !!(currentRunId && currentDiagramName);
@@ -688,26 +1069,172 @@
     errorBanner.hidden = true;
   }
 
-  function _showFallbackBanner(events) {
-    const count = events.length;
-    const existing = document.getElementById('fallback-banner');
-    if (existing) existing.remove();
-
-    const bar = document.createElement('div');
-    bar.id = 'fallback-banner';
-    bar.style.cssText = 'position:fixed;bottom:12px;left:50%;transform:translateX(-50%);z-index:10000;' +
-      'background:linear-gradient(135deg,#1a1a2e,#16213e);color:#e0a040;padding:6px 14px;border-radius:6px;' +
-      'font-size:11px;font-family:monospace;display:flex;align-items:center;gap:8px;border:1px solid #e0a04040;' +
-      'box-shadow:0 2px 12px #00000060;opacity:0;transition:opacity .3s ease';
-    bar.innerHTML = `<span style="font-size:13px">⚡</span> <span>${count} call${count > 1 ? 's' : ''} used direct provider fallback (Opseeq gateway unavailable)</span>` +
-      `<button style="background:none;border:none;color:#e0a040;cursor:pointer;font-size:14px;padding:0 4px" onclick="this.parentElement.remove()">×</button>`;
-
-    document.body.appendChild(bar);
-    requestAnimationFrame(() => { bar.style.opacity = '1'; });
-    setTimeout(() => { if (bar.parentElement) { bar.style.opacity = '0'; setTimeout(() => bar.remove(), 300); } }, 8000);
+  function showToast(message, type = 'info', duration = 4000) {
+    if (!toastContainer) return;
+    const toast = document.createElement('div');
+    toast.className = `toast is-${type}`;
+    toast.innerHTML = `
+      <span>${message}</span>
+      <button class="toast-close" aria-label="Dismiss">&times;</button>
+    `;
+    const closeBtn = toast.querySelector('.toast-close');
+    closeBtn.addEventListener('click', () => dismissToast(toast));
+    toastContainer.appendChild(toast);
+    if (duration > 0) {
+      setTimeout(() => dismissToast(toast), duration);
+    }
   }
 
+  function dismissToast(toast) {
+    if (!toast || toast.classList.contains('is-exiting')) return;
+    toast.classList.add('is-exiting');
+    toast.addEventListener('animationend', () => {
+      toast.remove();
+    });
+  }
+
+  // ---- Document title management ------------------------------------------
+  // Reflects agent state in the browser tab so users know the run is still
+  // active even when they switch to another browser tab. Cleared automatically
+  // when the agent transitions back to idle.
+  const _BASE_TITLE = 'MERMATE';
+  let _titleResetTimer = null;
+
+  function _setDocTitle(prefix, project) {
+    if (_titleResetTimer) { clearTimeout(_titleResetTimer); _titleResetTimer = null; }
+    const proj = (project || '').trim();
+    document.title = prefix
+      ? (proj ? `${prefix} ${proj} · ${_BASE_TITLE}` : `${prefix} ${_BASE_TITLE}`)
+      : _BASE_TITLE;
+  }
+
+  function _resetDocTitleAfter(ms) {
+    if (_titleResetTimer) clearTimeout(_titleResetTimer);
+    _titleResetTimer = setTimeout(() => {
+      document.title = _BASE_TITLE;
+      _titleResetTimer = null;
+    }, ms);
+  }
+
+  // ---- Top-level completion notification ----------------------------------
+  // Shown at the top of the screen when an agent run completes. Lists every
+  // tab that received content, the project name, and provides quick actions
+  // (View, Download, Dismiss). More prominent than a toast because it
+  // represents the end of a long-running operation the user may have
+  // walked away from.
+  function _showCompletionBanner({ project, populatedStages, runId, paths, metrics }) {
+    // Remove any existing banner so we don't stack them
+    const existing = document.querySelector('.completion-banner');
+    if (existing) existing.remove();
+
+    const banner = document.createElement('div');
+    banner.className = 'completion-banner';
+    const stageLabels = (populatedStages || [])
+      .map(s => `<span class="completion-tag" data-stage="${s}">${_stageLabel(s)}</span>`)
+      .join('');
+    const metricsLine = metrics
+      ? `<span class="completion-meta">${metrics.nodeCount || 0} nodes · ${metrics.edgeCount || 0} edges</span>`
+      : '';
+    banner.innerHTML = `
+      <div class="completion-banner-icon">✓</div>
+      <div class="completion-banner-body">
+        <div class="completion-banner-title">Agent run complete${project ? ` — ${project}` : ''}</div>
+        <div class="completion-banner-detail">
+          <span class="completion-meta">Populated:</span>
+          ${stageLabels || '<span class="completion-meta">no new artifacts</span>'}
+          ${metricsLine}
+        </div>
+      </div>
+      <div class="completion-banner-actions">
+        ${(populatedStages && populatedStages.length) ? `<button class="completion-btn completion-btn-primary" data-action="view">View ${_stageLabel(populatedStages[populatedStages.length - 1])}</button>` : ''}
+        ${paths ? `<button class="completion-btn" data-action="download">Download</button>` : ''}
+        <button class="completion-btn-close" aria-label="Dismiss">&times;</button>
+      </div>
+    `;
+
+    // View action — switch to the highest stage that was populated
+    banner.querySelector('[data-action="view"]')?.addEventListener('click', () => {
+      const lastStage = populatedStages[populatedStages.length - 1];
+      if (lastStage && orchestrator.isUnlocked(lastStage)) {
+        setMode(lastStage);
+      }
+      _dismissCompletionBanner(banner);
+    });
+
+    // Download action — open the bundle for the run
+    banner.querySelector('[data-action="download"]')?.addEventListener('click', () => {
+      if (runId) {
+        window.open(`/api/runs/${runId}/bundle`, '_blank');
+      }
+    });
+
+    // Close button
+    banner.querySelector('.completion-banner-close, .completion-btn-close')?.addEventListener('click', () => {
+      _dismissCompletionBanner(banner);
+    });
+
+    document.body.appendChild(banner);
+    // Animate in
+    requestAnimationFrame(() => banner.classList.add('is-visible'));
+
+    // Auto-dismiss after 12s — long enough to read but not stuck on screen
+    setTimeout(() => _dismissCompletionBanner(banner), 12000);
+  }
+
+  function _dismissCompletionBanner(banner) {
+    if (!banner || banner.classList.contains('is-exiting')) return;
+    banner.classList.add('is-exiting');
+    banner.addEventListener('transitionend', () => banner.remove(), { once: true });
+    setTimeout(() => banner.remove(), 600);  // safety fallback
+  }
+
+  // ---- Stage progress tracker ---------------------------------------------
+  // Drives the visible pipeline progression in the agent panel header.
+  // Status values: 'active' (currently processing), 'complete' (passed),
+  // 'error' (failed), or null (reset).
+  function _updateStageTracker(stage, status) {
+    if (!stageTrackerEl) return;
+    stageTrackerEl.hidden = false;
+    const steps = stageTrackerEl.querySelectorAll('.stage-tracker-step');
+    const stageOrder = ['idea', 'md', 'mmd', 'tla', 'ts'];
+    const targetIdx = stageOrder.indexOf(stage);
+    if (targetIdx === -1) return;
+
+    steps.forEach((el) => {
+      const s = el.dataset.stage;
+      const idx = stageOrder.indexOf(s);
+      el.classList.remove('is-active', 'is-complete', 'is-error');
+      if (s === stage) {
+        if (status === 'complete') el.classList.add('is-complete');
+        else if (status === 'error') el.classList.add('is-error');
+        else el.classList.add('is-active');
+      } else if (idx < targetIdx) {
+        // Previous stages — mark as complete unless explicitly reset
+        el.classList.add('is-complete');
+      }
+    });
+  }
+
+  function _resetStageTracker() {
+    if (!stageTrackerEl) return;
+    stageTrackerEl.querySelectorAll('.stage-tracker-step').forEach((el) => {
+      el.classList.remove('is-active', 'is-complete', 'is-error');
+    });
+  }
+
+  // (Duplicate mode-btn listener + duplicate syncUiGuidance block removed —
+  //  the canonical versions are defined earlier in this IIFE.)
+
   function setLoading(on, contentState) {
+    // Don't show loading overlay during agent operations - agent panel shows progress
+    if (on && (agentState === 'running' || agentState === 'finalizing' || agentState === 'awaiting_notes')) {
+      isLoading = on;
+      btnRender.disabled = on;
+      input.readOnly = on;
+      syncUiGuidance();
+      return;
+    }
+
     isLoading = on;
     btnRender.disabled = on;
     input.readOnly = on;
@@ -733,12 +1260,48 @@
     syncUiGuidance();
   }
 
-  function showResult(paths, name, runId, metrics) {
+  /**
+   * Update the depth badge in the result-controls bar.
+   * `meta` is `{ score, tier }` (typically from render_meta or top-level
+   * depth_score / depth_tier on the render response). Hidden when missing.
+   */
+  function _renderDepthBadge(meta) {
+    const el = document.getElementById('depth-badge');
+    if (!el) return;
+    if (!meta || (meta.tier == null && meta.score == null)) {
+      el.hidden = true;
+      el.removeAttribute('data-tier');
+      return;
+    }
+    const tier = meta.tier || 'shallow';
+    const score = typeof meta.score === 'number' ? meta.score.toFixed(2) : '—';
+    el.dataset.tier = tier;
+    const text = el.querySelector('.depth-badge-text');
+    if (text) text.textContent = `Depth · ${tier} · ${score}`;
+    el.title = `Architecture depth tier: ${tier} (score ${score})`;
+    el.hidden = false;
+  }
+
+  function showResult(paths, name, runId, metrics, depthMeta) {
+    // Validate paths before showing — guard against stale / partial paths
+    if (!paths || (!paths.png && !paths.svg)) {
+      console.warn('[showResult] Invalid paths, skipping render', paths);
+      resultSection.hidden = true;
+      currentPaths = null;
+      _persistSession();
+      return;
+    }
+
     currentPaths = paths;
     currentDiagramName = name || 'diagram';
     currentRunId = runId || null;
     const ts = Date.now();
     resultSection.hidden = false;
+
+    // Architecture depth badge — shows the tier (shallow / medium / deep) and
+    // raw score. Depth comes from the render response; we tolerate older
+    // responses that don't include it by simply leaving the chip empty.
+    _renderDepthBadge(depthMeta);
 
     if (INPUT_STAGES.has(currentMode)) {
       flipCard.showFront();
@@ -751,17 +1314,45 @@
       runDetails.hide();
     }
 
+    let pngLoaded = false;
+    let svgLoaded = false;
+
     resultPng.onload = () => {
+      pngLoaded = true;
       if (!pzFront) pzFront = new window.PanZoom(panZoomFront, resultPng);
       pzFront.fitToViewport();
     };
-    resultPng.src = paths.png + '?t=' + ts;
+    resultPng.onerror = () => {
+      console.error('[showResult] PNG failed to load:', paths.png);
+      if (!svgLoaded) {
+        showToast('Diagram image not available — try re-rendering', 'warning', 4000);
+        // If both fail, hide the result section
+        if (!pngLoaded) {
+          resultSection.hidden = true;
+          currentPaths = null;
+          _persistSession();
+        }
+      }
+    };
+    if (paths.png) {
+      resultPng.src = paths.png + '?t=' + ts;
+    } else {
+      resultPng.removeAttribute('src');
+    }
 
     resultSvg.onload = () => {
+      svgLoaded = true;
       if (!pzBack) pzBack = new window.PanZoom(panZoomBack, resultSvg);
       pzBack.fitToViewport();
     };
-    resultSvg.src = paths.svg + '?t=' + ts;
+    resultSvg.onerror = () => {
+      console.error('[showResult] SVG failed to load:', paths.svg);
+    };
+    if (paths.svg) {
+      resultSvg.src = paths.svg + '?t=' + ts;
+    } else {
+      resultSvg.removeAttribute('src');
+    }
 
     resultSection.classList.add('is-revealing');
     window.setTimeout(() => resultSection.classList.remove('is-revealing'), 220);
@@ -1233,12 +1824,16 @@
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(a.href);
+            showToast(`Bundle downloaded — ${Object.keys(bundleData.files).length} files`, 'success', 3500);
             return;
           }
         } catch { /* fall through to basic bundle */ }
       }
 
-      if (!currentPaths) return;
+      if (!currentPaths) {
+        showError('No diagram to download — render a diagram first');
+        return;
+      }
       const [pngRes, svgRes] = await Promise.all([fetch(currentPaths.png), fetch(currentPaths.svg)]);
       const [pngBlob, svgBlob] = await Promise.all([pngRes.blob(), svgRes.blob()]);
       zip.file(`${currentDiagramName}.png`, pngBlob);
@@ -1252,8 +1847,10 @@
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(a.href);
+      showToast(`Bundle downloaded — ${currentDiagramName} (PNG + SVG)`, 'success', 3000);
     } catch (err) {
       showError('Download failed: ' + err.message);
+      showToast('Download failed — see error banner', 'error', 5000);
     }
   }
 
@@ -1284,12 +1881,22 @@
         }),
       });
       const data = await resp.json();
-      if (!data.success) { showError(data.details || data.error || 'Compilation failed'); return; }
+      if (!data.success) {
+        const errMsg = data.details || data.error || 'Compilation failed';
+        showError(errMsg);
+        showToast(`Render failed — ${errMsg.slice(0, 80)}${errMsg.length > 80 ? '...' : ''}`, 'error', 6000);
+        return;
+      }
 
       const shouldAnimate = data.enhanced && data.compiled_source && data.content_state !== 'mmd';
       if (shouldAnimate) { setLoading(false); await animateRenderTransition(source, data.compiled_source); }
 
-      showResult(data.paths, data.diagram_name, data.run_id, data.metrics);
+      const depthMeta = (data.depth_score != null || data.depth_tier != null)
+        ? { score: data.depth_score, tier: data.depth_tier }
+        : (data.render_meta && (data.render_meta.depth_score != null || data.render_meta.depth_tier != null))
+          ? { score: data.render_meta.depth_score, tier: data.render_meta.depth_tier }
+          : null;
+      showResult(data.paths, data.diagram_name, data.run_id, data.metrics, depthMeta);
 
       // Surface direct-provider fallback events
       if (data.fallback_events && data.fallback_events.length > 0) {
@@ -1305,6 +1912,9 @@
         orchestrator.updateFromBackend(data.progressionUpdate);
       }
 
+      showToast(`Diagram rendered — ${data.diagram_name || currentDiagramName}`, 'success', 3000);
+
+
       sidebar.add({
         name: data.diagram_name,
         type: data.diagram_type,
@@ -1317,6 +1927,7 @@
     } catch (err) {
       if (err.name === 'TypeError') { showError('Could not reach server. Is Mermaid-GPT running?'); }
       else { showError(err.message || 'Unexpected error'); }
+      showToast('Render failed — see error banner', 'error', 5000);
     } finally {
       setLoading(false);
     }
@@ -1361,9 +1972,12 @@
       resultSection.hidden = false;
 
       if (!data.success) {
-        if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">Error: ${data.error || 'Unknown'}</span>`;
+        const errMsg = data.error || 'TLA+ generation failed';
+        if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">Error: ${errMsg}</span>`;
         if (sourceEl) sourceEl.textContent = '';
         if (invEl) invEl.innerHTML = '';
+        showError(errMsg);
+        showToast(`TLA+ generation failed — ${errMsg.slice(0, 80)}${errMsg.length > 80 ? '...' : ''}`, 'error', 6000);
         return;
       }
 
@@ -1424,16 +2038,17 @@
         }
       }
     } catch (err) {
+      const errMsg = err.message || 'TLA+ generation error';
       if (tlaResultsEl) {
         if (artifactResults) artifactResults.hidden = false;
         tlaResultsEl.hidden = false;
         const statusEl = document.getElementById('tla-status');
-        if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">Error: ${err.message}</span>`;
+        if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">Error: ${errMsg}</span>`;
       }
+      showError(errMsg);
+      showToast(`TLA+ generation failed — ${errMsg.slice(0, 80)}${errMsg.length > 80 ? '...' : ''}`, 'error', 6000);
     } finally {
-      input.readOnly = false;
       setLoading(false);
-      syncUiGuidance();
     }
   }
 
@@ -1476,12 +2091,15 @@
       const tracesEl = document.getElementById('ts-traces');
 
       if (!data.success && !data.compile) {
+        const errMsg = data.error || 'TypeScript generation failed';
         if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">TypeScriptRuntime failed</span>`;
-        if (compileEl) compileEl.textContent = data.error || 'Compilation failed';
+        if (compileEl) compileEl.textContent = errMsg;
         if (testsEl) testsEl.textContent = data.details || '';
         if (coverageEl) coverageEl.textContent = '';
         if (sourceEl) sourceEl.textContent = data.ts_source || '';
         if (tracesEl) tracesEl.textContent = '';
+        showError(errMsg);
+        showToast(`TypeScript generation failed — ${errMsg.slice(0, 80)}${errMsg.length > 80 ? '...' : ''}`, 'error', 6000);
         return;
       }
 
@@ -1516,12 +2134,15 @@
         _showStandaloneContinuation('download', 'TypeScript compiled — pipeline complete', 'Download Full Bundle');
       }
     } catch (err) {
+      const errMsg = err.message || 'TypeScript generation error';
       if (tsResultsEl) {
         if (artifactResults) artifactResults.hidden = false;
         tsResultsEl.hidden = false;
         const statusEl = document.getElementById('ts-status');
-        if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">Error: ${err.message}</span>`;
+        if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">Error: ${errMsg}</span>`;
       }
+      showError(errMsg);
+      showToast(`TypeScript generation failed — ${errMsg.slice(0, 80)}${errMsg.length > 80 ? '...' : ''}`, 'error', 6000);
     } finally {
       input.readOnly = false;
       setLoading(false);
@@ -1533,38 +2154,11 @@
   //  Render — single entry point dispatches by current stage
   // =========================================================================
 
-  async function renderRust() {
-    if (!currentRunId || !currentDiagramName) {
-      showError('Complete TypeScript stage first before compiling Rust binary.');
-      return;
-    }
-    hideError();
-    setLoading(true, 'rust');
-    try {
-      const res = await fetch('/api/render/rust', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ diagram_name: currentDiagramName, run_id: currentRunId }),
-      });
-      const data = await res.json();
-      orchestrator.setArtifact('rust', data.rust_source || '');
-      input.value = data.rust_source || '';
-      if (artifactResults) artifactResults.hidden = false;
-      resultSection.hidden = false;
-      if (data.progressionUpdate) orchestrator.updateFromBackend(data.progressionUpdate);
-    } catch (err) {
-      showError('Rust compilation error: ' + err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
   async function render() {
     if (isLoading || _renderAnimating) return;
 
     if (currentMode === 'tla') return renderTla();
     if (currentMode === 'ts') return renderTs();
-    if (currentMode === 'rust') return renderRust();
 
     if (INPUT_STAGES.has(currentMode)) {
       orchestrator.resetDownstream(currentMode);
@@ -1591,6 +2185,32 @@
   input.addEventListener('input', updateBadges);
   diagramNameInput?.addEventListener('input', syncUiGuidance);
 
+  // Debounced auto-save: every paste/edit is mirrored into the orchestrator
+  // within ~400ms so we never lose user content if they reload or switch
+  // tabs before the explicit save in `setMode` fires. Pairs with the paste
+  // listener below for instant-save on paste.
+  let _autoSaveTimer = null;
+  input.addEventListener('input', () => {
+    if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
+    _autoSaveTimer = setTimeout(() => {
+      _autoSaveTimer = null;
+      orchestrator.setArtifact(currentMode, input.value);
+      orchestrator._persist();
+    }, 400);
+  });
+
+  // Instant-save on paste — large pastes deserve immediate persistence
+  // because the user expects the content to be safe the moment it hits
+  // the textarea (especially when pasting a whitepaper into Simple Idea).
+  input.addEventListener('paste', () => {
+    // Defer to the next tick so input.value reflects the pasted content.
+    setTimeout(() => {
+      orchestrator.setArtifact(currentMode, input.value);
+      orchestrator._persist();
+      showToast(`Pasted into ${_stageLabel(currentMode)} tab — saved`, 'info', 2000);
+    }, 0);
+  });
+
   btnNewDiagram.addEventListener('click', () => {
     input.value = '';
     if (diagramNameInput) diagramNameInput.value = '';
@@ -1614,6 +2234,9 @@
       if (name && diagramNameInput) {
         diagramNameInput.value = name;
         currentDiagramName = name;
+        showToast(`New diagram "${name}" created — enter your idea`, 'success', 3000);
+      } else {
+        showToast('New diagram workspace — ready for your idea', 'info', 2500);
       }
       input.focus();
       syncUiGuidance();
@@ -1626,12 +2249,40 @@
   btnResetZoom.addEventListener('click', () => { if (pzFront) pzFront.fitToViewport(); if (pzBack) pzBack.fitToViewport(); });
   btnDismissError.addEventListener('click', hideError);
 
-  // ---- Enhance toggle (mirrors hidden chk-enhance checkbox) ----
+  // Keyboard focus management
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !errorBanner.hidden) {
+      hideError();
+      input.focus();
+    }
+  });
+
+  // ---- Enhance button ------------------------------------------------------
+  // Behavior depends on the active input mode:
+  //   • idea  → ALWAYS immediate action. Click fires copilot.enhance() right
+  //             away (rainbow ring + textarea sheen visualize the work).
+  //             Insufficient text shows a brief tooltip and aborts.
+  //   • md/mmd → Toggle render-time refinement. The button stays `active` to
+  //             tell the user "next Render will refine the source".
   const _btnEnhanceClick = document.getElementById('btn-enhance');
   if (_btnEnhanceClick) {
     _btnEnhanceClick.addEventListener('click', () => {
+      if (currentMode === 'idea') {
+        if (!copilot) return;
+        if (input.value.trim().length < 10) {
+          _btnEnhanceClick.title = 'Type at least 10 characters to enhance';
+          return;
+        }
+        _btnEnhanceClick.title = 'Refine your idea (Cmd+Enter)';
+        copilot.enhance();
+        return;
+      }
+      // md / mmd: render-time refinement toggle
       chkEnhance.checked = !chkEnhance.checked;
       _btnEnhanceClick.classList.toggle('active', chkEnhance.checked);
+      _btnEnhanceClick.title = chkEnhance.checked
+        ? 'Will refine on next Render'
+        : 'Refine this source on Render';
     });
   }
 
@@ -1658,7 +2309,7 @@
 
   function setAgentMode(modeId) {
     if (!modeId && agent && agent.running) {
-      agent.stopAndRestore();
+      agent.stopAndPause();
       agentState = 'idle';
       notesDirty = false;
       input.readOnly = false;
@@ -1712,18 +2363,23 @@
   if (btnAgentToggle) {
     btnAgentToggle.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (agentModeActive) { setAgentMode(null); }
-      else {
-        const wasHidden = agentDropdown.hidden;
-        agentDropdown.hidden = !wasHidden;
-        if (!agentDropdown.hidden) _positionAgentDropdown();
-      }
+      // Always rebuild dropdown for current stage before showing
+      _rebuildAgentDropdown();
+      const wasHidden = agentDropdown.hidden;
+      agentDropdown.hidden = !wasHidden;
+      if (!agentDropdown.hidden) _positionAgentDropdown();
     });
   }
 
   // Agent mode option clicks are handled dynamically by _rebuildAgentDropdown()
-
-  document.addEventListener('click', () => { if (agentDropdown && !agentDropdown.hidden) agentDropdown.hidden = true; });
+  // Clicking outside the dropdown closes it (but not when clicking inside)
+  document.addEventListener('click', (e) => {
+    if (agentDropdown && !agentDropdown.hidden) {
+      if (!agentDropdown.contains(e.target) && e.target !== btnAgentToggle && !btnAgentToggle?.contains(e.target)) {
+        agentDropdown.hidden = true;
+      }
+    }
+  });
 
   const agentNotesWrap = document.getElementById('agent-notes-wrap');
   const agentNotesInput = document.getElementById('agent-notes-input');
@@ -1735,23 +2391,57 @@
       input, panel: agentPanel, panelLog: agentPanelLog, panelMode: agentPanelMode,
       notesWrap: agentNotesWrap, notesInput: agentNotesInput, btnFinalize: btnAgentCommit,
       onPreviewRender: (event) => {
+        _applyAgentArtifacts(event);
+        _agenticallyReviewArtifacts(event);
         if (event.paths) {
-          showResult(event.paths, event.diagram_name, event.run_id);
+          const depthMeta = (event.depth_score != null || event.depth_tier != null)
+            ? { score: event.depth_score, tier: event.depth_tier } : null;
+          showResult(event.paths, event.diagram_name, event.run_id, event.metrics, depthMeta);
           sidebar.add({ name: event.diagram_name, type: event.diagram_type || 'flowchart', paths: event.paths, timestamp: new Date().toLocaleString(), source: input.value, run_id: event.run_id || null });
+          showToast(`Preview ready — ${event.metrics?.nodeCount || '?'} nodes, ${event.metrics?.edgeCount || '?'} edges`, 'success', 3500);
         }
+        _updateStageTracker('mmd', 'complete');
       },
       onRenderResult: (event) => {
+        _applyAgentArtifacts(event);
+        _agenticallyReviewArtifacts(event);
         if (event.paths) {
-          showResult(event.paths, event.diagram_name, event.run_id);
+          const depthMeta = (event.depth_score != null || event.depth_tier != null)
+            ? { score: event.depth_score, tier: event.depth_tier } : null;
+          showResult(event.paths, event.diagram_name, event.run_id, event.metrics, depthMeta);
           sidebar.add({ name: event.diagram_name, type: event.diagram_type || 'flowchart', paths: event.paths, timestamp: new Date().toLocaleString(), source: input.value, run_id: event.run_id || null });
+          showToast(`Diagram finalized — ${event.diagram_name}`, 'success', 4000);
         }
       },
       onContinue: (stage) => {
         if (!orchestrator.isUnlocked(stage)) return;
+        showToast(`Continuing to ${_stageLabel(stage)} stage`, 'info', 2500);
         setMode(stage);
         setTimeout(() => render(), 300);
       },
+      onAgentFocus: (focus) => _showAgentGaze(focus),
+      onPipelineStage: (event) => {
+        _applyAgentArtifacts(event);
+        _agenticallyReviewArtifacts(event);
+        if (event.stage === 'tla') {
+          const tlaOk = event.success && event.sany_valid;
+          showToast(
+            tlaOk ? `TLA+ verified — SANY passed, ${event.violations || 0} violations` : `TLA+ stage ${event.success ? 'completed' : 'failed'}`,
+            tlaOk ? 'success' : 'error',
+            4500,
+          );
+          _updateStageTracker('tla', tlaOk ? 'complete' : 'error');
+        } else if (event.stage === 'ts') {
+          showToast(
+            event.success ? `TypeScript compiled — tsc ${event.compile_ok ? 'pass' : 'fail'}, tests ${event.tests_ok ? 'pass' : 'fail'}` : 'TypeScript stage failed',
+            event.success ? 'success' : 'error',
+            4500,
+          );
+          _updateStageTracker('ts', event.success ? 'complete' : 'error');
+        }
+      },
       onBundleReady: (event) => {
+        _applyAgentArtifacts(event);
         const completedStages = event.stages_completed || [];
         if (completedStages.includes('tla')) {
           orchestrator.updateFromBackend({
@@ -1763,16 +2453,70 @@
         if (completedStages.includes('ts')) {
           orchestrator.updateFromBackend({ stage: 'ts', confidence: event.ts_compiled ? 0.9 : 0.3 });
         }
+        showToast(`Full build complete — ${completedStages.join(' \u2192 ')}`, 'success', 5000);
         _showStandaloneContinuation('download', `Full build complete — ${completedStages.join(' \u2192 ')}`, 'Download Full Bundle');
       },
-      onComplete: () => { agentState = 'idle'; btnAgentRun.textContent = 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; input.readOnly = false; syncUiGuidance(); },
-      onError: (msg) => { agentState = 'idle'; notesDirty = false; showError(msg); btnAgentRun.textContent = 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; input.readOnly = false; setLoading(false); syncUiGuidance(); },
+      onComplete: () => {
+        agentState = 'idle';
+        btnAgentRun.textContent = 'Continue Agent';
+        btnAgentRun.classList.remove('is-stopping');
+        btnAgentRun.disabled = false;
+        input.readOnly = false;
+        showToast('Agent workflow complete', 'success', 3500);
+        syncUiGuidance();
+
+        // Top-level completion notification — surfaces the run summary even
+        // if the user has switched away to another browser tab. Lists every
+        // stage populated and offers one-click navigation/download actions.
+        const populated = Array.from(_agentRunPopulatedStages);
+        const projectName = (diagramNameInput?.value?.trim()) || currentDiagramName || '';
+        _showCompletionBanner({
+          project: projectName,
+          populatedStages: populated,
+          runId: currentRunId,
+          paths: currentPaths,
+          metrics: _agentRunMetrics,
+        });
+
+        // Update the browser tab title so users in other tabs see the
+        // completion. Reverts to MERMATE after 8s.
+        _setDocTitle('✓ Complete —', projectName);
+        _resetDocTitleAfter(8000);
+      },
+      onError: (msg) => {
+        agentState = 'idle';
+        notesDirty = false;
+        showError(msg);
+        showToast(`Agent error: ${msg}`, 'error', 6000);
+        btnAgentRun.textContent = 'Continue Agent';
+        btnAgentRun.classList.remove('is-stopping');
+        btnAgentRun.disabled = false;
+        input.readOnly = false;
+        setLoading(false);
+        syncUiGuidance();
+
+        // Surface error in browser tab title so it's visible from other tabs
+        const projectName = (diagramNameInput?.value?.trim()) || currentDiagramName || '';
+        _setDocTitle('⚠ Agent error —', projectName);
+        _resetDocTitleAfter(6000);
+      },
       onStateChange: (state) => {
         agentState = state;
-        if (state === 'running') { notesDirty = false; btnAgentRun.textContent = 'Stop Agent'; btnAgentRun.classList.add('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = false; }
+        if (state === 'running') {
+          notesDirty = false;
+          btnAgentRun.textContent = 'Pause Agent';
+          btnAgentRun.classList.add('is-stopping');
+          btnAgentRun.disabled = false;
+          btnAgentRun.hidden = false;
+          // Reset completion tracking and reflect agent activity in the title
+          _agentRunPopulatedStages = new Set();
+          _agentRunMetrics = null;
+          const projectName = (diagramNameInput?.value?.trim()) || currentDiagramName || '';
+          _setDocTitle('⚡ Agent running —', projectName);
+        }
         else if (state === 'awaiting_notes') { input.readOnly = false; btnAgentRun.hidden = true; }
         else if (state === 'finalizing') { notesDirty = false; input.readOnly = true; btnAgentRun.hidden = true; setLoading(true, 'text'); }
-        else if (state === 'idle') { btnAgentRun.textContent = 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = !agentModeActive; btnRender.hidden = agentModeActive; input.readOnly = false; setLoading(false); }
+        else if (state === 'idle') { btnAgentRun.textContent = agent ? 'Continue Agent' : 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = !agentModeActive; btnRender.hidden = agentModeActive; input.readOnly = false; setLoading(false); }
         syncUiGuidance();
       },
     });
@@ -1782,21 +2526,46 @@
     btnAgentRun.addEventListener('click', () => {
       if (isLoading) return;
       if (agent && agent.running) {
-        agent.stopAndRestore(); agentState = 'idle'; notesDirty = false;
-        btnAgentRun.textContent = 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = false;
+        orchestrator.setArtifact(currentMode, input.value);
+        agent.stopAndPause(); agentState = 'idle'; notesDirty = false;
+        btnAgentRun.textContent = 'Continue Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = false;
         input.readOnly = false; setLoading(false); syncUiGuidance(); return;
       }
-      if (!selectedAgentMode) return;
+      if (!selectedAgentMode) selectedAgentMode = _defaultAgentModeForStage(currentMode);
       _createAgent(); input.readOnly = true; hideError();
-      agent.run(selectedAgentMode, diagramNameInput?.value?.trim() || undefined);
+      orchestrator.setArtifact(currentMode, input.value);
+      _resetStageTracker();
+      _updateStageTracker(currentMode, 'active');
+      // Fresh agent run — re-enable deterministic auto-switching. The user
+      // can override mid-run by clicking a tab; until then we'll route them
+      // to whichever artifact the agent produces.
+      _autoSwitchUserOverride = false;
+      if (_autoSwitchTimer) { clearTimeout(_autoSwitchTimer); _autoSwitchTimer = null; }
+      showToast(`Agent started — ${getAgentModeLabel(selectedAgentMode)} on ${_stageLabel(currentMode)}`, 'info', 3000);
+      _showAgentGaze({
+        role: 'MERMATE',
+        stage: currentMode,
+        target: currentMode,
+        summary: `Continuing from ${_stageLabel(currentMode)} artifact`,
+      });
+      agent.run(selectedAgentMode, diagramNameInput?.value?.trim() || currentDiagramName || undefined, currentMode, currentRunId);
     });
   }
 
-  if (btnAgentCommit) { btnAgentCommit.addEventListener('click', () => { _createAgent(); agent.finalize(); }); }
+  if (btnAgentCommit) {
+    btnAgentCommit.addEventListener('click', () => {
+      _createAgent();
+      orchestrator.setArtifact(currentMode, input.value);
+      agent.finalize(input.value, currentMode, currentRunId);
+    });
+  }
   if (agentNotesInput) { agentNotesInput.addEventListener('input', () => { notesDirty = !!agentNotesInput.value.trim(); syncUiGuidance(); }); }
   if (btnAgentStop) {
     btnAgentStop.addEventListener('click', () => {
-      if (agent) { agent.stopAndRestore(); agentState = 'idle'; notesDirty = false; btnAgentRun.disabled = false; input.readOnly = false; setLoading(false); syncUiGuidance(); }
+      if (agent) {
+        orchestrator.setArtifact(currentMode, input.value);
+        agent.stopAndPause(); agentState = 'idle'; notesDirty = false; btnAgentRun.disabled = false; input.readOnly = false; setLoading(false); syncUiGuidance();
+      }
     });
   }
 
@@ -1828,8 +2597,33 @@
   _rebuildAgentDropdown();
   updateBadges();
 
+  // Restore pending entry if it exists
+  const pendingItem = sidebar.items.find(i => i._pending);
+  if (pendingItem && pendingItem.name && diagramNameInput) {
+    diagramNameInput.value = pendingItem.name;
+    currentDiagramName = pendingItem.name;
+  }
+
   if (currentPaths && (currentPaths.png || currentPaths.svg)) {
-    showResult(currentPaths, currentDiagramName, currentRunId);
+    // Verify the restored paths actually resolve before showing — stale
+    // paths from a deleted run would otherwise render as a black box.
+    const verifyPath = currentPaths.png || currentPaths.svg;
+    fetch(verifyPath, { method: 'HEAD' })
+      .then(res => {
+        if (res.ok) {
+          showResult(currentPaths, currentDiagramName, currentRunId);
+        } else {
+          console.warn('[restore] Stored paths no longer exist, clearing session');
+          currentPaths = null;
+          currentRunId = null;
+          _persistSession();
+        }
+      })
+      .catch(() => {
+        currentPaths = null;
+        currentRunId = null;
+        _persistSession();
+      });
   }
 
   fetch('/api/copilot/health')
