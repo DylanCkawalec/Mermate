@@ -15,7 +15,7 @@
   //  WorkflowOrchestrator — FSM + artifact graph + pub/sub
   // =========================================================================
 
-  const STAGES = ['idea', 'md', 'mmd', 'tla', 'ts', 'rust'];
+  const STAGES = ['idea', 'md', 'mmd', 'tla', 'ts'];
   const INPUT_STAGES = new Set(['idea', 'md', 'mmd']);
   const RENDER_ICON_SVGS = {
     idea: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5a4.5 4.5 0 0 1 2.25 8.4v1.85a1.25 1.25 0 0 1-1.25 1.25h-2a1.25 1.25 0 0 1-1.25-1.25V9.9A4.5 4.5 0 0 1 8 1.5z"/></svg>',
@@ -23,7 +23,6 @@
     mmd:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="5 4 2 8 5 12"/><polyline points="11 4 14 8 11 12"/><line x1="9" y1="2" x2="7" y2="14"/></svg>',
     tla:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5l5.5 3v7L8 14.5 2.5 11.5v-7z"/><path d="M5 8h6"/><path d="M8 5.5v5"/></svg>',
     ts:   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M6 6h4M8 6v5"/></svg>',
-    rust: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M5 8h6M8 5v6"/><circle cx="8" cy="8" r="2"/></svg>',
   };
 
   class WorkflowOrchestrator {
@@ -125,16 +124,24 @@
 
     _persist() {
       try {
-        sessionStorage.setItem('mermate_workflow', JSON.stringify({
+        const payload = JSON.stringify({
           state: this.state,
           artifacts: this.artifacts,
-        }));
+        });
+        // localStorage survives browser restart; sessionStorage is a
+        // secondary write so older code paths that still read it keep
+        // working until the entire app moves to localStorage.
+        localStorage.setItem('mermate_workflow', payload);
+        sessionStorage.setItem('mermate_workflow', payload);
       } catch { /* storage full or unavailable */ }
     }
 
     restore() {
       try {
-        const raw = sessionStorage.getItem('mermate_workflow');
+        // Prefer localStorage (durable across restarts). Fall back to
+        // sessionStorage for users who only have data in the old store.
+        const raw = localStorage.getItem('mermate_workflow')
+          || sessionStorage.getItem('mermate_workflow');
         if (!raw) return;
         const saved = JSON.parse(raw);
         if (saved.state) this.state = { ...this.state, ...saved.state };
@@ -195,6 +202,8 @@
 
   const sidebar = new window.MermaidSidebar(sidebarList, (item) => {
     showResult(item.paths, item.name, item.run_id);
+  }, (msg, type = 'info', duration = 3000) => {
+    showToast(msg, type, duration);
   });
 
   const runDetailsEl = document.getElementById('run-details');
@@ -248,15 +257,20 @@
 
   function _persistSession() {
     try {
-      sessionStorage.setItem('mermate_session', JSON.stringify({
+      const payload = JSON.stringify({
         runId: currentRunId, diagramName: currentDiagramName, paths: currentPaths,
-      }));
+      });
+      // localStorage survives browser restart; sessionStorage kept as a
+      // backwards-compatible secondary write.
+      localStorage.setItem('mermate_session', payload);
+      sessionStorage.setItem('mermate_session', payload);
     } catch {}
   }
 
   function _restoreSession() {
     try {
-      const raw = sessionStorage.getItem('mermate_session');
+      const raw = localStorage.getItem('mermate_session')
+        || sessionStorage.getItem('mermate_session');
       if (!raw) return;
       const s = JSON.parse(raw);
       if (s.runId) currentRunId = s.runId;
@@ -323,6 +337,12 @@
     }
     dropdown.innerHTML = '';
 
+    // Add header label for current stage
+    const header = document.createElement('div');
+    header.className = 'agent-dropdown-header';
+    header.textContent = `Agent for ${_stageLabel(currentMode)}`;
+    dropdown.appendChild(header);
+
     for (const mode of modes) {
       const btn = document.createElement('button');
       btn.className = 'agent-mode-option';
@@ -342,6 +362,22 @@
 
       dropdown.appendChild(btn);
     }
+
+    // Add disable option when agent mode is active
+    if (agentModeActive) {
+      const disableBtn = document.createElement('button');
+      disableBtn.className = 'agent-mode-option agent-mode-disable';
+      disableBtn.innerHTML = `<span class="agent-mode-icon">\u2715</span>`
+        + `<span class="agent-mode-info">`
+        + `<span class="agent-mode-name">Disable Agent Mode</span>`
+        + `<span class="agent-mode-desc">Switch back to manual render</span>`
+        + `</span>`;
+      disableBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setAgentMode(null);
+      });
+      dropdown.appendChild(disableBtn);
+    }
   }
 
   const COPILOT_API_BASE = '/api/copilot';
@@ -350,7 +386,7 @@
   //  Mode Configuration (5 stages)
   // =========================================================================
 
-  const MODES = {
+  const MODE_CONFIG = {
     idea: {
       placeholder: 'Describe your system, workflow, or diagram idea...\n\nStart simply:\n  "A user logs in, the server checks credentials, then redirects to dashboard"\n\nOr more structured:\n  "Payment flow: Browser \u2192 API Gateway \u2192 Payment Service \u2192 Stripe \u2192 Bank\n   - on success: return confirmation to browser\n   - on failure: show error, retry up to 3 times \u2192 dead letter queue"\n\nUseful signals: actors, services, arrows (\u2192), steps, decisions, states, failures',
       hint: 'Type an idea \u00b7 \u2318\u23ce / Ctrl+Return to enhance text \u00b7 Tab to accept suggestion',
@@ -358,34 +394,28 @@
       showUpload: false,
     },
     md: {
-      placeholder: 'Paste your markdown architecture specification...',
+      placeholder: 'Paste your Markdown architecture specification...\n\nInclude diagram descriptions in markdown format:\n  ## User Authentication Flow\n  The user submits credentials to the login API...\n\nSupported formats: .md, .markdown, .txt',
       hint: 'Paste or upload a markdown spec with diagram descriptions',
       enhanceDefault: true,
       showUpload: true,
       accept: '.md,.markdown,.txt',
     },
     mmd: {
-      placeholder: 'Paste or upload .mmd Mermaid source...',
+      placeholder: 'Paste or upload Mermaid (.mmd) source code...\n\nExample:\n  graph TD\n    A[User] \u2192|logs in| B[Server]\n    B \u2192|checks| C[Database]\n\nSupported format: .mmd',
       hint: 'Paste Mermaid source directly for compilation',
       enhanceDefault: false,
       showUpload: true,
       accept: '.mmd',
     },
     tla: {
-      placeholder: 'TLA+ specification source...\n\nGenerated after a successful Mermaid render.\nPress Render to verify with SANY and TLC.',
+      placeholder: 'TLA+ specification source...\n\nGenerated after a successful Mermaid render.\nEdit the specification, then press Render to verify with SANY and TLC.\n\nThe spec includes:\n  - State variables\n  - Invariants\n  - Next-state relation',
       hint: 'Edit the TLA+ specification, then Render to verify with SANY/TLC',
       enhanceDefault: false,
       showUpload: false,
     },
     ts: {
-      placeholder: 'TypeScript runtime source...\n\nGenerated after TLA+ verification.\nPress Render to compile and run the test harness.',
+      placeholder: 'TypeScript runtime source...\n\nGenerated after TLA+ verification.\nEdit the runtime code, then press Render to compile and run the test harness.\n\nThe runtime includes:\n  - State machine implementation\n  - Test harness\n  - Coverage reports',
       hint: 'Edit the TypeScript runtime, then Render to compile and test',
-      enhanceDefault: false,
-      showUpload: false,
-    },
-    rust: {
-      placeholder: 'Rust binary source...\n\nGenerated after TypeScript verification.\nPress Render to compile with cargo and produce a standalone binary.',
-      hint: 'Edit the Rust source, then Render to compile the binary',
       enhanceDefault: false,
       showUpload: false,
     },
@@ -398,7 +428,6 @@
     hybrid: 'Repairing and compiling...',
     tla: 'Verifying TLA+ specification...',
     ts: 'Compiling TypeScript runtime...',
-    rust: 'Compiling Rust binary...',
   };
 
   const STATE_LABELS = {
@@ -487,12 +516,15 @@
       if (tsEmptyEl) tsEmptyEl.hidden = mode !== 'ts' || (orchestrator.getArtifact('ts') || '').trim() !== '';
     }
 
-    if (isDiagramMode && currentPaths) {
+    if (isDiagramMode && currentPaths && (currentPaths.png || currentPaths.svg)) {
       resultSection.hidden = false;
     } else if (!isDiagramMode) {
       if (artifactResults && !artifactResults.hidden) {
         resultSection.hidden = false;
       }
+    } else {
+      // Diagram mode but no valid paths — keep result section hidden
+      resultSection.hidden = true;
     }
 
     document.querySelectorAll('.pipeline-segment').forEach(seg => {
@@ -523,7 +555,7 @@
   const _agentSleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
   function _stageLabel(stage) {
-    return ({ idea: 'Simple Idea', md: 'Markdown Spec', mmd: 'Mermaid', tla: 'TLA+', ts: 'TypeScript', rust: 'Rust' })[stage] || stage;
+    return ({ idea: 'Simple Idea', md: 'Markdown Spec', mmd: 'Mermaid', tla: 'TLA+', ts: 'TypeScript' })[stage] || stage;
   }
 
   function _agentTargetForPhase(phase) {
@@ -606,7 +638,10 @@
 
     if (event?.diagram_name) currentDiagramName = event.diagram_name;
     if (event?.run_id) currentRunId = event.run_id;
-    if (event?.paths) currentPaths = event.paths;
+    // Only update currentPaths if the event provides valid, non-empty paths
+    if (event?.paths && (event.paths.png || event.paths.svg)) {
+      currentPaths = event.paths;
+    }
 
     if (mdSource.trim()) {
       const prev = orchestrator.getArtifact('md') || '';
@@ -619,6 +654,7 @@
       });
       if (prev.trim() !== mdSource.trim()) {
         showToast(`Markdown tab populated (${mdSource.length.toLocaleString()} chars)`, 'success', 3000);
+        _markTabHasNewContent('md');
       }
     }
 
@@ -633,6 +669,7 @@
       });
       if (prev.trim() !== mmdSource.trim()) {
         showToast(`Mermaid tab populated (${mmdSource.length.toLocaleString()} chars)`, 'success', 3000);
+        _markTabHasNewContent('mmd');
       }
     }
 
@@ -647,6 +684,7 @@
       });
       if (prev.trim() !== tlaSource.trim()) {
         showToast(`TLA+ tab populated (${tlaSource.length.toLocaleString()} chars)`, 'success', 3000);
+        _markTabHasNewContent('tla');
       }
     }
 
@@ -661,10 +699,62 @@
       });
       if (prev.trim() !== tsSource.trim()) {
         showToast(`TypeScript tab populated (${tsSource.length.toLocaleString()} chars)`, 'success', 3000);
+        _markTabHasNewContent('ts');
       }
     }
 
+    // Deterministic auto-switch — guarantees the user lands on the tab
+    // that just received new content, even if the animated walk in
+    // _agenticallyReviewArtifacts gets cancelled by a subsequent event.
+    const stageOrder = ['md', 'mmd', 'tla', 'ts'];
+    let highestNewStage = null;
+    for (const stage of stageOrder) {
+      const src = stage === 'md' ? mdSource
+        : stage === 'mmd' ? mmdSource
+        : stage === 'tla' ? tlaSource
+        : tsSource;
+      if (src.trim()) highestNewStage = stage;
+    }
+    if (highestNewStage && orchestrator.isUnlocked(highestNewStage)) {
+      _scheduleAutoSwitchToStage(highestNewStage);
+    }
+
     _persistSession();
+  }
+
+  // Debounced auto-switch — only the latest target wins. Survives across
+  // rapid agent events (preview_render → final_render → pipeline_stage)
+  // because each new call just resets the timer.
+  let _autoSwitchTimer = null;
+  let _autoSwitchUserOverride = false;
+  function _scheduleAutoSwitchToStage(targetStage) {
+    if (_autoSwitchUserOverride) return; // user clicked a tab themselves
+    if (_autoSwitchTimer) clearTimeout(_autoSwitchTimer);
+    _autoSwitchTimer = setTimeout(() => {
+      _autoSwitchTimer = null;
+      if (_autoSwitchUserOverride) return;
+      if (currentMode !== targetStage && orchestrator.isUnlocked(targetStage)) {
+        setMode(targetStage);
+        showToast(`Switched to ${_stageLabel(targetStage)} tab`, 'info', 2500);
+      }
+    }, 800);
+  }
+
+  // Marks a tab as having unseen agent-produced content. The badge is
+  // cleared automatically the first time the user visits that tab via
+  // setMode (see clear logic in setMode below).
+  function _markTabHasNewContent(stage) {
+    const btn = document.querySelector(`.mode-btn[data-mode="${stage}"]`);
+    if (!btn) return;
+    // Skip if user is already on this tab — no point flashing the tab
+    // they're already looking at.
+    if (currentMode === stage) return;
+    btn.classList.add('has-new-content');
+  }
+
+  function _clearTabNewContent(stage) {
+    const btn = document.querySelector(`.mode-btn[data-mode="${stage}"]`);
+    if (btn) btn.classList.remove('has-new-content');
   }
 
   async function _agenticallyReviewArtifacts(event) {
@@ -712,6 +802,10 @@
     currentMode = mode;
     orchestrator.switchTo(mode);
 
+    // User is now viewing this tab — clear the "new content" indicator
+    // if it was set by a prior agent run.
+    _clearTabNewContent(mode);
+
     const cfg = MODES[mode] || MODES.idea;
     input.value = orchestrator.getArtifact(mode);
     input.placeholder = cfg.placeholder;
@@ -733,6 +827,12 @@
     } else {
       btnUpload.classList.remove('visible');
     }
+
+    // Update input hint text based on mode
+    if (inputHint) inputHint.textContent = cfg.hint || '';
+
+    // Update placeholder text based on mode
+    input.placeholder = cfg.placeholder || '';
 
     try {
       if (mode === 'idea' && window.MermaidCopilot) {
@@ -783,6 +883,14 @@
   document.querySelectorAll('.mode-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       _agentHandoffToken++;
+      // User manually switched tabs — disable agent auto-switching for
+      // this run. A new agent run resets this flag in `_createAgent` /
+      // the Run-Agent click handler.
+      _autoSwitchUserOverride = true;
+      if (_autoSwitchTimer) {
+        clearTimeout(_autoSwitchTimer);
+        _autoSwitchTimer = null;
+      }
       setMode(btn.dataset.mode);
     });
   });
@@ -986,120 +1094,8 @@
     });
   }
 
-  document.querySelectorAll('.mode-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      _agentHandoffToken++;
-      setMode(btn.dataset.mode);
-    });
-  });
-
-  // =========================================================================
-  //  UI Guidance
-  // =========================================================================
-
-  function syncUiGuidance() {
-    const source = input.value || '';
-    const hasInput = source.trim().length > 0;
-    const hasName = !!diagramNameInput?.value?.trim();
-    const hasResult = !!currentPaths;
-    const activeMode = MODES[currentMode] || MODES.idea;
-    let hint = activeMode.hint;
-    let nextAction = '';
-    let tone = 'ready';
-
-    if (isLoading) {
-      hint = loadingText.textContent || 'Compiling...';
-      nextAction = 'Next: wait for the current render';
-      tone = 'busy';
-    } else if (agentState === 'running') {
-      hint = `${getAgentModeLabel(selectedAgentMode)} agent is building a preview from your prompt.`;
-      nextAction = 'Next: wait for the preview';
-      tone = 'busy';
-    } else if (agentState === 'awaiting_notes') {
-      hint = notesDirty
-        ? 'Preview ready. Your notes will steer the final Max pass.'
-        : 'Preview ready. Add notes for the final pass or keep the current draft.';
-      nextAction = notesDirty ? 'Next: enhance with notes' : 'Next: render as is or add notes';
-      tone = 'ready';
-    } else if (agentState === 'finalizing') {
-      hint = 'Applying the final pass and compiling the diagram.';
-      nextAction = 'Next: wait for the final result';
-      tone = 'busy';
-    } else if (agentModeActive && selectedAgentMode) {
-      hint = hasInput
-        ? `Agent: ${getAgentModeLabel(selectedAgentMode)} mode. ${agent ? 'Continue from the current artifact.' : 'Run the agent when the prompt is ready.'}`
-        : `Agent: ${getAgentModeLabel(selectedAgentMode)} mode. Enter the architecture prompt to begin.`;
-      nextAction = hasInput ? (agent ? `Next: continue from ${_stageLabel(currentMode)}` : 'Next: run agent') : (hasName ? 'Next: describe the architecture' : 'Next: enter prompt');
-      tone = 'ready';
-    } else if (currentMode === 'tla') {
-      const hasRun = !!(currentRunId && currentDiagramName);
-      if (hasInput && hasInput !== input.value.startsWith('Generating')) {
-        hint = activeMode.hint;
-        nextAction = 'Next: render to verify TLA+';
-      } else if (hasRun) {
-        hint = `Ready to generate TLA+ for "${currentDiagramName}" — auto-starting...`;
-        nextAction = 'Next: generating TLA+ specification via Specula';
-        tone = 'busy';
-      } else {
-        hint = 'Render a diagram first — the TLA+ pipeline will auto-start when ready.';
-        nextAction = 'Next: go back to Simple Idea and render a diagram';
-      }
-      tone = tone || 'ready';
-    } else if (currentMode === 'ts') {
-      const hasRun = !!(currentRunId && currentDiagramName);
-      if (hasInput && !input.value.startsWith('Generating')) {
-        hint = activeMode.hint;
-        nextAction = 'Next: render to compile TypeScript';
-      } else if (hasRun) {
-        hint = `Ready to generate TypeScript for "${currentDiagramName}" — auto-starting...`;
-        nextAction = 'Next: compiling TypeScript runtime';
-        tone = 'busy';
-      } else {
-        hint = 'Complete the TLA+ stage first — TypeScript generation will auto-start.';
-        nextAction = 'Next: go to TLA+ tab first';
-      }
-      tone = tone || 'ready';
-    } else if (!hasInput) {
-      const enhanceLabel = chkEnhance.checked ? 'Enhance ON — AI will refine before rendering' : 'Enhance OFF — click Enhance to enable AI refinement';
-      if (currentMode === 'idea') {
-        hint = hasName ? 'Describe the system, actors, and flow direction.' : activeMode.hint;
-        nextAction = hasName ? 'Next: describe the architecture' : 'Next: enter an idea';
-      } else if (currentMode === 'md') {
-        nextAction = 'Next: paste or upload a markdown spec';
-      } else {
-        nextAction = 'Next: paste Mermaid source or upload .mmd';
-      }
-      if (currentMode === 'idea' || currentMode === 'md') hint += ' · ' + enhanceLabel;
-    } else if (hasResult) {
-      hint = currentMode === 'idea'
-        ? 'Diagram rendered. Refine the prompt, rerender, or inspect the result.'
-        : 'Compiled output is ready. Refine the source or download the bundle.';
-      nextAction = currentMode === 'idea'
-        ? 'Next: refine prompt or rerender'
-        : 'Next: update source or download';
-      tone = 'result';
-    } else {
-      if (currentMode === 'idea' && profileHint) {
-        hint = profileHint;
-      }
-      nextAction = (currentMode === 'idea' && chkEnhance.checked)
-        ? 'Next: \u2318+Enter to enhance, or Render to compile'
-        : (currentMode === 'idea' ? 'Next: render or press \u2318/Ctrl+Enter to enhance' : 'Next: render the current source');
-    }
-
-    inputHint.textContent = hint;
-
-    if (nextActionChip) {
-      nextActionChip.textContent = nextAction;
-      nextActionChip.dataset.tone = tone;
-      nextActionChip.classList.toggle('is-visible', !!nextAction);
-    }
-
-    if (btnAgentCommit) {
-      btnAgentCommit.textContent = notesDirty ? 'Enhance with notes' : 'Render as is';
-      btnAgentCommit.disabled = agentState !== 'awaiting_notes';
-    }
-  }
+  // (Duplicate mode-btn listener + duplicate syncUiGuidance block removed —
+  //  the canonical versions are defined earlier in this IIFE.)
 
   function setLoading(on, contentState) {
     // Don't show loading overlay during agent operations - agent panel shows progress
@@ -1159,6 +1155,15 @@
   }
 
   function showResult(paths, name, runId, metrics, depthMeta) {
+    // Validate paths before showing — guard against stale / partial paths
+    if (!paths || (!paths.png && !paths.svg)) {
+      console.warn('[showResult] Invalid paths, skipping render', paths);
+      resultSection.hidden = true;
+      currentPaths = null;
+      _persistSession();
+      return;
+    }
+
     currentPaths = paths;
     currentDiagramName = name || 'diagram';
     currentRunId = runId || null;
@@ -1181,17 +1186,45 @@
       runDetails.hide();
     }
 
+    let pngLoaded = false;
+    let svgLoaded = false;
+
     resultPng.onload = () => {
+      pngLoaded = true;
       if (!pzFront) pzFront = new window.PanZoom(panZoomFront, resultPng);
       pzFront.fitToViewport();
     };
-    resultPng.src = paths.png + '?t=' + ts;
+    resultPng.onerror = () => {
+      console.error('[showResult] PNG failed to load:', paths.png);
+      if (!svgLoaded) {
+        showToast('Diagram image not available — try re-rendering', 'warning', 4000);
+        // If both fail, hide the result section
+        if (!pngLoaded) {
+          resultSection.hidden = true;
+          currentPaths = null;
+          _persistSession();
+        }
+      }
+    };
+    if (paths.png) {
+      resultPng.src = paths.png + '?t=' + ts;
+    } else {
+      resultPng.removeAttribute('src');
+    }
 
     resultSvg.onload = () => {
+      svgLoaded = true;
       if (!pzBack) pzBack = new window.PanZoom(panZoomBack, resultSvg);
       pzBack.fitToViewport();
     };
-    resultSvg.src = paths.svg + '?t=' + ts;
+    resultSvg.onerror = () => {
+      console.error('[showResult] SVG failed to load:', paths.svg);
+    };
+    if (paths.svg) {
+      resultSvg.src = paths.svg + '?t=' + ts;
+    } else {
+      resultSvg.removeAttribute('src');
+    }
 
     resultSection.classList.add('is-revealing');
     window.setTimeout(() => resultSection.classList.remove('is-revealing'), 220);
@@ -1663,12 +1696,16 @@
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(a.href);
+            showToast(`Bundle downloaded — ${Object.keys(bundleData.files).length} files`, 'success', 3500);
             return;
           }
         } catch { /* fall through to basic bundle */ }
       }
 
-      if (!currentPaths) return;
+      if (!currentPaths) {
+        showError('No diagram to download — render a diagram first');
+        return;
+      }
       const [pngRes, svgRes] = await Promise.all([fetch(currentPaths.png), fetch(currentPaths.svg)]);
       const [pngBlob, svgBlob] = await Promise.all([pngRes.blob(), svgRes.blob()]);
       zip.file(`${currentDiagramName}.png`, pngBlob);
@@ -1682,8 +1719,10 @@
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(a.href);
+      showToast(`Bundle downloaded — ${currentDiagramName} (PNG + SVG)`, 'success', 3000);
     } catch (err) {
       showError('Download failed: ' + err.message);
+      showToast('Download failed — see error banner', 'error', 5000);
     }
   }
 
@@ -1714,7 +1753,12 @@
         }),
       });
       const data = await resp.json();
-      if (!data.success) { showError(data.details || data.error || 'Compilation failed'); return; }
+      if (!data.success) {
+        const errMsg = data.details || data.error || 'Compilation failed';
+        showError(errMsg);
+        showToast(`Render failed — ${errMsg.slice(0, 80)}${errMsg.length > 80 ? '...' : ''}`, 'error', 6000);
+        return;
+      }
 
       const shouldAnimate = data.enhanced && data.compiled_source && data.content_state !== 'mmd';
       if (shouldAnimate) { setLoading(false); await animateRenderTransition(source, data.compiled_source); }
@@ -1740,6 +1784,9 @@
         orchestrator.updateFromBackend(data.progressionUpdate);
       }
 
+      showToast(`Diagram rendered — ${data.diagram_name || currentDiagramName}`, 'success', 3000);
+
+
       sidebar.add({
         name: data.diagram_name,
         type: data.diagram_type,
@@ -1752,6 +1799,7 @@
     } catch (err) {
       if (err.name === 'TypeError') { showError('Could not reach server. Is Mermaid-GPT running?'); }
       else { showError(err.message || 'Unexpected error'); }
+      showToast('Render failed — see error banner', 'error', 5000);
     } finally {
       setLoading(false);
     }
@@ -1796,9 +1844,12 @@
       resultSection.hidden = false;
 
       if (!data.success) {
-        if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">Error: ${data.error || 'Unknown'}</span>`;
+        const errMsg = data.error || 'TLA+ generation failed';
+        if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">Error: ${errMsg}</span>`;
         if (sourceEl) sourceEl.textContent = '';
         if (invEl) invEl.innerHTML = '';
+        showError(errMsg);
+        showToast(`TLA+ generation failed — ${errMsg.slice(0, 80)}${errMsg.length > 80 ? '...' : ''}`, 'error', 6000);
         return;
       }
 
@@ -1859,16 +1910,17 @@
         }
       }
     } catch (err) {
+      const errMsg = err.message || 'TLA+ generation error';
       if (tlaResultsEl) {
         if (artifactResults) artifactResults.hidden = false;
         tlaResultsEl.hidden = false;
         const statusEl = document.getElementById('tla-status');
-        if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">Error: ${err.message}</span>`;
+        if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">Error: ${errMsg}</span>`;
       }
+      showError(errMsg);
+      showToast(`TLA+ generation failed — ${errMsg.slice(0, 80)}${errMsg.length > 80 ? '...' : ''}`, 'error', 6000);
     } finally {
-      input.readOnly = false;
       setLoading(false);
-      syncUiGuidance();
     }
   }
 
@@ -1911,12 +1963,15 @@
       const tracesEl = document.getElementById('ts-traces');
 
       if (!data.success && !data.compile) {
+        const errMsg = data.error || 'TypeScript generation failed';
         if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">TypeScriptRuntime failed</span>`;
-        if (compileEl) compileEl.textContent = data.error || 'Compilation failed';
+        if (compileEl) compileEl.textContent = errMsg;
         if (testsEl) testsEl.textContent = data.details || '';
         if (coverageEl) coverageEl.textContent = '';
         if (sourceEl) sourceEl.textContent = data.ts_source || '';
         if (tracesEl) tracesEl.textContent = '';
+        showError(errMsg);
+        showToast(`TypeScript generation failed — ${errMsg.slice(0, 80)}${errMsg.length > 80 ? '...' : ''}`, 'error', 6000);
         return;
       }
 
@@ -1951,12 +2006,15 @@
         _showStandaloneContinuation('download', 'TypeScript compiled — pipeline complete', 'Download Full Bundle');
       }
     } catch (err) {
+      const errMsg = err.message || 'TypeScript generation error';
       if (tsResultsEl) {
         if (artifactResults) artifactResults.hidden = false;
         tsResultsEl.hidden = false;
         const statusEl = document.getElementById('ts-status');
-        if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">Error: ${err.message}</span>`;
+        if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">Error: ${errMsg}</span>`;
       }
+      showError(errMsg);
+      showToast(`TypeScript generation failed — ${errMsg.slice(0, 80)}${errMsg.length > 80 ? '...' : ''}`, 'error', 6000);
     } finally {
       input.readOnly = false;
       setLoading(false);
@@ -1968,38 +2026,11 @@
   //  Render — single entry point dispatches by current stage
   // =========================================================================
 
-  async function renderRust() {
-    if (!currentRunId || !currentDiagramName) {
-      showError('Complete TypeScript stage first before compiling Rust binary.');
-      return;
-    }
-    hideError();
-    setLoading(true, 'rust');
-    try {
-      const res = await fetch('/api/render/rust', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ diagram_name: currentDiagramName, run_id: currentRunId }),
-      });
-      const data = await res.json();
-      orchestrator.setArtifact('rust', data.rust_source || '');
-      input.value = data.rust_source || '';
-      if (artifactResults) artifactResults.hidden = false;
-      resultSection.hidden = false;
-      if (data.progressionUpdate) orchestrator.updateFromBackend(data.progressionUpdate);
-    } catch (err) {
-      showError('Rust compilation error: ' + err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
   async function render() {
     if (isLoading || _renderAnimating) return;
 
     if (currentMode === 'tla') return renderTla();
     if (currentMode === 'ts') return renderTs();
-    if (currentMode === 'rust') return renderRust();
 
     if (INPUT_STAGES.has(currentMode)) {
       orchestrator.resetDownstream(currentMode);
@@ -2026,6 +2057,32 @@
   input.addEventListener('input', updateBadges);
   diagramNameInput?.addEventListener('input', syncUiGuidance);
 
+  // Debounced auto-save: every paste/edit is mirrored into the orchestrator
+  // within ~400ms so we never lose user content if they reload or switch
+  // tabs before the explicit save in `setMode` fires. Pairs with the paste
+  // listener below for instant-save on paste.
+  let _autoSaveTimer = null;
+  input.addEventListener('input', () => {
+    if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
+    _autoSaveTimer = setTimeout(() => {
+      _autoSaveTimer = null;
+      orchestrator.setArtifact(currentMode, input.value);
+      orchestrator._persist();
+    }, 400);
+  });
+
+  // Instant-save on paste — large pastes deserve immediate persistence
+  // because the user expects the content to be safe the moment it hits
+  // the textarea (especially when pasting a whitepaper into Simple Idea).
+  input.addEventListener('paste', () => {
+    // Defer to the next tick so input.value reflects the pasted content.
+    setTimeout(() => {
+      orchestrator.setArtifact(currentMode, input.value);
+      orchestrator._persist();
+      showToast(`Pasted into ${_stageLabel(currentMode)} tab — saved`, 'info', 2000);
+    }, 0);
+  });
+
   btnNewDiagram.addEventListener('click', () => {
     input.value = '';
     if (diagramNameInput) diagramNameInput.value = '';
@@ -2049,6 +2106,9 @@
       if (name && diagramNameInput) {
         diagramNameInput.value = name;
         currentDiagramName = name;
+        showToast(`New diagram "${name}" created — enter your idea`, 'success', 3000);
+      } else {
+        showToast('New diagram workspace — ready for your idea', 'info', 2500);
       }
       input.focus();
       syncUiGuidance();
@@ -2175,18 +2235,23 @@
   if (btnAgentToggle) {
     btnAgentToggle.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (agentModeActive) { setAgentMode(null); }
-      else {
-        const wasHidden = agentDropdown.hidden;
-        agentDropdown.hidden = !wasHidden;
-        if (!agentDropdown.hidden) _positionAgentDropdown();
-      }
+      // Always rebuild dropdown for current stage before showing
+      _rebuildAgentDropdown();
+      const wasHidden = agentDropdown.hidden;
+      agentDropdown.hidden = !wasHidden;
+      if (!agentDropdown.hidden) _positionAgentDropdown();
     });
   }
 
   // Agent mode option clicks are handled dynamically by _rebuildAgentDropdown()
-
-  document.addEventListener('click', () => { if (agentDropdown && !agentDropdown.hidden) agentDropdown.hidden = true; });
+  // Clicking outside the dropdown closes it (but not when clicking inside)
+  document.addEventListener('click', (e) => {
+    if (agentDropdown && !agentDropdown.hidden) {
+      if (!agentDropdown.contains(e.target) && e.target !== btnAgentToggle && !btnAgentToggle?.contains(e.target)) {
+        agentDropdown.hidden = true;
+      }
+    }
+  });
 
   const agentNotesWrap = document.getElementById('agent-notes-wrap');
   const agentNotesInput = document.getElementById('agent-notes-input');
@@ -2309,6 +2374,11 @@
       orchestrator.setArtifact(currentMode, input.value);
       _resetStageTracker();
       _updateStageTracker(currentMode, 'active');
+      // Fresh agent run — re-enable deterministic auto-switching. The user
+      // can override mid-run by clicking a tab; until then we'll route them
+      // to whichever artifact the agent produces.
+      _autoSwitchUserOverride = false;
+      if (_autoSwitchTimer) { clearTimeout(_autoSwitchTimer); _autoSwitchTimer = null; }
       showToast(`Agent started — ${getAgentModeLabel(selectedAgentMode)} on ${_stageLabel(currentMode)}`, 'info', 3000);
       _showAgentGaze({
         role: 'MERMATE',
@@ -2373,7 +2443,25 @@
   }
 
   if (currentPaths && (currentPaths.png || currentPaths.svg)) {
-    showResult(currentPaths, currentDiagramName, currentRunId);
+    // Verify the restored paths actually resolve before showing — stale
+    // paths from a deleted run would otherwise render as a black box.
+    const verifyPath = currentPaths.png || currentPaths.svg;
+    fetch(verifyPath, { method: 'HEAD' })
+      .then(res => {
+        if (res.ok) {
+          showResult(currentPaths, currentDiagramName, currentRunId);
+        } else {
+          console.warn('[restore] Stored paths no longer exist, clearing session');
+          currentPaths = null;
+          currentRunId = null;
+          _persistSession();
+        }
+      })
+      .catch(() => {
+        currentPaths = null;
+        currentRunId = null;
+        _persistSession();
+      });
   }
 
   fetch('/api/copilot/health')

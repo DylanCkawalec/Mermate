@@ -99,8 +99,14 @@
     btnFlipToOpseeq.addEventListener('click', () => {
       sidebar.classList.add('flipped');
       if (sidebarOpseeqFrame && !sidebarOpseeqFrame.src) {
+        if (sidebarOpseeqStatus) sidebarOpseeqStatus.textContent = `Connecting to ${cachedBaseUrl}…`;
+        sidebarOpseeqFrame.onload = () => {
+          if (sidebarOpseeqStatus) sidebarOpseeqStatus.textContent = `Connected to ${cachedBaseUrl}`;
+        };
+        sidebarOpseeqFrame.onerror = () => {
+          if (sidebarOpseeqStatus) sidebarOpseeqStatus.textContent = `Failed to connect to ${cachedBaseUrl}`;
+        };
         sidebarOpseeqFrame.src = `${cachedBaseUrl}/?embed=mermate&mode=guide`;
-        if (sidebarOpseeqStatus) sidebarOpseeqStatus.textContent = `Connected to ${cachedBaseUrl}`;
       }
     });
     btnFlipBack.addEventListener('click', () => {

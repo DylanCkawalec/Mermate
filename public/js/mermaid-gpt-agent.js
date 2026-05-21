@@ -353,12 +353,20 @@ window.MermaidAgent = class MermaidAgent {
   // ---- SSE streaming ----
 
   async _streamSSE(url, body) {
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: this._abortController.signal,
-    });
+    let resp;
+    try {
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: this._abortController.signal,
+      });
+    } catch (err) {
+      if (err.name === 'AbortError') throw err;
+      const errorMsg = err.message || 'Network error — failed to connect to server';
+      console.error('[MermaidAgent] Fetch failed:', errorMsg, err);
+      throw new Error(`Failed to connect to server: ${errorMsg}. Check if Mermaid-GPT is running.`);
+    }
 
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}));

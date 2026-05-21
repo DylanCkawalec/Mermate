@@ -3,9 +3,10 @@
  * Manages diagram history, context menu deletion, and localStorage persistence.
  */
 window.MermaidSidebar = class MermaidSidebar {
-  constructor(listEl, onSelect) {
+  constructor(listEl, onSelect, onToast) {
     this.listEl = listEl;
     this.onSelect = onSelect;
+    this.onToast = onToast || (() => {}); // Optional toast callback
     this.STORAGE_KEY = 'mermaid-gpt-history';
     this.items = this._load();
     this.activeIndex = -1;
@@ -54,8 +55,13 @@ window.MermaidSidebar = class MermaidSidebar {
       this.dialog.close();
 
       try {
-        await fetch(`/api/diagrams/${encodeURIComponent(name)}`, { method: 'DELETE' });
-      } catch { /* best effort */ }
+        const res = await fetch(`/api/diagrams/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error(`Server responded ${res.status}`);
+        this.onToast(`"${this._humanize(name)}" deleted`, 'success', 2500);
+      } catch (err) {
+        console.error('Delete failed:', err);
+        this.onToast(`Failed to delete "${this._humanize(name)}" — ${err.message}`, 'error', 5000);
+      }
 
       this.items = this.items.filter(i => i.name !== name);
       if (this.activeIndex >= this.items.length) this.activeIndex = -1;
@@ -77,11 +83,15 @@ window.MermaidSidebar = class MermaidSidebar {
       if (i._pending && (!i.name || i.name === entry.name)) return false;
       return i.name !== entry.name;
     });
+    const isNew = !this.items.some(i => i.name === entry.name);
     this.items.unshift(entry);
     if (this.items.length > 50) this.items.length = 50;
     this._save();
     this.activeIndex = 0;
     this.render();
+    if (isNew && entry.name) {
+      this.onToast(`"${this._humanize(entry.name)}" saved to history`, 'success', 2500);
+    }
   }
 
   /**
@@ -293,8 +303,14 @@ window.MermaidSidebar = class MermaidSidebar {
           item.name = data.new_name;
           if (item.paths) item.paths = data.paths;
           this._save();
+          this.onToast(`Renamed to "${this._humanize(newName)}"`, 'success', 2500);
+        } else {
+          throw new Error(data.error || 'Rename failed');
         }
-      } catch { /* best effort */ }
+      } catch (err) {
+        console.error('Rename failed:', err);
+        this.onToast(`Failed to rename — ${err.message}`, 'error', 5000);
+      }
       this.render();
     };
 
