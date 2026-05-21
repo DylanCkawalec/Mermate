@@ -213,6 +213,33 @@ Type /talk to speak your idea"
           <span id="agent-panel-mode" class="agent-panel-mode"></span>
           <button id="btn-agent-stop" class="agent-panel-stop" aria-label="Stop agent" title="Stop">&times;</button>
         </div>
+        <!-- Stage progress tracker — shows current pipeline stage at all times -->
+        <div id="stage-tracker" class="stage-tracker" hidden aria-label="Pipeline progress" role="status">
+          <div class="stage-tracker-step" data-stage="idea">
+            <span class="stage-tracker-dot"></span>
+            <span class="stage-tracker-label">Idea</span>
+          </div>
+          <div class="stage-tracker-arrow">&rarr;</div>
+          <div class="stage-tracker-step" data-stage="md">
+            <span class="stage-tracker-dot"></span>
+            <span class="stage-tracker-label">Markdown</span>
+          </div>
+          <div class="stage-tracker-arrow">&rarr;</div>
+          <div class="stage-tracker-step" data-stage="mmd">
+            <span class="stage-tracker-dot"></span>
+            <span class="stage-tracker-label">Mermaid</span>
+          </div>
+          <div class="stage-tracker-arrow">&rarr;</div>
+          <div class="stage-tracker-step" data-stage="tla">
+            <span class="stage-tracker-dot"></span>
+            <span class="stage-tracker-label">TLA+</span>
+          </div>
+          <div class="stage-tracker-arrow">&rarr;</div>
+          <div class="stage-tracker-step" data-stage="ts">
+            <span class="stage-tracker-dot"></span>
+            <span class="stage-tracker-label">TypeScript</span>
+          </div>
+        </div>
         <div id="agent-panel-log" class="agent-panel-log"></div>
         <!-- Pre-Max notes input -->
         <div id="agent-notes-wrap" class="agent-notes-wrap" hidden>
@@ -234,6 +261,9 @@ Type /talk to speak your idea"
       <span id="error-message"></span>
       <button id="btn-dismiss-error" class="btn-dismiss" aria-label="Dismiss error">&times;</button>
     </div>
+
+    <!-- Toast notifications -->
+    <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
     <!-- Result area -->
     <section id="result-section" class="result-section" hidden>
@@ -264,6 +294,10 @@ Type /talk to speak your idea"
         </div>
       </div>
       <div class="result-controls">
+        <span id="depth-badge" class="depth-badge" hidden aria-label="Architecture depth">
+          <span class="depth-badge-dot" aria-hidden="true"></span>
+          <span class="depth-badge-text"></span>
+        </span>
         <button id="btn-flip" class="btn btn-secondary" aria-label="Flip card">Flip View</button>
         <button id="btn-reset-zoom" class="btn btn-secondary" aria-label="Reset zoom">Reset Zoom</button>
         <button id="btn-download" class="btn btn-secondary" aria-label="Download PNG + SVG as ZIP">Download</button>
@@ -275,6 +309,21 @@ Type /talk to speak your idea"
 
     <!-- Artifact Results (TLA+ / TypeScript) — driven by tab selection, outside diagram result-section -->
     <section id="artifact-results" class="artifact-results" hidden>
+      <!-- TLA+ Empty State -->
+      <div id="tla-empty" class="artifact-empty-state" hidden>
+        <div class="artifact-empty-icon">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M8 1.5l5.5 3v7L8 14.5 2.5 11.5v-7z"/>
+            <path d="M8 7v4"/>
+            <circle cx="8" cy="5" r="1"/>
+          </svg>
+        </div>
+        <div class="artifact-empty-title">No TLA+ specification yet</div>
+        <div class="artifact-empty-hint">Generate a diagram first, then run the TLA+ verification pipeline to create a formal specification.</div>
+        <div class="artifact-empty-action">
+          <button class="btn btn-secondary" onclick="document.querySelector('.mode-btn[data-mode=&quot;idea&quot;]')?.click()">Start from Idea</button>
+        </div>
+      </div>
       <!-- TLA+ Verification Results -->
       <div id="tla-results" class="tla-results" hidden>
         <div class="tla-header">
@@ -296,6 +345,20 @@ Type /talk to speak your idea"
           </div>
         </div>
         <div id="tla-metrics" class="tla-metrics"></div>
+      </div>
+      <!-- TypeScript Empty State -->
+      <div id="ts-empty" class="artifact-empty-state" hidden>
+        <div class="artifact-empty-icon">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="2" y="2" width="12" height="12" rx="2"/>
+            <path d="M6 6h4M8 6v5"/>
+          </svg>
+        </div>
+        <div class="artifact-empty-title">No TypeScript runtime yet</div>
+        <div class="artifact-empty-hint">Complete the TLA+ verification stage first, then compile to a TypeScript runtime.</div>
+        <div class="artifact-empty-action">
+          <button class="btn btn-secondary" onclick="document.querySelector('.mode-btn[data-mode=&quot;tla&quot;]')?.click()">Go to TLA+</button>
+        </div>
       </div>
       <!-- TypeScriptRuntime Results -->
       <div id="ts-results" class="tla-results" hidden>

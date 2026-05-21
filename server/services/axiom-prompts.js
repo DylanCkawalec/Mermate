@@ -253,34 +253,124 @@ function buildCopilotSuggestPrompt() {
 
 /**
  * Build system prompt for copilot_enhance stage.
- * @param {string} enhanceMode - "selection" or "full"
+ *
+ * Three quality-tier flavors plus an in-place selection flavor:
+ *   - 'expand'    → aggressive architect-grade expansion for short/sparse
+ *                   ideas (e.g. "the mentibus blockchain"). PRESERVATION
+ *                   axiom is intentionally absent — the named subject is
+ *                   the anchor and there is nothing else to preserve.
+ *   - 'refine'    → conservative refinement for already-detailed ideas
+ *                   where the user has named entities and relationships.
+ *                   PRESERVATION axiom protects what they wrote.
+ *   - 'distill'   → compression for large dumps (whitepapers, LaTeX, long
+ *                   markdown, code-heavy specs). Strips ceremony, keeps
+ *                   every architectural concept, named entity, formula,
+ *                   and data flow. Produces a single architect-grade
+ *                   "simple idea" prompt that fully replaces the dump.
+ *   - 'selection' → enhance only a highlighted passage in place.
+ *
+ * @param {string} enhanceMode - "selection" | "full" | "refine" | "expand" | "distill"
  */
 function buildCopilotEnhancePrompt(enhanceMode) {
   const selectionTask = `TASK: Enhance ONLY the selected text passage. Use the surrounding context to understand intent. Return the improved version of the selected text only — not the full document. Make it more specific, architecturally precise, and Mermaid-ready.`;
 
-  const fullTask = `TASK: Enhance and expand the user's full idea. Flesh out actors, services, steps, decisions, and failure paths. Add specificity and engineering clarity. Return the full enhanced idea text.`;
+  const refineTask = `TASK: Refine the user's idea while preserving every entity and relationship they named. Add specificity, name failure paths, and tighten engineering clarity. The user has already done substantial thinking — your job is to sharpen, not rewrite.`;
 
-  const system = [
-    `You are a Mermaid diagram ideation copilot performing an active enhancement.`,
+  const expandTask = [
+    `TASK: The user has provided a *seed* — a short subject ("the mentibus blockchain", "an inventory app", "a fab orchestrator"). Their intent is for you to act as an expert systems architect and expand the seed into a 4–10 sentence specification that is rich enough to render as a meaningful Mermaid architecture diagram.`,
     '',
-    AXIOMS_INTERPRETATION,
-    AXIOMS_AAD,
-    AXIOMS_PRESERVATION,
+    `THINK LIKE THIS BEFORE WRITING:`,
+    `1. What domain does the named subject belong to (blockchain, web app, distributed system, ML pipeline, manufacturing, etc.)?`,
+    `2. What are the 4–8 canonical components that any minimum-viable system in that domain must have?`,
+    `3. What are the data flows between them — including failure paths and retries?`,
+    `4. What named technologies or protocols are conventional for this domain?`,
+    `5. What boundaries (external systems, untrusted clients, persistence) are implicit?`,
     '',
-    enhanceMode === 'selection' ? selectionTask : fullTask,
-    '',
-    `RULES:`,
-    `- Every entity the user named must appear in your output.`,
-    `- Every relationship the user described must be preserved.`,
-    `- Do not reverse flow directions.`,
-    `- Preserve named technologies (Redis, Kafka, PostgreSQL, etc.) verbatim.`,
-    `- Do not add entirely new systems unless strongly implied.`,
-    `- Output plain text only — no Mermaid syntax, no markdown fencing.`,
-    `- Return ONLY the enhanced text as a JSON object: {"enhanced_source":"<text>","intent_preserved":true,"expansion_summary":"<1 sentence>"}`,
-    `- Response must be valid JSON.`,
+    `THEN WRITE: a single coherent paragraph (or a short numbered list) that names actors, services, persistence, and key data flows. Keep the user's named subject as the anchor — every expanded element should clearly belong to "their" thing.`,
   ].join('\n');
 
-  return { system, outputFormat: 'json', temperature: 0.0 };
+  const distillTask = [
+    `TASK: The user has pasted a large document — a whitepaper, LaTeX source, long markdown spec, requirements dump, or technical brief. Their intent is for you to compress it into a single architect-grade "simple idea" prompt that:`,
+    `  • fully replaces the dump as the canonical seed for downstream diagram generation;`,
+    `  • preserves every distinct architectural concept, named entity, key relationship, named formula, and data-flow rule from the original;`,
+    `  • removes formatting ceremony (LaTeX commands, markdown headers, bibliography blocks, repeated boilerplate, citation cruft);`,
+    `  • reads as a coherent specification that any systems architect could use to design the actual system or its diagrams.`,
+    '',
+    `THINK LIKE THIS BEFORE WRITING:`,
+    `1. SKIM: identify the document type (whitepaper, RFC, ADR, spec, brief, code) and its top-level structure.`,
+    `2. EXTRACT: pull out the named subject, the actor/entity set, the relationship/predicate set, every named technology or protocol, every failure path, every formula or invariant, and every state-machine.`,
+    `3. PRUNE: drop LaTeX preamble, bibliography, layout commands, repeated definitions, marketing prose, hedging language.`,
+    `4. COMPOSE: write 6–14 sentences (or a tightly numbered list) that name every architectural concept you extracted, in dependency order — actors first, then services, then data stores, then flows, then failure paths, then invariants, then a one-line theorem if the source had one.`,
+    `5. VERIFY: every entity in your output must be traceable to the source. Do not invent new components.`,
+    '',
+    `THEN WRITE: a single block of dense, technical prose suitable for re-pasting into a diagram prompt bar. Treat formulas as inline expressions (e.g. "score = 0.30·U + 0.25·N + ..."). Treat enumerations from the source as compact comma-separated lists.`,
+  ].join('\n');
+
+  const isExpand = enhanceMode === 'expand';
+  const isDistill = enhanceMode === 'distill';
+  const isSelection = enhanceMode === 'selection';
+
+  const taskBlock = isSelection
+    ? selectionTask
+    : (isExpand ? expandTask : (isDistill ? distillTask : refineTask));
+
+  // Distill MUST preserve the user's concepts (extraction-style preservation),
+  // expand does not preserve (nothing to preserve), refine preserves verbatim.
+  const axiomBlock = isExpand
+    ? [AXIOMS_INTERPRETATION, AXIOMS_AAD].join('\n')
+    : [AXIOMS_INTERPRETATION, AXIOMS_AAD, AXIOMS_PRESERVATION].join('\n');
+
+  let rules;
+  if (isExpand) {
+    rules = [
+      `RULES (expand mode):`,
+      `- Keep the user's named subject as the central anchor — every component you add must clearly belong to it.`,
+      `- DO add canonical domain components (e.g. consensus layer, validator set, state DB, p2p gossip, RPC gateway, wallet client for blockchain).`,
+      `- DO name technologies conventional for the domain (PBFT, Merkle tree, JSON-RPC, gossip, Kafka, Redis, Postgres, gRPC, etc.) — only when they fit naturally.`,
+      `- DO describe at least one failure path (consensus fork, partition, retry, dead-letter, etc.).`,
+      `- Output 4–10 sentences of plain prose, OR a short numbered list. No Mermaid syntax. No code fences.`,
+      `- Return JSON: {"enhanced_source":"<text>","intent_preserved":true,"expansion_summary":"<1 sentence>"}`,
+      `- Response must be valid JSON.`,
+    ].join('\n');
+  } else if (isDistill) {
+    rules = [
+      `RULES (distill mode):`,
+      `- Every distinct architectural concept, named entity, named technology, key formula, and data-flow rule from the source MUST appear in your output. None silently dropped.`,
+      `- Do NOT preserve LaTeX commands, markdown headers, bibliography blocks, or formatting ceremony.`,
+      `- Inline mathematical content as plain expressions (e.g. "P(L|A,F) = g_θ(A,F)"). No \\\\, no $...$, no \\\\begin{...}.`,
+      `- Do NOT invent new components, new metrics, or new acronyms that did not appear in the source.`,
+      `- Output 6–14 sentences of dense technical prose, OR a tight numbered list. No Mermaid syntax. No code fences. No headings.`,
+      `- Return JSON: {"enhanced_source":"<text>","intent_preserved":true,"expansion_summary":"<1 sentence describing what you distilled>"}`,
+      `- Response must be valid JSON.`,
+    ].join('\n');
+  } else {
+    rules = [
+      `RULES (refine mode):`,
+      `- Every entity the user named must appear in your output.`,
+      `- Every relationship the user described must be preserved.`,
+      `- Do not reverse flow directions.`,
+      `- Preserve named technologies (Redis, Kafka, PostgreSQL, etc.) verbatim.`,
+      `- Do not add entirely new systems unless strongly implied.`,
+      `- Output plain text only — no Mermaid syntax, no markdown fencing.`,
+      `- Return JSON: {"enhanced_source":"<text>","intent_preserved":true,"expansion_summary":"<1 sentence>"}`,
+      `- Response must be valid JSON.`,
+    ].join('\n');
+  }
+
+  let header;
+  if (isExpand) {
+    header = `You are MERMATE, an expert systems architect. The user has typed a short seed idea into a prompt bar. They expect you to expand it into a real architect-grade specification — not a one-line rephrasing. This is an "idea bloom": a small word becomes a paragraph that any engineer could turn into a working system.`;
+  } else if (isDistill) {
+    header = `You are MERMATE, an expert systems architect functioning as a high-fidelity compression engine. The user has pasted a large technical document into a prompt bar. They expect you to compress it — losslessly across architectural concepts — into a single dense "simple idea" prompt that fully replaces the dump. The output must be small enough to feel like a prompt yet rich enough that no architectural detail is lost.`;
+  } else {
+    header = `You are a Mermaid diagram ideation copilot performing an active enhancement.`;
+  }
+
+  const system = [header, '', axiomBlock, '', taskBlock, '', rules].join('\n');
+
+  // Expand wants creative latitude; refine and distill stay deterministic.
+  const temperature = isExpand ? 0.5 : 0.0;
+  return { system, outputFormat: 'json', temperature };
 }
 
 /**

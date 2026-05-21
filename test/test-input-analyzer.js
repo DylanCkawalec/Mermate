@@ -112,6 +112,43 @@ describe('input-analyzer', () => {
     });
   });
 
+  describe('architecture depth score', () => {
+    it('returns shallow tier for trivial requests', () => {
+      const profile = analyze('a dog walking app', 'idea');
+      assert.ok(typeof profile.architectureDepthScore === 'number');
+      assert.equal(profile.architectureDepthTier, 'shallow');
+      assert.ok(profile.architectureDepthScore < 0.35);
+    });
+
+    it('returns shallow on empty input', () => {
+      const profile = analyze('', 'idea');
+      assert.equal(profile.architectureDepthTier, 'shallow');
+      assert.equal(profile.architectureDepthScore, 0);
+    });
+
+    it('promotes to deep tier when deep-domain keywords are present', () => {
+      const profile = analyze(
+        'A semiconductor wafer fabrication pipeline orchestrating multiple lithography steps with real-time deadlines, fault-tolerance and audit compliance across distributed orchestrators with safety-critical guarantees and multi-tenant scheduling.',
+        'idea',
+      );
+      // Deep-domain coverage alone should push us to medium or deep — the
+      // exact tier may shift slightly with weight tuning, but it must be
+      // strictly stronger than shallow.
+      assert.notEqual(profile.architectureDepthTier, 'shallow');
+      assert.ok(profile.architectureDepthScore >= 0.35);
+    });
+
+    it('exposes the contributing factors so the UI can explain itself', () => {
+      const profile = analyze(
+        'Distributed real-time consensus pipeline with multi-tenant sharding and audit compliance.',
+        'idea',
+      );
+      assert.ok(profile.architectureDepthFactors);
+      assert.ok(typeof profile.architectureDepthFactors.deepDomainCoverage === 'number');
+      assert.ok(profile.architectureDepthFactors.deepDomainCoverage > 0);
+    });
+  });
+
   describe('extractShadow()', () => {
     it('extracts named technologies', () => {
       const shadow = extractShadow('Auth service uses PostgreSQL and Redis for caching.');

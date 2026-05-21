@@ -10,6 +10,8 @@ window.MermaidCopilot = class MermaidCopilot {
     const rawBase = options.apiBase || options.enhancerUrl || '';
     this.apiBase = String(rawBase).replace(/\/+$/, '');
     this.onAccept = options.onAccept || (() => {});
+    this.onEnhanceStart = options.onEnhanceStart || (() => {});
+    this.onEnhanceComplete = options.onEnhanceComplete || (() => {});
     this.onProfileUpdate = options.onProfileUpdate || null;
 
     // Config
@@ -539,6 +541,28 @@ window.MermaidCopilot = class MermaidCopilot {
 
     this.isEnhancing = true;
     const inputAtStart = this.input.value;
+    const enhanceStartedAt = Date.now();
+    this._setEnhancingVisuals(true);
+
+    // Fire start callback (used for toast notifications, etc.)
+    try { this.onEnhanceStart({ inputChars: this.input.value.length, hasSelection }); } catch {}
+
+    // Iterative-context support: stash the previous accepted version so the
+    // server can use it as context on the next click. This is what powers
+    // "click expand → edit → click again to refine" without losing intent.
+    const previousText = this._lastEnhancedSource || '';
+
+    // Full input goes to the server (up to ~80K chars). The old slice(0,2000)
+    // silently truncated whitepapers and LaTeX pastes to their preamble,
+    // which is why large-input enhance felt broken. The distill flavor on
+    // the server is the consumer of this; refine/expand will ignore the
+    // excess characters since their token-budget is smaller.
+    const MAX_INPUT_CHARS = 80000;
+    const fullValue = this.input.value;
+    const inputChars = fullValue.length;
+    const sentToServer = fullValue.length > MAX_INPUT_CHARS
+      ? fullValue.slice(0, MAX_INPUT_CHARS)
+      : fullValue;
 
     let payload;
     let selectedText = '';
@@ -549,10 +573,11 @@ window.MermaidCopilot = class MermaidCopilot {
         content_state: 'text',
         mode: 'idea',
         enhance_mode: 'selection',
-        full_text: this.input.value.slice(0, 2000),
+        full_text: sentToServer,
         selected_text: selectedText,
         preceding_context: this.input.value.slice(Math.max(0, selStart - 500), selStart),
         following_context: this.input.value.slice(selEnd, selEnd + 200),
+        previous_text: previousText.slice(0, 1500),
       };
       this._showThinking('selection', selEnd);
     } else {
@@ -561,24 +586,34 @@ window.MermaidCopilot = class MermaidCopilot {
         content_state: 'text',
         mode: 'idea',
         enhance_mode: 'full',
-        full_text: this.input.value.slice(0, 2000),
+        full_text: sentToServer,
         selected_text: null,
         preceding_context: '',
         following_context: '',
+        previous_text: previousText.slice(0, 1500),
       };
       this._showThinking('full');
     }
 
-    if (!this._isHealthy()) {
-      await new Promise(resolve => setTimeout(resolve, 140));
-      this._applyLocalEnhance(hasSelection, selStart, selEnd, selectedText);
-      this._finishEnhance();
-      return;
-    }
+    // Visible status hint: lets the user see that a large paste is being
+    // processed (e.g. "Enhancing 24 KB → distill mode"). Without this, a
+    // 30s wait on a whitepaper feels like the button is broken.
+    this._showEnhanceStatus(inputChars);
 
+    // Always attempt the API call on user click. The network request is
+    // itself a faster, more accurate health probe than the cached
+    // _isHealthy() flag (which races with first-click cold-start). If the
+    // request fails, the catch block falls through to the local heuristic.
+    //
+    // Timeout scales with input size. A 100-char seed needs ≤12 s. A 100K-char
+    // whitepaper through the distill prompt needs the full 120 s window so
+    // the model can actually read and compress the document.
     this._enhanceAC = new AbortController();
-    const timeoutId = setTimeout(() => this._enhanceAC && this._enhanceAC.abort(), this.ENHANCE_TIMEOUT);
+    const scaledTimeoutMs = this._computeEnhanceTimeout(inputChars);
+    const timeoutId = setTimeout(() => this._enhanceAC && this._enhanceAC.abort(), scaledTimeoutMs);
 
+    let applied = false;
+    let lastError = null;
     try {
       const res = await fetch(`${this.apiBase}/enhance`, {
         method: 'POST',
@@ -588,49 +623,114 @@ window.MermaidCopilot = class MermaidCopilot {
       });
       clearTimeout(timeoutId);
 
+      // Successful API response also doubles as a positive health signal,
+      // so subsequent calls skip the local fallback bypass.
+      if (res.ok) {
+        this._enhancerHealthy = true;
+        this._lastHealthCheck = Date.now();
+      }
+
       if (!res.ok) {
-        this._applyLocalEnhance(hasSelection, selStart, selEnd, selectedText);
-        return;
-      }
-
-      const data = await res.json();
-      const enhanced = data.enhanced_source || data.suggestion || '';
-      if (!enhanced) {
-        this._applyLocalEnhance(hasSelection, selStart, selEnd, selectedText);
-        return;
-      }
-
-      // Avoid stale overwrites if input changed during async request.
-      if (!hasSelection && this.input.value !== inputAtStart) return;
-      if (hasSelection && this.input.value.slice(selStart, selEnd) !== selectedText) return;
-
-      if (hasSelection) {
-        const before = this.input.value.slice(0, selStart);
-        const after = this.input.value.slice(selEnd);
-        this.input.value = before + enhanced + after;
-        const newEnd = selStart + enhanced.length;
-        this.input.setSelectionRange(newEnd, newEnd);
+        // Try to extract the server's reason for the 503 so the no-op
+        // tooltip can be specific (e.g. "Enhancer offline" vs
+        // "Provider exhausted on distill flavor").
+        try {
+          const errJson = await res.json();
+          lastError = errJson?.details || errJson?.error || `HTTP ${res.status}`;
+        } catch {
+          lastError = `HTTP ${res.status}`;
+        }
+        applied = this._applyLocalEnhance(hasSelection, selStart, selEnd, selectedText);
       } else {
-        this.input.value = enhanced;
-        this.input.setSelectionRange(this.input.value.length, this.input.value.length);
-      }
+        const data = await res.json();
+        const enhanced = data.enhanced_source || data.suggestion || '';
 
-      this._emitInput();
-      this.onAccept();
-    } catch {
-      this._applyLocalEnhance(hasSelection, selStart, selEnd, selectedText);
+        // Avoid stale overwrites if input changed during async request.
+        const stillFresh = hasSelection
+          ? this.input.value.slice(selStart, selEnd) === selectedText
+          : this.input.value === inputAtStart;
+
+        if (!enhanced || !stillFresh) {
+          applied = this._applyLocalEnhance(hasSelection, selStart, selEnd, selectedText);
+        } else {
+          // Treat "API returned same text" as a no-op too — don't pretend
+          // we enhanced when the model echoed the input back.
+          const original = hasSelection ? selectedText : inputAtStart;
+          if (enhanced.trim() === original.trim()) {
+            applied = this._applyLocalEnhance(hasSelection, selStart, selEnd, selectedText);
+          } else {
+            // Typewriter animation: progressively reveal the enhanced text
+            // so the user perceives the prompt-bar "blooming" while the
+            // rainbow ring + textarea sheen run. This is the visible UX
+            // payoff that signals "the agent did work for me".
+            if (hasSelection) {
+              const before = this.input.value.slice(0, selStart);
+              const after = this.input.value.slice(selEnd);
+              await this._typewriterReplace(before + enhanced + after, selStart + enhanced.length);
+            } else {
+              await this._typewriterReplace(enhanced, enhanced.length);
+            }
+            this._lastEnhancedSource = enhanced;
+            this._emitInput();
+            this.onAccept();
+            applied = true;
+          }
+        }
+      }
+    } catch (err) {
+      // AbortError from our timeout is the dominant failure mode on big
+      // pastes; distinguish it so the no-op tooltip is actionable.
+      if (err && err.name === 'AbortError') {
+        lastError = `Timed out after ${Math.round(scaledTimeoutMs / 1000)}s — try Max mode or trim the input`;
+      } else {
+        lastError = (err && err.message) ? err.message : 'network error';
+      }
+      applied = this._applyLocalEnhance(hasSelection, selStart, selEnd, selectedText);
     } finally {
       clearTimeout(timeoutId);
+
+      // Guarantee the rainbow ring is visible long enough for the user to
+      // perceive it. 700ms is the lower bound that registers as a
+      // deliberate animation rather than a flash.
+      const MIN_ANIM_MS = 700;
+      const elapsed = Date.now() - enhanceStartedAt;
+      if (elapsed < MIN_ANIM_MS) {
+        await new Promise(resolve => setTimeout(resolve, MIN_ANIM_MS - elapsed));
+      }
+
+      // If neither the API nor the heuristic produced a change, the user
+      // would otherwise see nothing happen. Surface that explicitly via
+      // the button's title attribute so they know the enhancer ran but
+      // had nothing to add (instead of silently feeling broken).
+      if (!applied) {
+        this._signalEnhanceNoOp(lastError);
+      }
+
       this._finishEnhance();
+
+      // Fire completion callback (used for toast notifications, etc.)
+      try {
+        this.onEnhanceComplete({
+          applied,
+          error: lastError || null,
+          elapsedMs: Date.now() - enhanceStartedAt,
+          outputChars: this.input.value.length,
+        });
+      } catch {}
     }
   }
 
+  /**
+   * Heuristic local enhance fallback. Returns true only if it actually
+   * changed the input (so the caller can show a "no-op" hint otherwise).
+   */
   _applyLocalEnhance(hasSelection, selStart, selEnd, selectedText) {
     const current = this.input.value;
-    if (!current.trim()) return;
+    if (!current.trim()) return false;
 
     if (hasSelection) {
       const replacement = this._localEnhanceText(selectedText);
+      if (replacement.trim() === selectedText.trim()) return false;
       const before = current.slice(0, selStart);
       const after = current.slice(selEnd);
       this.input.value = before + replacement + after;
@@ -638,12 +738,79 @@ window.MermaidCopilot = class MermaidCopilot {
       this.input.setSelectionRange(caret, caret);
     } else {
       const replacement = this._localEnhanceText(current);
+      if (replacement.trim() === current.trim()) return false;
       this.input.value = replacement;
       this.input.setSelectionRange(this.input.value.length, this.input.value.length);
     }
 
     this._emitInput();
     this.onAccept();
+    return true;
+  }
+
+  /**
+   * Progressively replace the textarea content over ~900–1500ms so the
+   * rainbow ring is visibly doing work and the new architecture text
+   * "blooms" in front of the user. Uses requestAnimationFrame so the
+   * animation cooperates with browser paint cycles instead of fighting
+   * them. Resolves only after the full target string is on screen.
+   *
+   * The total duration is bounded so even long expansions feel snappy:
+   *   ≤ 80 chars  → ~600ms
+   *   ≤ 400 chars → ~1100ms
+   *   > 400 chars → ~1600ms (capped)
+   */
+  _typewriterReplace(targetText, finalCaretPos) {
+    return new Promise((resolve) => {
+      const len = targetText.length;
+      const totalMs = Math.min(1600, Math.max(600, 600 + len * 1.6));
+      const startedAt = performance.now();
+      const stepFrame = (now) => {
+        const elapsed = now - startedAt;
+        const t = Math.min(1, elapsed / totalMs);
+        // ease-out for a satisfying decelerating reveal
+        const eased = 1 - Math.pow(1 - t, 2.2);
+        const showLen = Math.max(1, Math.round(eased * len));
+        this.input.value = targetText.slice(0, showLen);
+        if (showLen < len) {
+          requestAnimationFrame(stepFrame);
+        } else {
+          this.input.value = targetText;
+          try { this.input.setSelectionRange(finalCaretPos, finalCaretPos); } catch {}
+          resolve();
+        }
+      };
+      requestAnimationFrame(stepFrame);
+    });
+  }
+
+  /**
+   * Surface "enhancer ran but produced no change" via the button's title
+   * + a transient .enhance-noop class on the wrapper. Auto-clears so the
+   * user can retry without a dangling indicator.
+   *
+   * @param {string} [reason] - Optional server-side or network reason
+   *   string used to make the tooltip actionable (e.g. "Timed out after
+   *   75s — try Max mode" instead of a generic "offline" message).
+   */
+  _signalEnhanceNoOp(reason) {
+    const btn = document.getElementById('btn-enhance');
+    if (btn) {
+      const originalTitle = btn.title;
+      const message = reason
+        ? `Enhance returned no change — ${reason}`
+        : 'Enhancer offline or had nothing to add — try a longer description';
+      btn.title = message;
+      btn.classList.add('enhance-noop');
+      // Also log to the console so a developer inspecting the page can
+      // see exactly why the click did not produce a result.
+      try { console.warn('[copilot] enhance no-op:', reason || 'unknown'); } catch {}
+      clearTimeout(this._noopTimer);
+      this._noopTimer = setTimeout(() => {
+        btn.classList.remove('enhance-noop');
+        btn.title = originalTitle || 'Refine your idea (Cmd+Enter)';
+      }, 3600);
+    }
   }
 
   _localEnhanceText(text) {
@@ -690,7 +857,75 @@ window.MermaidCopilot = class MermaidCopilot {
     this.isEnhancing = false;
     this._enhanceAC = null;
     this._hideThinking();
+    this._hideEnhanceStatus();
+    this._setEnhancingVisuals(false);
     this._enterCooldown();
+  }
+
+  /**
+   * Scale the abort timeout by input size. Sparse seeds stay snappy; a
+   * 100K-char paste gets the full 120 s window because the model needs to
+   * actually read and compress it.
+   *
+   * Tiers (chars → timeout):
+   *   ≤ 2 000   → 12 s   (seed / refine)
+   *   ≤ 10 000  → 30 s   (small distill)
+   *   ≤ 40 000  → 75 s   (medium distill)
+   *   > 40 000  → 120 s  (large distill, full INFER_TIMEOUT_MS budget)
+   */
+  _computeEnhanceTimeout(chars) {
+    if (chars <= 2000)  return 12000;
+    if (chars <= 10000) return 30000;
+    if (chars <= 40000) return 75000;
+    return 120000;
+  }
+
+  /**
+   * Render a small "Enhancing 24 KB → distill mode" pill above the button
+   * so the user has visible confirmation that work is happening on large
+   * pastes. Without it a 60s wait feels like a broken button.
+   */
+  _showEnhanceStatus(chars) {
+    const wrap = this.wrapEl;
+    if (!wrap) return;
+
+    const kb = chars >= 1024 ? (chars / 1024).toFixed(1) + ' KB' : chars + ' chars';
+    // Predict the flavor the server will choose so the pill matches reality.
+    let predictedFlavor = 'refine';
+    if (chars < 240) predictedFlavor = 'expand';
+    else if (chars >= 2000) predictedFlavor = 'distill';
+
+    let pill = wrap.querySelector('.copilot-enhance-status');
+    if (!pill) {
+      pill = document.createElement('div');
+      pill.className = 'copilot-enhance-status';
+      wrap.appendChild(pill);
+    }
+    pill.textContent = `Enhancing ${kb} → ${predictedFlavor} mode`;
+    pill.hidden = false;
+  }
+
+  _hideEnhanceStatus() {
+    const wrap = this.wrapEl;
+    if (!wrap) return;
+    const pill = wrap.querySelector('.copilot-enhance-status');
+    if (pill) pill.hidden = true;
+  }
+
+  /**
+   * Toggle the rainbow-ring + textarea-sheen visual state.
+   * Idempotent: safe to call multiple times during the enhance lifecycle.
+   */
+  _setEnhancingVisuals(active) {
+    const btn = document.getElementById('btn-enhance');
+    const wrap = this.wrapEl;
+    if (active) {
+      btn?.classList.add('is-enhancing');
+      wrap?.classList.add('is-enhancing');
+    } else {
+      btn?.classList.remove('is-enhancing');
+      wrap?.classList.remove('is-enhancing');
+    }
   }
 
   // ---- Thinking indicator ---------------------------------------------------

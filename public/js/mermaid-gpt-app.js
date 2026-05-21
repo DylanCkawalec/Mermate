@@ -150,6 +150,8 @@
   // =========================================================================
 
   const input = document.getElementById('mermaid-input');
+  const copilotWrap = input?.closest('.copilot-wrap') || null;
+  const pipelineProgress = document.getElementById('pipeline-progress');
   const btnRender = document.getElementById('btn-render');
   const renderIcon = document.getElementById('render-icon');
   const btnNewDiagram = document.getElementById('btn-new-diagram');
@@ -167,6 +169,9 @@
   const artifactResults = document.getElementById('artifact-results');
   const tlaResultsEl = document.getElementById('tla-results');
   const tsResultsEl = document.getElementById('ts-results');
+  const tlaEmptyEl = document.getElementById('tla-empty');
+  const tsEmptyEl = document.getElementById('ts-empty');
+  const toastContainer = document.getElementById('toast-container');
   const errorBanner = document.getElementById('error-banner');
   const errorMessage = document.getElementById('error-message');
   const typeBadge = document.getElementById('diagram-type-badge');
@@ -227,6 +232,7 @@
   const agentPanelLog = document.getElementById('agent-panel-log');
   const agentPanelMode = document.getElementById('agent-panel-mode');
   const btnAgentStop = document.getElementById('btn-agent-stop');
+  const stageTrackerEl = document.getElementById('stage-tracker');
   let agentModeActive = false;
   let selectedAgentMode = null;
   let agent = null;
@@ -237,6 +243,8 @@
   let currentDiagramName = '';
   let currentPaths = null;
   let currentRunId = null;
+  let _agentHandoffToken = 0;
+  let _agentGazeTimer = null;
 
   function _persistSession() {
     try {
@@ -273,8 +281,16 @@
       { id: 'code-review',  icon: '\u{1F50D}', name: 'Code Review', desc: 'Recover architecture from a codebase' },
       { id: 'optimize-mmd', icon: '\u26A1',     name: 'Optimize',    desc: 'Improve existing Mermaid or markdown' },
     ],
-    md:  null,
-    mmd: null,
+    md: [
+      { id: 'thinking',     icon: '\u{1F4A1}', name: 'Continue Spec', desc: 'Continue from this Markdown artifact and rebuild preview' },
+      { id: 'optimize-mmd', icon: '\u26A1',     name: 'Optimize Spec', desc: 'Tighten Markdown structure and regenerate Mermaid' },
+      { id: 'full-build',   icon: '\u{1F3D7}', name: 'Full Build',     desc: 'Markdown \u2192 Diagram \u2192 TLA+ \u2192 TypeScript \u2192 Bundle' },
+    ],
+    mmd: [
+      { id: 'optimize-mmd', icon: '\u26A1',     name: 'Optimize Mermaid', desc: 'Repair, simplify, and compile this Mermaid source' },
+      { id: 'thinking',     icon: '\u{1F4A1}', name: 'Explain / Rework',   desc: 'Reinterpret this diagram and regenerate architecture' },
+      { id: 'full-build',   icon: '\u{1F3D7}', name: 'Full Build',         desc: 'Mermaid \u2192 TLA+ \u2192 TypeScript \u2192 Bundle' },
+    ],
     tla: [
       { id: 'tla-verify',   icon: '\u2713',     name: 'Verify Spec',   desc: 'Validate and repair TLA+ specification' },
       { id: 'tla-optimize', icon: '\u26A1',     name: 'Optimize TLA+', desc: 'Strengthen invariants and state coverage' },
@@ -289,11 +305,22 @@
     return AGENT_MODES_BY_STAGE[stage] || AGENT_MODES_BY_STAGE.idea;
   }
 
+  function _defaultAgentModeForStage(stage) {
+    if (stage === 'mmd') return 'optimize-mmd';
+    if (stage === 'tla') return 'tla-verify';
+    if (stage === 'ts') return 'ts-generate';
+    return 'thinking';
+  }
+
   function _rebuildAgentDropdown() {
     const dropdown = document.getElementById('agent-dropdown');
     if (!dropdown) return;
 
     const modes = _getAgentModesForStage(currentMode);
+    const validIds = modes.map(m => m.id);
+    if (selectedAgentMode && !validIds.includes(selectedAgentMode)) {
+      selectedAgentMode = _defaultAgentModeForStage(currentMode);
+    }
     dropdown.innerHTML = '';
 
     for (const mode of modes) {
@@ -314,13 +341,6 @@
       });
 
       dropdown.appendChild(btn);
-    }
-
-    if (selectedAgentMode) {
-      const validIds = modes.map(m => m.id);
-      if (!validIds.includes(selectedAgentMode)) {
-        setAgentMode(null);
-      }
     }
   }
 
@@ -391,9 +411,14 @@
   };
 
   const AGENT_MODE_LABELS = {
+    'full-build': 'Full Build',
     thinking: 'Thinking',
     'code-review': 'Code Review',
     'optimize-mmd': 'Optimize',
+    'tla-verify': 'Verify Spec',
+    'tla-optimize': 'Optimize TLA+',
+    'ts-generate': 'Generate Runtime',
+    'ts-optimize': 'Optimize TS',
   };
 
   function getAgentModeLabel(modeId) {
@@ -458,6 +483,8 @@
       artifactResults.hidden = !showArtifacts;
       if (tlaResultsEl) tlaResultsEl.hidden = mode !== 'tla';
       if (tsResultsEl) tsResultsEl.hidden = mode !== 'ts';
+      if (tlaEmptyEl) tlaEmptyEl.hidden = mode !== 'tla' || (orchestrator.getArtifact('tla') || '').trim() !== '';
+      if (tsEmptyEl) tsEmptyEl.hidden = mode !== 'ts' || (orchestrator.getArtifact('ts') || '').trim() !== '';
     }
 
     if (isDiagramMode && currentPaths) {
@@ -480,11 +507,198 @@
   document.querySelectorAll('.pipeline-segment').forEach(seg => {
     seg.addEventListener('click', () => {
       const stage = seg.dataset.stage;
-      if (orchestrator.isUnlocked(stage)) setMode(stage);
+      if (orchestrator.isUnlocked(stage)) {
+        _agentHandoffToken++;
+        setMode(stage);
+      }
     });
   });
 
   orchestrator.subscribe(renderUI);
+
+  // =========================================================================
+  //  Agentic focus choreography — artifact handoff + gaze chip
+  // =========================================================================
+
+  const _agentSleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+  function _stageLabel(stage) {
+    return ({ idea: 'Simple Idea', md: 'Markdown Spec', mmd: 'Mermaid', tla: 'TLA+', ts: 'TypeScript', rust: 'Rust' })[stage] || stage;
+  }
+
+  function _agentTargetForPhase(phase) {
+    if (phase === 'ingest' || phase === 'planning' || phase === 'refining') return 'idea';
+    if (phase === 'preview') return 'mmd';
+    if (phase === 'tla_build') return 'tla';
+    if (phase === 'ts_build') return 'ts';
+    return currentMode || 'idea';
+  }
+
+  function _animateTabHandoff(fromStage, toStage) {
+    if (!pipelineProgress || !fromStage || !toStage || fromStage === toStage) return Promise.resolve();
+    const fromEl = pipelineProgress.querySelector(`.pipeline-segment[data-stage="${fromStage}"]`);
+    const toEl = pipelineProgress.querySelector(`.pipeline-segment[data-stage="${toStage}"]`);
+    if (!fromEl || !toEl) return Promise.resolve();
+
+    pipelineProgress.classList.add('is-handoff-active');
+    fromEl.classList.add('is-handoff-source');
+    toEl.classList.add('is-handoff-target');
+
+    return _agentSleep(950).finally(() => {
+      pipelineProgress.classList.remove('is-handoff-active');
+      fromEl.classList.remove('is-handoff-source');
+      toEl.classList.remove('is-handoff-target');
+    });
+  }
+
+  function _ensureAgentGazeChip() {
+    if (!copilotWrap) return null;
+    let chip = copilotWrap.querySelector('.agent-gaze-chip');
+    if (!chip) {
+      chip = document.createElement('div');
+      chip.className = 'agent-gaze-chip';
+      chip.innerHTML = [
+        '<span class="gaze-pulse"></span>',
+        '<span class="gaze-role"></span>',
+        '<span class="gaze-target"></span>',
+        '<span class="gaze-summary"></span>',
+      ].join('');
+      copilotWrap.appendChild(chip);
+    }
+    return chip;
+  }
+
+  function _showAgentGaze({ role = 'MERMATE', domain = '', stage = '', summary = '', target = null } = {}) {
+    const chip = _ensureAgentGazeChip();
+    if (!chip) return;
+
+    const focusStage = target || _agentTargetForPhase(stage);
+    const shortRole = String(role || 'MERMATE').replace(/^Doctor_/, 'Dr. ').replace(/_/g, ' ');
+    const shortDomain = domain && domain !== 'general' ? ` · ${String(domain).replace(/_/g, ' ')}` : '';
+
+    chip.querySelector('.gaze-role').textContent = shortRole + shortDomain;
+    chip.querySelector('.gaze-target').textContent = `reviewing ${_stageLabel(focusStage)}`;
+    chip.querySelector('.gaze-summary').textContent = summary ? String(summary).slice(0, 96) : 'tracking architecture state';
+    chip.dataset.target = focusStage;
+    chip.hidden = false;
+    chip.classList.remove('pulse-once');
+    void chip.offsetWidth;
+    chip.classList.add('pulse-once');
+
+    if (copilotWrap) copilotWrap.dataset.agentFocus = focusStage;
+    clearTimeout(_agentGazeTimer);
+    _agentGazeTimer = setTimeout(() => {
+      chip.classList.remove('pulse-once');
+    }, 1200);
+  }
+
+  function _hideAgentGaze() {
+    const chip = copilotWrap?.querySelector('.agent-gaze-chip');
+    if (chip) chip.hidden = true;
+    if (copilotWrap) delete copilotWrap.dataset.agentFocus;
+  }
+
+  function _applyAgentArtifacts(event) {
+    const mdSource = event?.md_source || event?.draft_text || '';
+    const mmdSource = event?.mmd_source || event?.compiled_source || '';
+    const tlaSource = event?.tla_source || '';
+    const tsSource = event?.ts_source || '';
+
+    if (event?.diagram_name) currentDiagramName = event.diagram_name;
+    if (event?.run_id) currentRunId = event.run_id;
+    if (event?.paths) currentPaths = event.paths;
+
+    if (mdSource.trim()) {
+      const prev = orchestrator.getArtifact('md') || '';
+      orchestrator.setArtifact('md', mdSource);
+      orchestrator.updateFromBackend({
+        stage: 'md',
+        unlockedStages: ['idea', 'md', 'mmd'],
+        confidence: 0.86,
+        guidance: 'Markdown spec generated from agent planning/refinement.',
+      });
+      if (prev.trim() !== mdSource.trim()) {
+        showToast(`Markdown tab populated (${mdSource.length.toLocaleString()} chars)`, 'success', 3000);
+      }
+    }
+
+    if (mmdSource.trim()) {
+      const prev = orchestrator.getArtifact('mmd') || '';
+      orchestrator.setArtifact('mmd', mmdSource);
+      orchestrator.updateFromBackend({
+        stage: 'mmd',
+        unlockedStages: ['idea', 'md', 'mmd', 'tla', 'ts'],
+        confidence: 0.94,
+        guidance: 'Mermaid source compiled from the Markdown/architecture plan.',
+      });
+      if (prev.trim() !== mmdSource.trim()) {
+        showToast(`Mermaid tab populated (${mmdSource.length.toLocaleString()} chars)`, 'success', 3000);
+      }
+    }
+
+    if (tlaSource.trim()) {
+      const prev = orchestrator.getArtifact('tla') || '';
+      orchestrator.setArtifact('tla', tlaSource);
+      orchestrator.updateFromBackend({
+        stage: 'tla',
+        unlockedStages: ['idea', 'md', 'mmd', 'tla', 'ts'],
+        confidence: event?.sany_valid ? 0.9 : 0.45,
+        guidance: 'TLA+ specification generated from the current diagram run.',
+      });
+      if (prev.trim() !== tlaSource.trim()) {
+        showToast(`TLA+ tab populated (${tlaSource.length.toLocaleString()} chars)`, 'success', 3000);
+      }
+    }
+
+    if (tsSource.trim()) {
+      const prev = orchestrator.getArtifact('ts') || '';
+      orchestrator.setArtifact('ts', tsSource);
+      orchestrator.updateFromBackend({
+        stage: 'ts',
+        unlockedStages: ['idea', 'md', 'mmd', 'tla', 'ts'],
+        confidence: event?.compile_ok || event?.ts_compiled ? 0.9 : 0.45,
+        guidance: 'TypeScript runtime generated from the verified TLA+ artifact.',
+      });
+      if (prev.trim() !== tsSource.trim()) {
+        showToast(`TypeScript tab populated (${tsSource.length.toLocaleString()} chars)`, 'success', 3000);
+      }
+    }
+
+    _persistSession();
+  }
+
+  async function _agenticallyReviewArtifacts(event) {
+    const token = ++_agentHandoffToken;
+    const stages = [];
+    if ((event?.md_source || event?.draft_text || '').trim()) stages.push('md');
+    if ((event?.mmd_source || event?.compiled_source || '').trim()) stages.push('mmd');
+    if ((event?.tla_source || '').trim()) stages.push('tla');
+    if ((event?.ts_source || '').trim()) stages.push('ts');
+    if (stages.length === 0) return;
+
+    await _agentSleep(450);
+    for (const stage of stages) {
+      if (token !== _agentHandoffToken || !orchestrator.isUnlocked(stage)) return;
+      _showAgentGaze({
+        role: 'MERMATE',
+        stage,
+        target: stage,
+        summary: `Populating ${_stageLabel(stage)} artifact from the live agent run`,
+      });
+      await _animateTabHandoff(currentMode, stage);
+      if (token !== _agentHandoffToken) return;
+      if (currentMode === stage) {
+        input.value = orchestrator.getArtifact(stage);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        syncUiGuidance();
+      } else {
+        setMode(stage);
+      }
+      copilotWrap?.classList.add('is-agent-reviewing');
+      await _agentSleep(stage === 'md' ? 1800 : 1300);
+      copilotWrap?.classList.remove('is-agent-reviewing');
+    }
+  }
 
   // =========================================================================
   //  Mode Selector (save/restore per-tab content)
@@ -505,6 +719,14 @@
     const _btnEnh = document.getElementById('btn-enhance');
     if (_btnEnh) _btnEnh.classList.toggle('active', chkEnhance.checked);
 
+    // Always allow editing/pasting in the active tab unless the agent is
+    // actively running. The TLA+/TS auto-generation branch below may
+    // re-enable readOnly when an empty stage is auto-filling itself, but
+    // by default users must be able to paste their own content.
+    if (agentState !== 'running' && agentState !== 'finalizing') {
+      input.readOnly = false;
+    }
+
     if (cfg.showUpload) {
       btnUpload.classList.add('visible');
       if (fileUpload) fileUpload.setAttribute('accept', cfg.accept || '');
@@ -518,6 +740,18 @@
         copilot = new window.MermaidCopilot(input, {
           apiBase: COPILOT_API_BASE,
           onAccept: updateBadges,
+          onEnhanceStart: ({ inputChars }) => {
+            showToast(`Enhancement started — processing file in tab view (${inputChars.toLocaleString()} chars)`, 'info', 3000);
+          },
+          onEnhanceComplete: ({ applied, error, elapsedMs, outputChars }) => {
+            if (applied) {
+              showToast(`Enhancement completed — data updated (${outputChars.toLocaleString()} chars, ${(elapsedMs / 1000).toFixed(1)}s)`, 'success', 4000);
+            } else if (error) {
+              showToast(`Enhancement failed — ${error}`, 'error', 6000);
+            } else {
+              showToast('Enhancement completed — no changes applied', 'info', 3000);
+            }
+          },
           onProfileUpdate: _onProfileUpdate,
         });
       } else if (copilot) {
@@ -535,7 +769,10 @@
         input.value = mode === 'tla'
           ? `Generating TLA+ specification from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)}\nPress Render or wait for auto-start.`
           : `Generating TypeScript runtime from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)}\nPress Render or wait for auto-start.`;
-        input.readOnly = true;
+        // Only mark readOnly while the auto-generate fetch is in flight.
+        // The render() call below clears readOnly when complete (see lines
+        // ~1842, ~1934). If the user manually pastes/edits before render
+        // fires, they should be allowed to — so we keep readOnly off here.
         setTimeout(() => {
           if (currentMode === mode && !isLoading) render();
         }, 600);
@@ -544,7 +781,10 @@
   }
 
   document.querySelectorAll('.mode-btn').forEach(btn => {
-    btn.addEventListener('click', () => setMode(btn.dataset.mode));
+    btn.addEventListener('click', () => {
+      _agentHandoffToken++;
+      setMode(btn.dataset.mode);
+    });
   });
 
   // =========================================================================
@@ -581,9 +821,9 @@
       tone = 'busy';
     } else if (agentModeActive && selectedAgentMode) {
       hint = hasInput
-        ? `Agent: ${getAgentModeLabel(selectedAgentMode)} mode. Run the agent when the prompt is ready.`
+        ? `Agent: ${getAgentModeLabel(selectedAgentMode)} mode. ${agent ? 'Continue from the current artifact.' : 'Run the agent when the prompt is ready.'}`
         : `Agent: ${getAgentModeLabel(selectedAgentMode)} mode. Enter the architecture prompt to begin.`;
-      nextAction = hasInput ? 'Next: run agent' : (hasName ? 'Next: describe the architecture' : 'Next: enter prompt');
+      nextAction = hasInput ? (agent ? `Next: continue from ${_stageLabel(currentMode)}` : 'Next: run agent') : (hasName ? 'Next: describe the architecture' : 'Next: enter prompt');
       tone = 'ready';
     } else if (currentMode === 'tla') {
       const hasRun = !!(currentRunId && currentDiagramName);
@@ -688,26 +928,189 @@
     errorBanner.hidden = true;
   }
 
-  function _showFallbackBanner(events) {
-    const count = events.length;
-    const existing = document.getElementById('fallback-banner');
-    if (existing) existing.remove();
+  function showToast(message, type = 'info', duration = 4000) {
+    if (!toastContainer) return;
+    const toast = document.createElement('div');
+    toast.className = `toast is-${type}`;
+    toast.innerHTML = `
+      <span>${message}</span>
+      <button class="toast-close" aria-label="Dismiss">&times;</button>
+    `;
+    const closeBtn = toast.querySelector('.toast-close');
+    closeBtn.addEventListener('click', () => dismissToast(toast));
+    toastContainer.appendChild(toast);
+    if (duration > 0) {
+      setTimeout(() => dismissToast(toast), duration);
+    }
+  }
 
-    const bar = document.createElement('div');
-    bar.id = 'fallback-banner';
-    bar.style.cssText = 'position:fixed;bottom:12px;left:50%;transform:translateX(-50%);z-index:10000;' +
-      'background:linear-gradient(135deg,#1a1a2e,#16213e);color:#e0a040;padding:6px 14px;border-radius:6px;' +
-      'font-size:11px;font-family:monospace;display:flex;align-items:center;gap:8px;border:1px solid #e0a04040;' +
-      'box-shadow:0 2px 12px #00000060;opacity:0;transition:opacity .3s ease';
-    bar.innerHTML = `<span style="font-size:13px">⚡</span> <span>${count} call${count > 1 ? 's' : ''} used direct provider fallback (Opseeq gateway unavailable)</span>` +
-      `<button style="background:none;border:none;color:#e0a040;cursor:pointer;font-size:14px;padding:0 4px" onclick="this.parentElement.remove()">×</button>`;
+  function dismissToast(toast) {
+    if (!toast || toast.classList.contains('is-exiting')) return;
+    toast.classList.add('is-exiting');
+    toast.addEventListener('animationend', () => {
+      toast.remove();
+    });
+  }
 
-    document.body.appendChild(bar);
-    requestAnimationFrame(() => { bar.style.opacity = '1'; });
-    setTimeout(() => { if (bar.parentElement) { bar.style.opacity = '0'; setTimeout(() => bar.remove(), 300); } }, 8000);
+  // ---- Stage progress tracker ---------------------------------------------
+  // Drives the visible pipeline progression in the agent panel header.
+  // Status values: 'active' (currently processing), 'complete' (passed),
+  // 'error' (failed), or null (reset).
+  function _updateStageTracker(stage, status) {
+    if (!stageTrackerEl) return;
+    stageTrackerEl.hidden = false;
+    const steps = stageTrackerEl.querySelectorAll('.stage-tracker-step');
+    const stageOrder = ['idea', 'md', 'mmd', 'tla', 'ts'];
+    const targetIdx = stageOrder.indexOf(stage);
+    if (targetIdx === -1) return;
+
+    steps.forEach((el) => {
+      const s = el.dataset.stage;
+      const idx = stageOrder.indexOf(s);
+      el.classList.remove('is-active', 'is-complete', 'is-error');
+      if (s === stage) {
+        if (status === 'complete') el.classList.add('is-complete');
+        else if (status === 'error') el.classList.add('is-error');
+        else el.classList.add('is-active');
+      } else if (idx < targetIdx) {
+        // Previous stages — mark as complete unless explicitly reset
+        el.classList.add('is-complete');
+      }
+    });
+  }
+
+  function _resetStageTracker() {
+    if (!stageTrackerEl) return;
+    stageTrackerEl.querySelectorAll('.stage-tracker-step').forEach((el) => {
+      el.classList.remove('is-active', 'is-complete', 'is-error');
+    });
+  }
+
+  document.querySelectorAll('.mode-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _agentHandoffToken++;
+      setMode(btn.dataset.mode);
+    });
+  });
+
+  // =========================================================================
+  //  UI Guidance
+  // =========================================================================
+
+  function syncUiGuidance() {
+    const source = input.value || '';
+    const hasInput = source.trim().length > 0;
+    const hasName = !!diagramNameInput?.value?.trim();
+    const hasResult = !!currentPaths;
+    const activeMode = MODES[currentMode] || MODES.idea;
+    let hint = activeMode.hint;
+    let nextAction = '';
+    let tone = 'ready';
+
+    if (isLoading) {
+      hint = loadingText.textContent || 'Compiling...';
+      nextAction = 'Next: wait for the current render';
+      tone = 'busy';
+    } else if (agentState === 'running') {
+      hint = `${getAgentModeLabel(selectedAgentMode)} agent is building a preview from your prompt.`;
+      nextAction = 'Next: wait for the preview';
+      tone = 'busy';
+    } else if (agentState === 'awaiting_notes') {
+      hint = notesDirty
+        ? 'Preview ready. Your notes will steer the final Max pass.'
+        : 'Preview ready. Add notes for the final pass or keep the current draft.';
+      nextAction = notesDirty ? 'Next: enhance with notes' : 'Next: render as is or add notes';
+      tone = 'ready';
+    } else if (agentState === 'finalizing') {
+      hint = 'Applying the final pass and compiling the diagram.';
+      nextAction = 'Next: wait for the final result';
+      tone = 'busy';
+    } else if (agentModeActive && selectedAgentMode) {
+      hint = hasInput
+        ? `Agent: ${getAgentModeLabel(selectedAgentMode)} mode. ${agent ? 'Continue from the current artifact.' : 'Run the agent when the prompt is ready.'}`
+        : `Agent: ${getAgentModeLabel(selectedAgentMode)} mode. Enter the architecture prompt to begin.`;
+      nextAction = hasInput ? (agent ? `Next: continue from ${_stageLabel(currentMode)}` : 'Next: run agent') : (hasName ? 'Next: describe the architecture' : 'Next: enter prompt');
+      tone = 'ready';
+    } else if (currentMode === 'tla') {
+      const hasRun = !!(currentRunId && currentDiagramName);
+      if (hasInput && hasInput !== input.value.startsWith('Generating')) {
+        hint = activeMode.hint;
+        nextAction = 'Next: render to verify TLA+';
+      } else if (hasRun) {
+        hint = `Ready to generate TLA+ for "${currentDiagramName}" — auto-starting...`;
+        nextAction = 'Next: generating TLA+ specification via Specula';
+        tone = 'busy';
+      } else {
+        hint = 'Render a diagram first — the TLA+ pipeline will auto-start when ready.';
+        nextAction = 'Next: go back to Simple Idea and render a diagram';
+      }
+      tone = tone || 'ready';
+    } else if (currentMode === 'ts') {
+      const hasRun = !!(currentRunId && currentDiagramName);
+      if (hasInput && !input.value.startsWith('Generating')) {
+        hint = activeMode.hint;
+        nextAction = 'Next: render to compile TypeScript';
+      } else if (hasRun) {
+        hint = `Ready to generate TypeScript for "${currentDiagramName}" — auto-starting...`;
+        nextAction = 'Next: compiling TypeScript runtime';
+        tone = 'busy';
+      } else {
+        hint = 'Complete the TLA+ stage first — TypeScript generation will auto-start.';
+        nextAction = 'Next: go to TLA+ tab first';
+      }
+      tone = tone || 'ready';
+    } else if (!hasInput) {
+      const enhanceLabel = chkEnhance.checked ? 'Enhance ON — AI will refine before rendering' : 'Enhance OFF — click Enhance to enable AI refinement';
+      if (currentMode === 'idea') {
+        hint = hasName ? 'Describe the system, actors, and flow direction.' : activeMode.hint;
+        nextAction = hasName ? 'Next: describe the architecture' : 'Next: enter an idea';
+      } else if (currentMode === 'md') {
+        nextAction = 'Next: paste or upload a markdown spec';
+      } else {
+        nextAction = 'Next: paste Mermaid source or upload .mmd';
+      }
+      if (currentMode === 'idea' || currentMode === 'md') hint += ' · ' + enhanceLabel;
+    } else if (hasResult) {
+      hint = currentMode === 'idea'
+        ? 'Diagram rendered. Refine the prompt, rerender, or inspect the result.'
+        : 'Compiled output is ready. Refine the source or download the bundle.';
+      nextAction = currentMode === 'idea'
+        ? 'Next: refine prompt or rerender'
+        : 'Next: update source or download';
+      tone = 'result';
+    } else {
+      if (currentMode === 'idea' && profileHint) {
+        hint = profileHint;
+      }
+      nextAction = (currentMode === 'idea' && chkEnhance.checked)
+        ? 'Next: \u2318+Enter to enhance, or Render to compile'
+        : (currentMode === 'idea' ? 'Next: render or press \u2318/Ctrl+Enter to enhance' : 'Next: render the current source');
+    }
+
+    inputHint.textContent = hint;
+
+    if (nextActionChip) {
+      nextActionChip.textContent = nextAction;
+      nextActionChip.dataset.tone = tone;
+      nextActionChip.classList.toggle('is-visible', !!nextAction);
+    }
+
+    if (btnAgentCommit) {
+      btnAgentCommit.textContent = notesDirty ? 'Enhance with notes' : 'Render as is';
+      btnAgentCommit.disabled = agentState !== 'awaiting_notes';
+    }
   }
 
   function setLoading(on, contentState) {
+    // Don't show loading overlay during agent operations - agent panel shows progress
+    if (on && (agentState === 'running' || agentState === 'finalizing' || agentState === 'awaiting_notes')) {
+      isLoading = on;
+      btnRender.disabled = on;
+      input.readOnly = on;
+      syncUiGuidance();
+      return;
+    }
+
     isLoading = on;
     btnRender.disabled = on;
     input.readOnly = on;
@@ -733,12 +1136,39 @@
     syncUiGuidance();
   }
 
-  function showResult(paths, name, runId, metrics) {
+  /**
+   * Update the depth badge in the result-controls bar.
+   * `meta` is `{ score, tier }` (typically from render_meta or top-level
+   * depth_score / depth_tier on the render response). Hidden when missing.
+   */
+  function _renderDepthBadge(meta) {
+    const el = document.getElementById('depth-badge');
+    if (!el) return;
+    if (!meta || (meta.tier == null && meta.score == null)) {
+      el.hidden = true;
+      el.removeAttribute('data-tier');
+      return;
+    }
+    const tier = meta.tier || 'shallow';
+    const score = typeof meta.score === 'number' ? meta.score.toFixed(2) : '—';
+    el.dataset.tier = tier;
+    const text = el.querySelector('.depth-badge-text');
+    if (text) text.textContent = `Depth · ${tier} · ${score}`;
+    el.title = `Architecture depth tier: ${tier} (score ${score})`;
+    el.hidden = false;
+  }
+
+  function showResult(paths, name, runId, metrics, depthMeta) {
     currentPaths = paths;
     currentDiagramName = name || 'diagram';
     currentRunId = runId || null;
     const ts = Date.now();
     resultSection.hidden = false;
+
+    // Architecture depth badge — shows the tier (shallow / medium / deep) and
+    // raw score. Depth comes from the render response; we tolerate older
+    // responses that don't include it by simply leaving the chip empty.
+    _renderDepthBadge(depthMeta);
 
     if (INPUT_STAGES.has(currentMode)) {
       flipCard.showFront();
@@ -1289,7 +1719,12 @@
       const shouldAnimate = data.enhanced && data.compiled_source && data.content_state !== 'mmd';
       if (shouldAnimate) { setLoading(false); await animateRenderTransition(source, data.compiled_source); }
 
-      showResult(data.paths, data.diagram_name, data.run_id, data.metrics);
+      const depthMeta = (data.depth_score != null || data.depth_tier != null)
+        ? { score: data.depth_score, tier: data.depth_tier }
+        : (data.render_meta && (data.render_meta.depth_score != null || data.render_meta.depth_tier != null))
+          ? { score: data.render_meta.depth_score, tier: data.render_meta.depth_tier }
+          : null;
+      showResult(data.paths, data.diagram_name, data.run_id, data.metrics, depthMeta);
 
       // Surface direct-provider fallback events
       if (data.fallback_events && data.fallback_events.length > 0) {
@@ -1626,12 +2061,40 @@
   btnResetZoom.addEventListener('click', () => { if (pzFront) pzFront.fitToViewport(); if (pzBack) pzBack.fitToViewport(); });
   btnDismissError.addEventListener('click', hideError);
 
-  // ---- Enhance toggle (mirrors hidden chk-enhance checkbox) ----
+  // Keyboard focus management
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !errorBanner.hidden) {
+      hideError();
+      input.focus();
+    }
+  });
+
+  // ---- Enhance button ------------------------------------------------------
+  // Behavior depends on the active input mode:
+  //   • idea  → ALWAYS immediate action. Click fires copilot.enhance() right
+  //             away (rainbow ring + textarea sheen visualize the work).
+  //             Insufficient text shows a brief tooltip and aborts.
+  //   • md/mmd → Toggle render-time refinement. The button stays `active` to
+  //             tell the user "next Render will refine the source".
   const _btnEnhanceClick = document.getElementById('btn-enhance');
   if (_btnEnhanceClick) {
     _btnEnhanceClick.addEventListener('click', () => {
+      if (currentMode === 'idea') {
+        if (!copilot) return;
+        if (input.value.trim().length < 10) {
+          _btnEnhanceClick.title = 'Type at least 10 characters to enhance';
+          return;
+        }
+        _btnEnhanceClick.title = 'Refine your idea (Cmd+Enter)';
+        copilot.enhance();
+        return;
+      }
+      // md / mmd: render-time refinement toggle
       chkEnhance.checked = !chkEnhance.checked;
       _btnEnhanceClick.classList.toggle('active', chkEnhance.checked);
+      _btnEnhanceClick.title = chkEnhance.checked
+        ? 'Will refine on next Render'
+        : 'Refine this source on Render';
     });
   }
 
@@ -1658,7 +2121,7 @@
 
   function setAgentMode(modeId) {
     if (!modeId && agent && agent.running) {
-      agent.stopAndRestore();
+      agent.stopAndPause();
       agentState = 'idle';
       notesDirty = false;
       input.readOnly = false;
@@ -1735,23 +2198,57 @@
       input, panel: agentPanel, panelLog: agentPanelLog, panelMode: agentPanelMode,
       notesWrap: agentNotesWrap, notesInput: agentNotesInput, btnFinalize: btnAgentCommit,
       onPreviewRender: (event) => {
+        _applyAgentArtifacts(event);
+        _agenticallyReviewArtifacts(event);
         if (event.paths) {
-          showResult(event.paths, event.diagram_name, event.run_id);
+          const depthMeta = (event.depth_score != null || event.depth_tier != null)
+            ? { score: event.depth_score, tier: event.depth_tier } : null;
+          showResult(event.paths, event.diagram_name, event.run_id, event.metrics, depthMeta);
           sidebar.add({ name: event.diagram_name, type: event.diagram_type || 'flowchart', paths: event.paths, timestamp: new Date().toLocaleString(), source: input.value, run_id: event.run_id || null });
+          showToast(`Preview ready — ${event.metrics?.nodeCount || '?'} nodes, ${event.metrics?.edgeCount || '?'} edges`, 'success', 3500);
         }
+        _updateStageTracker('mmd', 'complete');
       },
       onRenderResult: (event) => {
+        _applyAgentArtifacts(event);
+        _agenticallyReviewArtifacts(event);
         if (event.paths) {
-          showResult(event.paths, event.diagram_name, event.run_id);
+          const depthMeta = (event.depth_score != null || event.depth_tier != null)
+            ? { score: event.depth_score, tier: event.depth_tier } : null;
+          showResult(event.paths, event.diagram_name, event.run_id, event.metrics, depthMeta);
           sidebar.add({ name: event.diagram_name, type: event.diagram_type || 'flowchart', paths: event.paths, timestamp: new Date().toLocaleString(), source: input.value, run_id: event.run_id || null });
+          showToast(`Diagram finalized — ${event.diagram_name}`, 'success', 4000);
         }
       },
       onContinue: (stage) => {
         if (!orchestrator.isUnlocked(stage)) return;
+        showToast(`Continuing to ${_stageLabel(stage)} stage`, 'info', 2500);
         setMode(stage);
         setTimeout(() => render(), 300);
       },
+      onAgentFocus: (focus) => _showAgentGaze(focus),
+      onPipelineStage: (event) => {
+        _applyAgentArtifacts(event);
+        _agenticallyReviewArtifacts(event);
+        if (event.stage === 'tla') {
+          const tlaOk = event.success && event.sany_valid;
+          showToast(
+            tlaOk ? `TLA+ verified — SANY passed, ${event.violations || 0} violations` : `TLA+ stage ${event.success ? 'completed' : 'failed'}`,
+            tlaOk ? 'success' : 'error',
+            4500,
+          );
+          _updateStageTracker('tla', tlaOk ? 'complete' : 'error');
+        } else if (event.stage === 'ts') {
+          showToast(
+            event.success ? `TypeScript compiled — tsc ${event.compile_ok ? 'pass' : 'fail'}, tests ${event.tests_ok ? 'pass' : 'fail'}` : 'TypeScript stage failed',
+            event.success ? 'success' : 'error',
+            4500,
+          );
+          _updateStageTracker('ts', event.success ? 'complete' : 'error');
+        }
+      },
       onBundleReady: (event) => {
+        _applyAgentArtifacts(event);
         const completedStages = event.stages_completed || [];
         if (completedStages.includes('tla')) {
           orchestrator.updateFromBackend({
@@ -1763,16 +2260,36 @@
         if (completedStages.includes('ts')) {
           orchestrator.updateFromBackend({ stage: 'ts', confidence: event.ts_compiled ? 0.9 : 0.3 });
         }
+        showToast(`Full build complete — ${completedStages.join(' \u2192 ')}`, 'success', 5000);
         _showStandaloneContinuation('download', `Full build complete — ${completedStages.join(' \u2192 ')}`, 'Download Full Bundle');
       },
-      onComplete: () => { agentState = 'idle'; btnAgentRun.textContent = 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; input.readOnly = false; syncUiGuidance(); },
-      onError: (msg) => { agentState = 'idle'; notesDirty = false; showError(msg); btnAgentRun.textContent = 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; input.readOnly = false; setLoading(false); syncUiGuidance(); },
+      onComplete: () => {
+        agentState = 'idle';
+        btnAgentRun.textContent = 'Continue Agent';
+        btnAgentRun.classList.remove('is-stopping');
+        btnAgentRun.disabled = false;
+        input.readOnly = false;
+        showToast('Agent workflow complete', 'success', 3500);
+        syncUiGuidance();
+      },
+      onError: (msg) => {
+        agentState = 'idle';
+        notesDirty = false;
+        showError(msg);
+        showToast(`Agent error: ${msg}`, 'error', 6000);
+        btnAgentRun.textContent = 'Continue Agent';
+        btnAgentRun.classList.remove('is-stopping');
+        btnAgentRun.disabled = false;
+        input.readOnly = false;
+        setLoading(false);
+        syncUiGuidance();
+      },
       onStateChange: (state) => {
         agentState = state;
-        if (state === 'running') { notesDirty = false; btnAgentRun.textContent = 'Stop Agent'; btnAgentRun.classList.add('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = false; }
+        if (state === 'running') { notesDirty = false; btnAgentRun.textContent = 'Pause Agent'; btnAgentRun.classList.add('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = false; }
         else if (state === 'awaiting_notes') { input.readOnly = false; btnAgentRun.hidden = true; }
         else if (state === 'finalizing') { notesDirty = false; input.readOnly = true; btnAgentRun.hidden = true; setLoading(true, 'text'); }
-        else if (state === 'idle') { btnAgentRun.textContent = 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = !agentModeActive; btnRender.hidden = agentModeActive; input.readOnly = false; setLoading(false); }
+        else if (state === 'idle') { btnAgentRun.textContent = agent ? 'Continue Agent' : 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = !agentModeActive; btnRender.hidden = agentModeActive; input.readOnly = false; setLoading(false); }
         syncUiGuidance();
       },
     });
@@ -1782,21 +2299,41 @@
     btnAgentRun.addEventListener('click', () => {
       if (isLoading) return;
       if (agent && agent.running) {
-        agent.stopAndRestore(); agentState = 'idle'; notesDirty = false;
-        btnAgentRun.textContent = 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = false;
+        orchestrator.setArtifact(currentMode, input.value);
+        agent.stopAndPause(); agentState = 'idle'; notesDirty = false;
+        btnAgentRun.textContent = 'Continue Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = false;
         input.readOnly = false; setLoading(false); syncUiGuidance(); return;
       }
-      if (!selectedAgentMode) return;
+      if (!selectedAgentMode) selectedAgentMode = _defaultAgentModeForStage(currentMode);
       _createAgent(); input.readOnly = true; hideError();
-      agent.run(selectedAgentMode, diagramNameInput?.value?.trim() || undefined);
+      orchestrator.setArtifact(currentMode, input.value);
+      _resetStageTracker();
+      _updateStageTracker(currentMode, 'active');
+      showToast(`Agent started — ${getAgentModeLabel(selectedAgentMode)} on ${_stageLabel(currentMode)}`, 'info', 3000);
+      _showAgentGaze({
+        role: 'MERMATE',
+        stage: currentMode,
+        target: currentMode,
+        summary: `Continuing from ${_stageLabel(currentMode)} artifact`,
+      });
+      agent.run(selectedAgentMode, diagramNameInput?.value?.trim() || currentDiagramName || undefined, currentMode, currentRunId);
     });
   }
 
-  if (btnAgentCommit) { btnAgentCommit.addEventListener('click', () => { _createAgent(); agent.finalize(); }); }
+  if (btnAgentCommit) {
+    btnAgentCommit.addEventListener('click', () => {
+      _createAgent();
+      orchestrator.setArtifact(currentMode, input.value);
+      agent.finalize(input.value, currentMode, currentRunId);
+    });
+  }
   if (agentNotesInput) { agentNotesInput.addEventListener('input', () => { notesDirty = !!agentNotesInput.value.trim(); syncUiGuidance(); }); }
   if (btnAgentStop) {
     btnAgentStop.addEventListener('click', () => {
-      if (agent) { agent.stopAndRestore(); agentState = 'idle'; notesDirty = false; btnAgentRun.disabled = false; input.readOnly = false; setLoading(false); syncUiGuidance(); }
+      if (agent) {
+        orchestrator.setArtifact(currentMode, input.value);
+        agent.stopAndPause(); agentState = 'idle'; notesDirty = false; btnAgentRun.disabled = false; input.readOnly = false; setLoading(false); syncUiGuidance();
+      }
     });
   }
 
@@ -1827,6 +2364,13 @@
   setMode(orchestrator.currentStage);
   _rebuildAgentDropdown();
   updateBadges();
+
+  // Restore pending entry if it exists
+  const pendingItem = sidebar.items.find(i => i._pending);
+  if (pendingItem && pendingItem.name && diagramNameInput) {
+    diagramNameInput.value = pendingItem.name;
+    currentDiagramName = pendingItem.name;
+  }
 
   if (currentPaths && (currentPaths.png || currentPaths.svg)) {
     showResult(currentPaths, currentDiagramName, currentRunId);

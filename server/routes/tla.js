@@ -335,9 +335,22 @@ router.post('/render/tla', async (req, res) => {
       fsp.writeFile(path.join(tlaDir, file.relativePath), file.content, 'utf8')
     )));
 
+    const tlaConfidence = validation.sany.valid
+      ? (validation.tlc.success ? 0.95 : 0.7)
+      : 0.3;
+
     // Update run JSON with TLA+ metrics
     try {
-      runData.tla_metrics = metrics;
+      runData.tla_metrics = {
+        ...metrics,
+        stage: 'tla',
+        diagram_name: name,
+        module_name: moduleName,
+        artifact_type: 'tla_specification',
+        sany_valid: validation.sany.valid,
+        tlc_success: validation.tlc.success,
+        confidence: tlaConfidence,
+      };
       runData.tla_artifacts = {
         tla: `/flows/${name}/${moduleName}.tla`,
         cfg: `/flows/${name}/${moduleName}.cfg`,
@@ -375,10 +388,6 @@ router.post('/render/tla', async (req, res) => {
       statesExplored: validation.tlc.statesExplored,
       wallClockMs: validation.tlc.wallClockMs,
     });
-
-    const tlaConfidence = validation.sany.valid
-      ? (validation.tlc.success ? 0.95 : 0.7)
-      : 0.3;
 
     opseeq.reportStage(run_id, {
       stage: 'tla_complete',

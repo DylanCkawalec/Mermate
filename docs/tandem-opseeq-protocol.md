@@ -11,6 +11,7 @@ This document describes how MERMATE correlates runs with **Opseeq**, how URLs ar
 | **MERMATE** | Express API (`server/index.js`), render pipeline, formal stages (TLA+, TS, Rust), local trace store, static `/flows` and `/runs`. |
 | **Opseeq** | Optional OpenAI-compatible gateway plus management APIs. When healthy, receives stage events and can serve as the inference base; when down, MERMATE keeps working with local traces and optional direct OpenAI fallback. |
 | **Inference provider** | `server/services/inference-provider.js` — premium (OpenAI-compatible) chain with gateway → direct fallback, `X-Request-Id` correlation, and recorded fallback events for the UI. |
+| **Run tracker/exporter** | `server/services/run-tracker.js` + `run-exporter.js` — durable run manifests, lifecycle, composition metrics, sum checks, and optional dump copies for downstream tools. |
 
 ---
 
@@ -35,6 +36,16 @@ How paths are built:
 
 **Images (DALL·E / GPT Image)** for packaged apps use `DALLE_API_KEY` (fallback: `OPENAI_API_KEY`) and `MERMATE_IMAGE_MODEL` (default `gpt-image-1`) in `server/services/icon-generator.js`. This is separate from the Opseeq chat path.
 
+Optional low-latency telemetry:
+
+| Variable | Default / behavior |
+|----------|--------------------|
+| `OPSEEQ_WS_ENABLED` | Disabled unless set to `true`. HTTP stage reporting remains active either way. |
+| `OPSEEQ_WS_URL` | Derived from `OPSEEQ_URL` as `ws(s)://<host>/api/mermate/ws` when unset. |
+| `OPSEEQ_WS_TOKEN` | Optional token sent in the initial `hello` frame. |
+| `OPSEEQ_WS_HEARTBEAT_MS` / `OPSEEQ_WS_HEARTBEAT_TIMEOUT_MS` | Defaults: 15s heartbeat and 15s timeout. |
+| `OPSEEQ_WS_QUEUE_LIMIT` | Defaults to 500 queued stage events while reconnecting. |
+
 ---
 
 ## 3. Shared trace ID: `run_id` and `X-Request-Id`
@@ -43,7 +54,7 @@ How paths are built:
 2. **`provider.setTraceId(runId)`** is set for the duration of that render’s inference work and cleared in a `finally` block (`server/routes/render.js`).
 3. Premium inference requests include **`X-Request-Id: <run_id>`** when a trace ID is set (`inference-provider.js`), so Opseeq (or any compatible gateway) can correlate HTTP logs with MERMATE’s run.
 
-Stage reporting uses the same **`run_id`** string in JSON bodies and in the local trace store.
+Stage reporting uses the same **`run_id`** string in JSON bodies and in the local trace store. Run manifests use the same ID: `runs/<run_id>.json`, `runs/<run_id>.trace.json`, optional `MERMATE_DUMP_DIR/<run_id>/`, and bundle downloads through `/api/runs/:runId/bundle`.
 
 ---
 
@@ -54,7 +65,10 @@ Stage reporting uses the same **`run_id`** string in JSON bodies and in the loca
 `opseeq-bridge.reportStage(runId, stageEvent)` is the single write path for “something happened in the pipeline.” It:
 
 1. **Always** appends to the in-memory trace (`trace-store.js`).
-2. **Best-effort** `POST` to Opseeq: `{ run_id, ...stageEvent }` at `OPSEEQ_URL/api/mermate/stage` (never blocks the pipeline on failure).
+2. **Best-effort** sends to the Opseeq WebSocket bridge when enabled (`OPSEEQ_WS_ENABLED=true`).
+3. **Best-effort** `POST` to Opseeq: `{ run_id, ...stageEvent }` at `OPSEEQ_URL/api/mermate/stage` (never blocks the pipeline on failure).
+
+When both WS and HTTP are active, treat events as at-least-once delivery. Mermate keeps local persistence as the source of truth for its own UI and tests.
 
 Emitters include (non-exhaustive):
 
@@ -87,6 +101,12 @@ Mounted under `/api` via `server/routes/trace.js`:
 ### 4.4 Opseeq readback (optional)
 
 `opseeq-bridge.getTrace(runId)` calls `GET OPSEEQ_URL/api/mermate/trace/:run_id` when cross-service aggregation is needed. If Opseeq is down, callers should use MERMATE’s `GET /api/mermate/trace/:run_id` instead.
+
+### 4.5 WebSocket status
+
+`GET /api/openclaw/ws-status` returns the local Mermate-side bridge state: `enabled`, `connected`, `connecting`, `rejected`, `lastError`, `queueDepth`, and the derived or configured `url`.
+
+This endpoint does not proxy to Opseeq. It is a local diagnostic read for operators and external tools.
 
 ---
 
@@ -133,7 +153,30 @@ The corresponding MCP tools are `mermate_tla_check`, `mermate_tla_errors`, `merm
 
 ---
 
-## 8. Rust binary, desktop `.app`, landing page, and `skill.json`
+## 8. Run lineage, summaries, and bundles
+
+Run manifests are the canonical developer artifact for a render or agent run. `run-tracker` persists:
+
+- flat `tags` for filtering (`mode`, `input_mode`, `depth_tier`, `pipeline`, artifact presence)
+- ordered `lifecycle` phases: `ingest`, `analyze`, `plan`, `compose`, `compile`, `finalize`
+- `composition` metrics for single-shot vs decomposed architecture runs
+- `sum_check`, a compact integrity verdict with concrete issues
+- `agent_calls`, branches, subviews, merges, final artifacts, and downstream TLA/TS/TSX/Rust metrics
+
+Read-only APIs:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/runs?limit=20` | Recent run IDs. |
+| `GET` | `/api/runs/:run_id` | Full run JSON from memory or disk. |
+| `GET` | `/api/runs/:run_id/summary` | Per-stage agent-call summary, totals, lifecycle, composition, and `sum_check`. |
+| `GET` | `/api/runs/:runId/bundle` | ZIP-ready base64 file map. Prefers `MERMATE_DUMP_DIR/<run_id>`, falls back to live `flows/` and `runs/`. |
+
+`run-exporter` mirrors completed artifacts into `MERMATE_DUMP_DIR` when configured, defaulting to `~/Desktop/MERMATE/dumps`. Export failures are logged and never block the render pipeline.
+
+---
+
+## 9. Rust binary, desktop `.app`, landing page, and `skill.json`
 
 When the Rust stage succeeds (`server/routes/rust.js`):
 
@@ -145,19 +188,22 @@ When the Rust stage succeeds (`server/routes/rust.js`):
 
 ---
 
-## 9. End-to-end acceptance
+## 10. End-to-end acceptance
 
 The tandem chain is exercised by **`test/test-e2e-tandem.js`** (render → trace readback → TLA → TS → Rust → guide evaluate, with assertions on trace ordering and stage completion where applicable). Run via `./mermaid.sh test` or `node test/test-e2e-tandem.js` with the server available per the test’s expectations.
 
 ---
 
-## 10. Quick reference: related files
+## 11. Quick reference: related files
 
 | Concern | File(s) |
 |---------|---------|
 | Trace ID on inference | `server/services/inference-provider.js`, `server/routes/render.js` |
 | Stage fan-out + Opseeq POST | `server/services/opseeq-bridge.js` |
+| Optional stage WebSocket | `server/services/opseeq-ws-bridge.js`, `server/routes/openclaw.js` (`/api/openclaw/ws-status`) |
 | Local trace store | `server/services/trace-store.js` |
+| Run lineage and summaries | `server/services/run-tracker.js`, `server/routes/runs.js` |
+| Artifact dump and bundle download | `server/services/run-exporter.js`, `server/routes/bundle.js` |
 | MERMATE trace HTTP API | `server/routes/trace.js` |
 | TLA+ toolbox management API | `server/routes/tla.js` (check/errors/revalidate/edit endpoints) |
 | TLA+ Java integration (SANY+TLC) | `server/services/tla-validator.js` |

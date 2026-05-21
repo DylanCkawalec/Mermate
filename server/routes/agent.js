@@ -180,9 +180,11 @@ function _extractText(output) {
   return text.trim();
 }
 
+// `thinking` and `full-build` get a 4-domain pool so we can run up to 4
+// concurrent planners on deep architectures. Shallow inputs cap at 2-3.
 const MODE_ROLE_DOMAINS = {
-  'thinking':     ['formal_reasoning', 'systems_compilers', 'human_centric_systems'],
-  'full-build':   ['formal_reasoning', 'systems_compilers', 'human_centric_systems'],
+  'thinking':     ['formal_reasoning', 'systems_compilers', 'human_centric_systems', 'structural_precision'],
+  'full-build':   ['formal_reasoning', 'systems_compilers', 'human_centric_systems', 'structural_precision'],
   'optimize-mmd': ['structural_precision', 'minimal_structure', 'programmatic_complexity'],
   'code-review':  ['systems_compilers', 'formal_reasoning', 'narrative_orchestration'],
 };
@@ -204,12 +206,20 @@ function _selectRolesForMode(mode) {
   return roles;
 }
 
-function _composeThinkingSummary(role, stage) {
+/**
+ * Compose a dynamic "thinking" summary that includes the depth tier and
+ * problem domain so Opseeq can render a meaningful per-role status line.
+ */
+function _composeThinkingSummary(role, stage, profile = null) {
   const info = STAGE_SUMMARIES[stage] || { verb: 'reasoning about', fallback: 'Processing' };
-  if (!role || role === 'default') return info.fallback;
+  const tier = profile?.architectureDepthTier;
+  const domain = profile?.intent?.problemDomain;
+  const tierTag = tier && tier !== 'shallow' ? ` [${tier} depth]` : '';
+  const domainTag = domain && domain !== 'general' ? ` · ${domain}` : '';
+  if (!role || role === 'default') return `${info.fallback}${tierTag}${domainTag}`;
   const shortName = role.name.replace(/^Doctor_/, 'Dr. ').replace(/_/g, ' ');
   const domainLabel = (role.domain || 'general').replace(/_/g, ' ');
-  return `${shortName} — ${info.verb} ${domainLabel}`;
+  return `${shortName} — ${info.verb} ${domainLabel}${tierTag}${domainTag}`;
 }
 
 router.get('/agent/modes', (_req, res) => {
@@ -222,7 +232,7 @@ router.get('/agent/modes', (_req, res) => {
 // ---- Phase 1: Run through planning, refinement, and preview ----
 
 router.post('/agent/run', async (req, res) => {
-  const { prompt, mode, current_text, diagram_name } = req.body || {};
+  const { prompt, mode, current_text, current_stage, current_run_id, diagram_name } = req.body || {};
 
   if (!prompt || typeof prompt !== 'string') {
     return res.status(400).json({ success: false, error: 'prompt is required' });
@@ -232,6 +242,8 @@ router.post('/agent/run', async (req, res) => {
   }
 
   const userDiagramName = diagram_name?.trim() || undefined;
+
+  logger.info('agent.run.start', { mode, current_stage, current_run_id, diagram_name: userDiagramName, promptLength: prompt.length });
 
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
@@ -264,6 +276,7 @@ router.post('/agent/run', async (req, res) => {
 
   const gotConfig = require('../services/got-config').getConfig();
   const startText = current_text || prompt;
+  const currentStage = ['idea', 'md', 'mmd', 'tla', 'ts'].includes(current_stage) ? current_stage : 'idea';
 
   // Parallel init: run tracker creation + mode prompt load + analysis all concurrently
   const [parentRunId, modePromptSkeleton, profile] = await Promise.all([
@@ -273,7 +286,7 @@ router.post('/agent/run', async (req, res) => {
       enhance: true,
       userInput: prompt.slice(0, 5000),
       userDiagramName: userDiagramName,
-      inputMode: 'idea',
+      inputMode: currentStage,
       gotConfig,
       models: {
         orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || 'gpt-4o',
@@ -282,7 +295,7 @@ router.post('/agent/run', async (req, res) => {
       },
     }).catch(() => null),
     _loadModePrompt(mode),
-    Promise.resolve(analyze(startText, 'idea')),
+    Promise.resolve(analyze(startText, currentStage)),
   ]);
 
   // Wire narrator: emits 'narration' events from audit stream → SSE
@@ -291,12 +304,43 @@ router.post('/agent/run', async (req, res) => {
   try {
     auditTracker.emit(auditId, 'agent:stage_enter', { stage: 'ingest' });
     sendEvent('stage', { stage: 'ingest', message: 'Reading prompt and mode configuration...' });
+
+    // Surface the architecture depth decision as soon as it's known so
+    // Opseeq Studio can log it without having to wait for the planning stage.
+    const depthScore = profile.architectureDepthScore ?? 0;
+    const depthTier = profile.architectureDepthTier || 'shallow';
+    auditTracker.emit(auditId, 'agent:depth_score', {
+      score: depthScore,
+      tier: depthTier,
+      factors: profile.architectureDepthFactors || null,
+      problem_domain: profile?.intent?.problemDomain || 'general',
+    });
+    sendEvent('depth', { score: depthScore, tier: depthTier });
+    if (parentRunId) {
+      runTracker.setDepth(parentRunId, {
+        score: depthScore,
+        tier: depthTier,
+        factors: profile.architectureDepthFactors || null,
+      });
+      opseeq.reportStage(parentRunId, {
+        stage: 'agent_depth_score',
+        score: depthScore,
+        tier: depthTier,
+      });
+    }
+
     const modeRoles = _selectRolesForMode(mode);
 
     // ---- Planning ----
     if (abort.signal.aborted) return;
     auditTracker.emit(auditId, 'agent:stage_enter', { stage: 'planning' });
-    opseeq.reportStage(parentRunId, { stage: 'agent_planning', mode: agentMode, entities: profile.shadow?.entities?.length || 0 });
+    opseeq.reportStage(parentRunId, {
+      stage: 'agent_planning',
+      mode,
+      entities: profile.shadow?.entities?.length || 0,
+      depth_tier: depthTier,
+      depth_score: depthScore,
+    });
     sendEvent('stage', { stage: 'planning', message: 'Analyzing architecture and generating plan...' });
     sendEvent('analysis', {
       maturity: profile.maturity,
@@ -307,7 +351,58 @@ router.post('/agent/run', async (req, res) => {
       gaps: profile.shadow?.gaps || [],
     });
 
+    if (currentStage === 'tla' && (mode === 'tla-verify' || mode === 'tla-optimize')) {
+      auditTracker.emit(auditId, 'agent:stage_enter', { stage: 'tla_verify' });
+      sendEvent('stage', { stage: 'tla_build', message: 'Validating current TLA+ artifact...' });
+      const tlaData = await _fetchRender(
+        current_run_id ? '/api/render/tla/edit' : '/api/render/tla/check',
+        current_run_id
+          ? { run_id: current_run_id, tla_source: startText }
+          : { tla_source: startText, module_name: userDiagramName || 'AgentSpec' },
+        abort,
+      );
+      sendEvent('pipeline_stage', {
+        stage: 'tla',
+        success: !!tlaData.success,
+        run_id: current_run_id || null,
+        diagram_name: userDiagramName,
+        sany_valid: tlaData.sany?.valid ?? !!tlaData.success,
+        tlc_checked: !!tlaData.tlc?.checked,
+        violations: tlaData.tlc?.violations?.length || 0,
+        tla_source: tlaData.tla_source || startText,
+        cfg_source: tlaData.cfg_source || null,
+        error: tlaData.error || null,
+      });
+      sendEvent('done', { final_text: tlaData.tla_source || startText });
+      return;
+    }
+
+    if (currentStage === 'ts' && (mode === 'ts-generate' || mode === 'ts-optimize')) {
+      auditTracker.emit(auditId, 'agent:stage_enter', { stage: 'ts_build' });
+      sendEvent('stage', { stage: 'ts_build', message: current_run_id ? 'Compiling TypeScript runtime from current run context...' : 'Reviewing current TypeScript artifact...' });
+      let tsData = { success: false, ts_source: startText, error: 'No run context available for TypeScript compilation.' };
+      if (current_run_id) {
+        tsData = await _fetchRender('/api/render/ts', {
+          run_id: current_run_id,
+          diagram_name: userDiagramName,
+        }, abort);
+      }
+      sendEvent('pipeline_stage', {
+        stage: 'ts',
+        success: !!tsData.success,
+        run_id: current_run_id || null,
+        diagram_name: userDiagramName,
+        compile_ok: !!tsData.compile?.success,
+        tests_ok: !!tsData.tests?.success,
+        ts_source: tsData.ts_source || startText,
+        error: tsData.error || tsData.details || null,
+      });
+      sendEvent('done', { final_text: tsData.ts_source || startText });
+      return;
+    }
+
     const planningUserPrompt = [
+      `[CURRENT ARTIFACT STAGE] ${currentStage}`,
       '[USER PROMPT]', prompt, '',
       current_text && current_text !== prompt ? '[CURRENT DRAFT]\n' + current_text : '',
       '', '[ANALYSIS]',
@@ -319,18 +414,20 @@ router.post('/agent/run', async (req, res) => {
 
     if (abort.signal.aborted) return;
 
-    // P7: Multi-role planning — run up to 3 roles concurrently, score, pick best
-    const planRoles = modeRoles.slice(0, 3).filter(Boolean);
+    // P7: Multi-role planning — run roles concurrently, score, pick best.
+    // Cap scales with depth: deep -> 4, medium -> 3, shallow -> 2.
+    const planCap = depthTier === 'deep' ? 4 : depthTier === 'medium' ? 3 : 2;
+    const planRoles = modeRoles.slice(0, planCap).filter(Boolean);
     if (planRoles.length === 0) planRoles.push(null);
 
-    auditTracker.emit(auditId, 'agent:batch_start', { roleCount: planRoles.length, level: 0, stage: 'planning' });
+    auditTracker.emit(auditId, 'agent:batch_start', { roleCount: planRoles.length, level: 0, stage: 'planning', depth_tier: depthTier });
 
     for (const r of planRoles) {
       sendEvent('thinking', {
         role: r?.name || 'default',
         domain: r?.domain || 'general',
         stage: 'planning',
-        summary: _composeThinkingSummary(r, 'planning'),
+        summary: _composeThinkingSummary(r, 'planning', profile),
       });
     }
 
@@ -461,7 +558,7 @@ router.post('/agent/run', async (req, res) => {
       const refineRole = needsHeavyRewrite
         ? (modeRoles[2] || modeRoles[1] || modeRoles[0] || null)
         : (modeRoles[1] || modeRoles[0] || null);
-      const refineSummary = _composeThinkingSummary(refineRole, 'refining');
+      const refineSummary = _composeThinkingSummary(refineRole, 'refining', refinedProfile);
 
       auditTracker.emit(auditId, 'agent:role_start', {
         role: refineRole?.name || 'default',
@@ -561,7 +658,7 @@ router.post('/agent/run', async (req, res) => {
     if (abort.signal.aborted) return;
     auditTracker.emit(auditId, 'agent:stage_enter', { stage: 'preview' });
     auditTracker.emit(auditId, 'render:prepare', { maxMode: false });
-    opseeq.reportStage(parentRunId, { stage: 'agent_preview', mode: agentMode });
+    opseeq.reportStage(parentRunId, { stage: 'agent_preview', mode: mode });
     sendEvent('stage', { stage: 'preview', message: 'Running preview render...' });
 
     // Heartbeat keeps the SSE connection alive during long renders.
@@ -569,10 +666,13 @@ router.post('/agent/run', async (req, res) => {
       if (!abort.signal.aborted) sendEvent('heartbeat', {});
     }, 15_000);
 
-    // For optimize-mmd mode the draft is already valid Mermaid — use 'mmd'
-    // so the render endpoint skips the HPC-GoT LLM pipeline and goes straight
-    // to compile.  All other modes keep 'idea' to trigger full enhancement.
-    const previewInputMode = mode === 'optimize-mmd' ? 'mmd' : 'idea';
+    // Stage-aware resume: if the user restarts the agent from Markdown,
+    // treat it as Markdown; if they restart from Mermaid or choose optimize,
+    // use the fast MMD compile/repair path. This preserves the user's current
+    // tab context instead of forcing every run back through "simple idea".
+    const previewInputMode = mode === 'optimize-mmd'
+      ? (currentStage === 'md' ? 'md' : 'mmd')
+      : (currentStage === 'md' || currentStage === 'mmd' ? currentStage : 'idea');
 
     let previewData;
     try {
@@ -602,6 +702,10 @@ router.post('/agent/run', async (req, res) => {
       sendEvent('preview_render', {
         success: true,
         paths: previewData.paths,
+        run_id: previewData.run_id || parentRunId || undefined,
+        md_source: previewData.markdown_source || draftText,
+        mmd_source: previewData.compiled_source || '',
+        artifact_paths: previewData.paths || {},
         metrics: previewData.mmd_metrics,
         diagram_name: previewData.diagram_name,
         diagram_type: previewData.diagram_type,
@@ -660,6 +764,8 @@ router.post('/agent/run', async (req, res) => {
     sendEvent('preview_ready', {
       message: 'Preview ready. Add optional notes before final Max render.',
       draft_text: draftText,
+      md_source: previewData.markdown_source || draftText,
+      mmd_source: previewData.compiled_source || '',
       diagram_name: previewDiagramName,
       run_id: parentRunId,
     });
@@ -680,7 +786,7 @@ router.post('/agent/run', async (req, res) => {
 // ---- Phase 2: Finalize with Max render (after user notes) ----
 
 router.post('/agent/finalize', async (req, res) => {
-  const { current_text, mode, user_notes } = req.body || {};
+  const { current_text, mode, user_notes, current_stage, current_run_id } = req.body || {};
 
   if (!current_text || typeof current_text !== 'string') {
     return res.status(400).json({ success: false, error: 'current_text is required' });
@@ -744,7 +850,7 @@ router.post('/agent/finalize', async (req, res) => {
     auditTracker.emit(finalizeAuditId, 'agent:stage_enter', { stage: 'finalizing' });
     auditTracker.emit(finalizeAuditId, 'render:prepare', { maxMode: true });
     auditTracker.emit(finalizeAuditId, 'agent:convergence', { pct: 85 });
-    opseeq.reportStage(req.body.agent_parent_run_id, { stage: 'agent_finalize', mode: req.body.mode });
+    opseeq.reportStage(req.body.agent_parent_run_id || current_run_id, { stage: 'agent_finalize', mode: req.body.mode });
     sendEvent('stage', { stage: 'finalizing', message: 'Running final Max render...' });
 
     const heartbeatInterval = setInterval(() => {
@@ -752,8 +858,11 @@ router.post('/agent/finalize', async (req, res) => {
     }, 15_000);
 
     const diagramName = req.body.diagram_name || undefined;
-    const agentParentRunId = req.body.agent_parent_run_id || null;
-    const finalInputMode = mode === 'optimize-mmd' ? 'mmd' : 'idea';
+    const agentParentRunId = req.body.agent_parent_run_id || current_run_id || null;
+    const currentStage = ['idea', 'md', 'mmd', 'tla', 'ts'].includes(current_stage) ? current_stage : 'idea';
+    const finalInputMode = mode === 'optimize-mmd'
+      ? (currentStage === 'md' ? 'md' : 'mmd')
+      : (currentStage === 'md' || currentStage === 'mmd' ? currentStage : 'idea');
     let finalData;
     try {
       finalData = await _fetchRender('/api/render', {
@@ -788,6 +897,10 @@ router.post('/agent/finalize', async (req, res) => {
         diagram_name: finalData.diagram_name,
         diagram_type: finalData.diagram_type,
         paths: finalData.paths,
+        run_id: finalData.run_id || agentParentRunId || undefined,
+        md_source: finalData.markdown_source || draftText,
+        mmd_source: finalData.compiled_source || '',
+        artifact_paths: finalData.paths || {},
         metrics: finalData.mmd_metrics,
         max_mode: finalData.render_meta?.max_mode,
         attempts: finalData.render_meta?.attempts,
@@ -795,8 +908,8 @@ router.post('/agent/finalize', async (req, res) => {
       });
 
       // ---- Full Build: chain TLA+ and TS after successful MMD render ----
-      if (mode === 'full-build' && finalData.diagram_name && (agentParentRunId || finalData.run_id)) {
-        const fbRunId = agentParentRunId || finalData.run_id;
+      if (mode === 'full-build' && finalData.diagram_name && (finalData.run_id || agentParentRunId)) {
+        const fbRunId = finalData.run_id || agentParentRunId;
         const fbName = finalData.diagram_name;
 
         if (!abort.signal.aborted) {
@@ -813,7 +926,8 @@ router.post('/agent/finalize', async (req, res) => {
               sany_valid: tlaData.sany?.valid,
               tlc_checked: tlaData.tlc?.checked,
               violations: tlaData.tlc?.violations?.length || 0,
-              tla_source: tlaData.tla_source ? tlaData.tla_source.slice(0, 200) + '...' : null,
+              tla_source: tlaData.tla_source || null,
+              cfg_source: tlaData.cfg_source || null,
             });
 
             if (tlaData.success && tlaData.sany?.valid && !abort.signal.aborted) {
@@ -829,7 +943,7 @@ router.post('/agent/finalize', async (req, res) => {
                   success: tsData.success,
                   compile_ok: tsData.compile?.success,
                   tests_ok: tsData.tests?.success,
-                  ts_source: tsData.ts_source ? tsData.ts_source.slice(0, 200) + '...' : null,
+                  ts_source: tsData.ts_source || null,
                 });
 
                 sendEvent('bundle_ready', {
@@ -838,6 +952,8 @@ router.post('/agent/finalize', async (req, res) => {
                   stages_completed: ['mmd', 'tla', 'ts'],
                   tla_valid: tlaData.sany?.valid,
                   ts_compiled: tsData.compile?.success,
+                  tla_source: tlaData.tla_source || null,
+                  ts_source: tsData.ts_source || null,
                 });
               } catch (tsErr) {
                 sendEvent('pipeline_stage', { stage: 'ts', success: false, error: tsErr.message });

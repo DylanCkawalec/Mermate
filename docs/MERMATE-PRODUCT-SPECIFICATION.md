@@ -29,11 +29,11 @@ The **final compiled outcome** for the diagram path is **high-resolution PNG and
 | 1 | Process launch | Node loads `.env` (two-pass: assign values, then resolve `{VAR}` placeholders). |
 | 2 | Express app construction | JSON body limit 2MB; static routes for `public/`, `/flows`, `/archs`, `/runs`, vendor `three`. |
 | 3 | Foundation services | `got-config`, `role-registry`, `agent-loader` initialized (config errors surface early). |
-| 4 | API routers mounted | All routes share prefix `/api` (render, agent, transcribe, tla, ts, tsx, search, openclaw, bundle, guide, artifacts, rust, trace). |
+| 4 | API routers mounted | All routes share prefix `/api` (render, agent, transcribe, tla, ts, tsx, search, openclaw, bundle, guide, artifacts, rust, trace, runs). |
 | 5 | Housekeeping | `run-tracker.cleanup` and `run-exporter.cleanup` run asynchronously. |
 | 6 | HTTP listen | Default port `3333` (override `PORT`). |
 | 7 | Background (optional) | If `META_GATEWAY_ENABLED !== 'false'`, interval `META_CRON_INTERVAL_MS` (default 5 minutes) calls meta-gateway `cronOptimize`. |
-| 8 | Shutdown | `SIGTERM`/`SIGINT`: clear meta timer, `rate-master-bridge.destroy`, close server. |
+| 8 | Shutdown | `SIGTERM`/`SIGINT`: clear meta timer, `rate-master-bridge.destroy`, close Opseeq WS bridge, close server. |
 
 ### 1.2 User session: “new diagram” and naming
 
@@ -51,7 +51,7 @@ This is the **core chronological pipeline** for turning input into diagrams and 
 |-------|------|-------------|
 | **A** | Request validation | Requires non-empty `mermaid_source`; max 100k chars. |
 | **B** | Input analysis | `input-analyzer.analyze` produces profile: content state (text/md/mmd/hybrid), maturity, quality, shadow entities/relationships, decomposition hints. |
-| **C** | Run creation | `run-tracker.create` writes `runs/<run_id>.json` with settings, request snapshot, empty `agent_calls`, etc. Profile stored on manifest. |
+| **C** | Run creation | `run-tracker.create` writes `runs/<run_id>.json` with settings, request snapshot, tags, lifecycle shell, empty `agent_calls`, etc. Profile stored on manifest. |
 | **D** | Optional early fact extraction | If content is text/md **and** Enhance is on **and** shadow has ≥2 entities: `provider.infer('fact_extraction', …)` to enrich run lineage (best-effort JSON parse). |
 | **E** | Pipeline selection (Enhance + text/md only) | Chooses among: **decompose** (very complex), **max_upgrade** (`max_mode` and Max available), **hpc_got** (default for non-trivial entity count), **render_prepare** (small/trivial cases). If not using provider-backed branch, falls through to `route()` (§2.2). |
 | **F** | Provider-backed pipelines (when applicable) | See §2.2 and §3. Output: final `.mmd` string + metadata. |
@@ -60,7 +60,7 @@ This is the **core chronological pipeline** for turning input into diagrams and 
 | **I** | Compile retry semantics | Attempt 1: `mmdc`; 2: deterministic repair + compile; 3: model repair + deterministic repair + compile. Failure → HTTP 422, run finalized `failed`, Opseeq stage `render_failed`. |
 | **J** | Post-compile | Subviews moved into `flows/.../subviews/` if present; canonical **`architecture.md`** written; `archiveCompiled` writes `archs/<name>.compiled.mmd`; optional **visual** asset if `visual` flag and visual provider available. |
 | **K** | Validation metrics | Post-render `mermaid-validator`, SVG/PNG validity/size metrics. |
-| **L** | Run finalization | `runTracker.setFinalArtifact`, Opseeq `render_complete`, `finalize(completed)`. |
+| **L** | Run finalization | `runTracker.setFinalArtifact`, Opseeq `render_complete`, lifecycle closeout, composition metrics, `sum_check`, optional exporter dump, `finalize(completed)`. |
 | **M** | HTTP response | Paths to PNG/SVG/mmd/md/architecture, `run_id`, `progressionUpdate` (unlocks downstream stages in API contract), optional `fallback_events` from inference provider. |
 
 ### 1.4 Downstream formal stages (same `run_id`)
@@ -80,9 +80,9 @@ These stages **depend on** a completed render that populated run JSON and artifa
 | **ingest** | Mode validated; SSE stream opened; abort on client disconnect (`res.close`). |
 | **planning** | Multi-role parallel `copilot_enhance`-style calls; best draft selected by analyzed score. |
 | **refining** | Conditional second pass based on quality/completeness thresholds. |
-| **preview** | Internal HTTP `POST /api/render` with `max_mode: true` (except `optimize-mmd` uses mmd mode); links audit to `audit_run_id`; records preview diagram name. |
+| **preview** | Internal HTTP `POST /api/render` with `max_mode: false`; stage-aware input mode preserves Markdown/Mermaid context; links audit to `audit_run_id`; records preview diagram name. |
 | **pause** | SSE `preview_ready` — user may add notes. |
-| **finalize** (optional) | If notes: another enhance pass; then **final Max render** via `/api/render` with `max_mode: true`. |
+| **finalize** (optional) | If notes: another enhance pass; then **final Max render** via `/api/render` with `max_mode: true`, preserving Markdown/Mermaid context when applicable. |
 | **full-build mode** (optional) | After final render, server may chain `POST /api/render/tla` then `POST /api/render/ts` automatically, emitting SSE `pipeline_stage` events. |
 
 ### 1.6 Bundle export
@@ -91,7 +91,15 @@ These stages **depend on** a completed render that populated run JSON and artifa
 |---------|----------|
 | `GET /api/runs/:runId/bundle` | Prefers exporter dump directory if present; else **live bundle** from `flows/` + paths in run JSON → base64 file map + `manifest.json` + `README.md` content. |
 
-### 1.7 CLI path (no HTTP)
+### 1.7 Run query API
+
+| Endpoint | Behavior |
+|----------|----------|
+| `GET /api/runs?limit=20` | Returns recent run IDs from the run store. |
+| `GET /api/runs/:run_id` | Returns the full run manifest from memory or `runs/<run_id>.json`. |
+| `GET /api/runs/:run_id/summary` | Returns status, tags, depth, pipeline, lifecycle, composition, `sum_check`, totals, and per-stage agent-call aggregation. |
+
+### 1.8 CLI path (no HTTP)
 
 | Command | Behavior |
 |---------|----------|
@@ -147,6 +155,7 @@ These stages **depend on** a completed render that populated run JSON and artifa
 | **`inference-provider`** | Premium API, Ollama, enhancer fallback; `X-Request-Id` = `run_id` during render; `fallback_events`. |
 | **`gpt-enhancer-bridge`** | HTTP bridge to Python enhancer `/mermaid/enhance`. |
 | **`opseeq-bridge`** | Opseeq health, stage reporting, gateway helpers. |
+| **`opseeq-ws-bridge`** | Optional Mermate → Opseeq WebSocket stage transport with heartbeat, reconnect, auth reject backoff, and bounded queue. |
 | **`visual-provider`** | Optional Gemini (etc.) polished diagram image. |
 | **`specula-llm`** | TLA+/TS stages via configured Specula/Claude paths. |
 | **`meta-gateway-bridge`** | Optional meta refinement/audit/cron. |
@@ -160,6 +169,7 @@ These stages **depend on** a completed render that populated run JSON and artifa
 | **`mermaid-archiver`** | `archs/<date>-<name>.md`, `archs/<name>.mmd`, `archs/<name>.compiled.mmd`. |
 | **`markdown-compiler`** | `compileMarkdownArtifact` → `flows/.../architecture.md`. |
 | **`run-tracker`** | Canonical `runs/<uuid>.json` lineage. |
+| **`run-exporter`** | Optional completed-run dump mirror and retention cleanup. |
 | **`trace-store`** | Append-only stage traces (`*.trace.json` pattern in store). |
 | **`run-artifact-loader`** | Load run JSON, resolve paths, extract facts/plan for TLA/TS/Rust. |
 | **`tla-compiler` / `tla-validator`** | TLA generation + SANY/TLC. |
@@ -191,6 +201,7 @@ Python MCP bridge exposing render, TLA, TS, agent flows, diagram management, and
 ### 3.1 Ordering guarantees
 
 - **Run JSON** is created **before** long-running LLM work in `/api/render` (so `run_id` exists for tracing).
+- **Lifecycle phases** are recorded in order (`ingest`, `analyze`, `plan`, `compose`, `compile`, `finalize`) when the provider-backed render path is used.
 - **Archive and compile** run **in parallel** after Mermaid source is finalized (different directories).
 - **HPC-GoT** runs stages **sequentially** for facts and plan; **parallel** for the two composition branches; **sequential** semantic repair loop.
 - **Downstream stages** (TLA → TS → Rust) are **strictly ordered by data dependencies**: TS requires TLA artifact paths on disk; Rust reads TLA text and run metrics.
@@ -213,6 +224,7 @@ Python MCP bridge exposing render, TLA, TS, agent flows, diagram management, and
 - Run retention / exporter cleanup on startup.
 - Meta cron (if enabled).
 - SSE heartbeats during long agent/render calls.
+- Optional Opseeq WS heartbeat and reconnect loop when `OPSEEQ_WS_ENABLED=true`.
 - Optional DuckDB-backed features elsewhere in codebase (tests/services) — not part of the core render hot path described here unless enabled by specific routes.
 
 ### 3.4 Validations
@@ -271,7 +283,8 @@ Python MCP bridge exposing render, TLA, TS, agent flows, diagram management, and
 ### 5.4 Observability and integrations
 
 - Stage traces: `POST /api/mermate/stage`, `GET /api/mermate/trace/:run_id`.
-- Opseeq correlation when gateway configured.
+- Opseeq correlation when gateway configured, with optional WebSocket stage reporting and `/api/openclaw/ws-status`.
+- Run lineage APIs: `GET /api/runs`, `GET /api/runs/:run_id`, `GET /api/runs/:run_id/summary`.
 - OpenClaw routes (`/api/openclaw/*`) for status, chat, architect pipeline, builder scaffold.
 - Search/project/scoreboard (`/api/search`, `/api/projects`, …).
 - Artifacts listing (`/api/artifacts/:run_id`).

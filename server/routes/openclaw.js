@@ -64,6 +64,17 @@ router.get('/openclaw/status', async (_req, res) => {
   await _respond(res, '/api/status');
 });
 
+// Local-only: snapshot of the Mermate→Opseeq WebSocket bridge state.
+// Cheaper than a round-trip — handy for the diagnostics modal and tests.
+router.get('/openclaw/ws-status', (_req, res) => {
+  try {
+    const opseeqBridge = require('../services/opseeq-bridge');
+    return res.json({ success: true, ws: opseeqBridge.wsStatus() });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 router.get('/openclaw/connectivity', async (_req, res) => {
   await _respond(res, '/api/connectivity');
 });

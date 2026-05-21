@@ -1189,7 +1189,15 @@ async function decomposeAndRender(source, profile, useMax = false) {
     return { mmdSource: compileOut.mmdSource, score: viewScore.composite, scoreFactors: viewScore, viewName: view.viewName, viewSlug, outputDir, compileResult: compileOut.result, stages: [`render_subview:${view.viewName || 'unnamed'}`] };
   }
 
-  const viewTasks = subViews.slice(0, 6).map((v, i) => _renderSubView(v, i));
+  // Cap sub-views by depth tier so shallow inputs don't pay for 6 LLM calls.
+  // deep -> up to 6, medium -> up to 4, shallow -> up to 2. Always honor the
+  // model's own count too — never inflate beyond what was returned.
+  const depthTier = profile?.architectureDepthTier || 'shallow';
+  const subviewCap = depthTier === 'deep'
+    ? Math.min(6, Math.max(2, Math.ceil((profile?.architectureDepthScore || 0.7) * 6)))
+    : depthTier === 'medium' ? 4 : 2;
+  logger.info('decompose.subview_cap', { depthTier, subviewCap, modelReturned: subViews.length });
+  const viewTasks = subViews.slice(0, subviewCap).map((v, i) => _renderSubView(v, i));
   const settled = await Promise.all(viewTasks);
   const results = settled.filter(Boolean);
   for (const r of results) stagesExecuted.push(...r.stages);

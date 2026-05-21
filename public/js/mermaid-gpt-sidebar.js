@@ -22,7 +22,7 @@ window.MermaidSidebar = class MermaidSidebar {
     try {
       const raw = localStorage.getItem(this.STORAGE_KEY);
       if (!raw) return [];
-      return JSON.parse(raw).filter(i => !i._pending);
+      return JSON.parse(raw);
     } catch {
       return [];
     }
@@ -175,6 +175,22 @@ window.MermaidSidebar = class MermaidSidebar {
 
   render() {
     this.listEl.innerHTML = '';
+    if (this.items.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'sidebar-empty';
+      empty.innerHTML = `
+        <div class="sidebar-empty-icon">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="2" y="2" width="12" height="12" rx="2"/>
+            <path d="M6 6h4M8 6v5"/>
+          </svg>
+        </div>
+        <div class="sidebar-empty-text">No diagrams yet</div>
+        <div class="sidebar-empty-hint">Render your first diagram to see it here</div>
+      `;
+      this.listEl.appendChild(empty);
+      return;
+    }
     this.items.forEach((item, idx) => {
       const btn = document.createElement('button');
       btn.className = 'sidebar-item' + (idx === this.activeIndex ? ' active' : '') + (item._pending ? ' pending' : '');

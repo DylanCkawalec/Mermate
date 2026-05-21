@@ -232,29 +232,112 @@ router.post('/copilot/enhance', async (req, res) => {
   }
 
   if (stage === 'copilot_enhance') {
-    const enhanceUserPrompt = `Stage: copilot_enhance\nEnhance mode: ${req.body?.enhance_mode || 'full'}\n\nFull text: ${sourceText}\n\nSelected text: ${req.body?.selected_text || ''}\n\nReturn valid JSON only.`;
+    // Three-flavor router. The right system prompt depends on what the
+    // user actually pasted into the prompt bar:
+    //
+    //   • SHORT SEED (< 240 chars, sparse)  → 'expand'  — bloom into spec
+    //   • MEDIUM PROSE (240–4000 chars)     → 'refine'  — sharpen what's there
+    //   • LARGE DUMP / STRUCTURED MARKUP    → 'distill' — compress losslessly
+    //
+    // Distill is what makes the Enhance button work on whitepapers, LaTeX,
+    // long markdown, and multi-section spec dumps. Without it those inputs
+    // would either get truncated (old client slice(0,2000)) or send the
+    // model into refine mode, which produces a one-line restatement and
+    // feels broken to the user.
+    const requestedMode = req.body?.enhance_mode || 'full';
+    const isSelection = requestedMode === 'selection';
+    const trimmed = sourceText.trim();
+    const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+    const sentenceCount = trimmed.split(/[.!?]\s+|\n+/).filter(s => s.trim().length > 3).length;
+    const entityCount = shadowContext?.entities?.length || 0;
+
+    // Heavy-markup detection: LaTeX commands, markdown headers, fenced code
+    // blocks, bibliographic entries. These are the "this is a dump, not an
+    // idea" signals.
+    const latexHits = (trimmed.match(/\\(?:documentclass|begin\{|end\{|section|subsection|usepackage|bibitem|cite\{|lstlisting|item\b)/g) || []).length;
+    const mdHeaderHits = (trimmed.match(/^\s{0,3}#{1,6}\s+\S/gm) || []).length;
+    const fencedCodeHits = (trimmed.match(/```/g) || []).length;
+    const markupScore = latexHits + mdHeaderHits + Math.floor(fencedCodeHits / 2);
+    const isHeavyMarkup = markupScore >= 6;
+
+    const isSparse = !isSelection
+      && trimmed.length < 240
+      && wordCount < 40
+      && sentenceCount <= 1
+      && entityCount < 3;
+    const isLargeDump = !isSelection && (trimmed.length >= 2000 || isHeavyMarkup);
+
+    let flavor;
+    if (isSelection)        flavor = 'selection';
+    else if (isLargeDump)   flavor = 'distill';
+    else if (isSparse)      flavor = 'expand';
+    else                    flavor = 'refine';
+
+    const flavorPrompt = require('../services/axiom-prompts').buildCopilotEnhancePrompt(flavor);
+
+    // Previous-text context: lets the user iterate on enhancements
+    // (click → distill → tweak → click again to refine that distillation).
+    const previousText = (req.body?.previous_text || '').slice(0, 1500);
+    const previousBlock = previousText && previousText.trim() && previousText.trim() !== trimmed
+      ? `\nPrevious version (for iterative context): ${previousText}\n`
+      : '';
+
+    // For distill mode, give the model the entire pasted source up to the
+    // model's practical context window. 80K chars ≈ 20K tokens, leaving
+    // plenty of room for the system prompt + reasoning + output.
+    const sourceLimit = flavor === 'distill' ? 80000 : 8000;
+    const sourceForPrompt = sourceText.length > sourceLimit
+      ? sourceText.slice(0, sourceLimit) + `\n\n[…TRUNCATED ${sourceText.length - sourceLimit} chars…]`
+      : sourceText;
+
+    const enhanceUserPrompt = [
+      `Stage: copilot_enhance`,
+      `Enhance flavor: ${flavor}`,
+      `Word count: ${wordCount}, sentences: ${sentenceCount}, named entities: ${entityCount}, markup score: ${markupScore}, raw chars: ${trimmed.length}`,
+      previousBlock,
+      `Full text: ${sourceForPrompt}`,
+      `Selected text: ${req.body?.selected_text || ''}`,
+      ``,
+      `Return valid JSON only.`,
+    ].filter(Boolean).join('\n');
+
     const _enhanceStart = Date.now();
     const result = await provider.infer('copilot_enhance', {
-      systemPrompt: prompt.system,
+      systemPrompt: flavorPrompt.system,
       userPrompt: enhanceUserPrompt,
     });
-    logger.info('copilot.enhance.timing', { ms: Date.now() - _enhanceStart, provider: result.provider, hasOutput: !!result.output, noOp: result.noOp });
+    logger.info('copilot.enhance.timing', {
+      ms: Date.now() - _enhanceStart,
+      provider: result.provider,
+      flavor,
+      wordCount,
+      sentenceCount,
+      entityCount,
+      markupScore,
+      rawChars: trimmed.length,
+      truncated: sourceText.length > sourceLimit,
+      hasOutput: !!result.output,
+      noOp: result.noOp,
+    });
 
     if (result.output && !result.noOp) {
       try {
         const parsed = JSON.parse(result.output);
-        if (parsed.enhanced_source) return res.json({ success: true, ...parsed, provider: result.provider });
+        if (parsed.enhanced_source) {
+          return res.json({ success: true, ...parsed, flavor, provider: result.provider });
+        }
       } catch {
         // Not JSON — use raw text as enhanced source
         return res.json({
           success: true,
           enhanced_source: result.output.trim(),
           intent_preserved: true,
+          flavor,
           provider: result.provider,
         });
       }
     }
-    return res.status(503).json({ success: false, error: 'copilot_unavailable', details: 'No provider could enhance the text.' });
+    return res.status(503).json({ success: false, error: 'copilot_unavailable', details: 'No provider could enhance the text.', flavor });
   }
 
   return res.status(503).json({ success: false, error: 'copilot_unavailable', details: 'No copilot provider available.' });
@@ -318,6 +401,13 @@ router.post('/render', async (req, res) => {
       },
     });
     runTracker.setProfile(runId, profile);
+
+    // Lifecycle: ingest is implicitly already underway when create() returned
+    // (input received, run skeleton on disk). Record it explicitly so the
+    // timeline starts at a known anchor, then move into analyze.
+    runTracker.recordPhase(runId, 'ingest');
+    runTracker.completePhase(runId, 'ingest', true);
+    runTracker.recordPhase(runId, 'analyze');
 
     const _tAfterCreate = Date.now();
     _dbgPipeline('H-E', 'render.js:/render', 'phase_init', {
@@ -421,9 +511,30 @@ router.post('/render', async (req, res) => {
       // Wire run-tracker context + trace ID for Opseeq correlation
       _setRunId(runId);
       provider.setTraceId(runId);
+      provider.setDepthTier(profile.architectureDepthTier || null);
       runTracker.setPipeline(runId, pipelineName);
+      runTracker.setDepth(runId, {
+        score: profile.architectureDepthScore,
+        tier: profile.architectureDepthTier,
+        factors: profile.architectureDepthFactors,
+      });
+
+      // Lifecycle: analyze → plan → compose. The actual LLM work below is
+      // the compose phase; we open it here so any Opseeq Studio observer
+      // can see the run transition without parsing stages.
+      runTracker.completePhase(runId, 'analyze', true);
+      runTracker.recordPhase(runId, 'plan');
+      runTracker.completePhase(runId, 'plan', true);
+      runTracker.recordPhase(runId, 'compose');
+
       runTracker.recordUIStage(runId, { stage: pipelineName, message: `Pipeline: ${pipelineName}` });
-      opseeq.reportStage(runId, { stage: 'render_start', pipeline: pipelineName, input_length: source.length });
+      opseeq.reportStage(runId, {
+        stage: 'render_start',
+        pipeline: pipelineName,
+        input_length: source.length,
+        depth_score: profile.architectureDepthScore,
+        depth_tier: profile.architectureDepthTier,
+      });
 
       const _prepStart = Date.now();
       let prepResult;
@@ -446,9 +557,14 @@ router.post('/render', async (req, res) => {
       } finally {
         _setRunId(null);
         provider.setTraceId(null);
+        provider.setDepthTier(null);
         if (auditRunId) _setAuditEmitter(null);
       }
       runTracker.completeUIStage(runId, pipelineName);
+
+      // Lifecycle: compose is done (mmd source produced); next is compile.
+      runTracker.completePhase(runId, 'compose', !!prepResult?.mmdSource);
+      runTracker.recordPhase(runId, 'compile');
 
       _dbgPipeline('H-B', 'render.js:/render', 'phase_prep_pipeline', {
         runId: runId.slice(0, 8),
@@ -688,7 +804,15 @@ router.post('/render', async (req, res) => {
         diagramName,
         diagramType: finalDiagramType || diagramType,
         mmdSource: finalMmd,
-        metrics: mmdMetrics,
+        metrics: {
+          ...mmdMetrics,
+          stage: 'render',
+          diagram_name: diagramName,
+          artifact_type: 'architecture_diagram',
+          node_count: mmdMetrics?.nodeCount,
+          edge_count: mmdMetrics?.edgeCount,
+          structurally_valid: postRenderValidation.valid,
+        },
         validation: {
           structurallyValid: postRenderValidation.valid,
           svgValid: compileOutcome.result.svg?.valid || false,
@@ -714,6 +838,10 @@ router.post('/render', async (req, res) => {
         provider: enhanceMeta?.provider || 'local',
         elapsed_ms: compiledAt ? Date.now() - new Date(classifiedAt).getTime() : undefined,
       });
+
+      // Close the compile phase before finalize() opens its own.
+      runTracker.completePhase(runId, 'compile', postRenderValidation.valid);
+
       await runTracker.finalize(runId, 'completed');
     }
 
@@ -753,6 +881,7 @@ router.post('/render', async (req, res) => {
         subviews: subviewPaths.length > 0 ? subviewPaths : undefined,
       },
       compiled_source: finalMmd,
+      markdown_source: canonicalMarkdown.markdownSource,
       visual: visualResult ? {
         success: visualResult.success,
         style: visualResult.style || null,
@@ -768,7 +897,11 @@ router.post('/render', async (req, res) => {
         attempts: compileOutcome.attempts,
         repair_changes: compileOutcome.repairChanges,
         max_mode: useMax,
+        depth_score: profile.architectureDepthScore ?? null,
+        depth_tier: profile.architectureDepthTier ?? null,
       },
+      depth_score: profile.architectureDepthScore ?? null,
+      depth_tier: profile.architectureDepthTier ?? null,
       mmd_metrics: mmdMetrics,
       axiom_analysis: {
         pre_compile: {

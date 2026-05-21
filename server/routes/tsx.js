@@ -81,7 +81,14 @@ router.post('/render/tsx', async (req, res) => {
       style: `/flows/${name}/tsx-app/src/index.css`,
       manifest: `/flows/${name}/tsx-app/architecture.manifest.json`,
     };
-    runData.tsx_metrics = compiled.metrics;
+    runData.tsx_metrics = {
+      ...compiled.metrics,
+      stage: 'tsx',
+      diagram_name: name,
+      artifact_type: 'tsx_scaffold',
+      component_count: compiled.metrics.componentCount,
+      boundary_count: compiled.metrics.boundaryCount,
+    };
     await persistRunData(runPath, runData);
 
     logger.info('tsx.compile_complete', {

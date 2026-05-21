@@ -255,4 +255,78 @@ describe('run-tracker', () => {
     assert.ok(runs.length >= 2);
     assert.ok(runs.includes(id2));
   });
+
+  it('records architecture depth on the controller block', async () => {
+    const runId = await runTracker.create({ mode: 'thinking' });
+
+    runTracker.setDepth(runId, {
+      score: 0.72,
+      tier: 'deep',
+      factors: { deepDomainCoverage: 1.0, entityDensity: 0.5 },
+    });
+
+    const m = runTracker.getManifest(runId);
+    assert.equal(m.controller.depth_score, 0.72);
+    assert.equal(m.controller.depth_tier, 'deep');
+    assert.ok(m.controller.depth_factors);
+    assert.equal(m.controller.depth_factors.deepDomainCoverage, 1.0);
+  });
+
+  it('records opseeq_session_id at the top level', async () => {
+    const runId = await runTracker.create({ mode: 'direct' });
+    runTracker.setOpseeqSession(runId, 'sess-abc-123');
+    const m = runTracker.getManifest(runId);
+    assert.equal(m.opseeq_session_id, 'sess-abc-123');
+  });
+
+  it('summarizeAgentCalls aggregates by stage and totals tokens/cost', async () => {
+    const runId = await runTracker.create({ mode: 'direct' });
+
+    runTracker.recordAgentCall(runId, {
+      stage: 'fact_extraction', model: 'gpt-4o-mini', provider: 'premium',
+      promptText: 'a'.repeat(120), outputText: 'b'.repeat(80),
+      latencyMs: 200, success: true,
+    });
+    runTracker.recordAgentCall(runId, {
+      stage: 'fact_extraction', model: 'gpt-4o-mini', provider: 'premium',
+      promptText: 'c'.repeat(140), outputText: 'd'.repeat(90),
+      latencyMs: 300, success: false,
+    });
+    runTracker.recordAgentCall(runId, {
+      stage: 'composition', model: 'gpt-4o', provider: 'premium-max',
+      promptText: 'e'.repeat(800), outputText: 'f'.repeat(500),
+      latencyMs: 1200, success: true,
+    });
+
+    const summary = runTracker.summarizeAgentCalls(runId);
+    assert.ok(summary, 'summary should exist for an in-memory run');
+    assert.equal(summary.totals.agent_calls, 3);
+    assert.ok(summary.totals.tokens_in > 0);
+    assert.ok(summary.totals.tokens_out > 0);
+
+    assert.equal(summary.by_stage.fact_extraction.count, 2);
+    assert.equal(summary.by_stage.fact_extraction.success, 1);
+    assert.equal(summary.by_stage.fact_extraction.failed, 1);
+    assert.equal(summary.by_stage.composition.count, 1);
+
+    // Latency totals should match the sum of recorded latencies.
+    assert.equal(
+      summary.totals.latency_ms,
+      summary.by_stage.fact_extraction.latency_ms + summary.by_stage.composition.latency_ms,
+    );
+  });
+
+  it('addSubview tags entries with artifact_type for downstream consumers', async () => {
+    const runId = await runTracker.create({ mode: 'direct' });
+    const svId = runTracker.addSubview(runId, {
+      viewName: 'auth-flow',
+      viewDescription: 'authentication subview',
+      mmdSource: 'flowchart TD\nA-->B',
+    });
+    assert.ok(svId);
+    const m = runTracker.getManifest(runId);
+    assert.equal(m.subviews.length, 1);
+    assert.equal(m.subviews[0].artifact_type, 'architecture_subview');
+    assert.equal(m.subviews[0].view_name, 'auth-flow');
+  });
 });
