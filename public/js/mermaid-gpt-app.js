@@ -52,12 +52,16 @@
     switchTo(stage) {
       if (!this.isUnlocked(stage)) return false;
       this.state.currentStage = stage;
+      this._persist();
       this._notify();
       return true;
     }
 
     setArtifact(stage, source) {
       this.artifacts[stage] = source || '';
+      // Auto-persist on every artifact change. Critical for ensuring data
+      // is never lost across refresh, agent runs, or tab switches.
+      this._persist();
     }
 
     getArtifact(stage) {
@@ -630,6 +634,12 @@
     if (copilotWrap) delete copilotWrap.dataset.agentFocus;
   }
 
+  // Tracks which stages received new content during the current agent run.
+  // Reset on agent start, populated by `_applyAgentArtifacts`, consumed by
+  // the completion banner when the run finishes.
+  let _agentRunPopulatedStages = new Set();
+  let _agentRunMetrics = null;
+
   function _applyAgentArtifacts(event) {
     const mdSource = event?.md_source || event?.draft_text || '';
     const mmdSource = event?.mmd_source || event?.compiled_source || '';
@@ -655,6 +665,7 @@
       if (prev.trim() !== mdSource.trim()) {
         showToast(`Markdown tab populated (${mdSource.length.toLocaleString()} chars)`, 'success', 3000);
         _markTabHasNewContent('md');
+        _agentRunPopulatedStages.add('md');
       }
     }
 
@@ -670,6 +681,7 @@
       if (prev.trim() !== mmdSource.trim()) {
         showToast(`Mermaid tab populated (${mmdSource.length.toLocaleString()} chars)`, 'success', 3000);
         _markTabHasNewContent('mmd');
+        _agentRunPopulatedStages.add('mmd');
       }
     }
 
@@ -685,6 +697,7 @@
       if (prev.trim() !== tlaSource.trim()) {
         showToast(`TLA+ tab populated (${tlaSource.length.toLocaleString()} chars)`, 'success', 3000);
         _markTabHasNewContent('tla');
+        _agentRunPopulatedStages.add('tla');
       }
     }
 
@@ -700,8 +713,12 @@
       if (prev.trim() !== tsSource.trim()) {
         showToast(`TypeScript tab populated (${tsSource.length.toLocaleString()} chars)`, 'success', 3000);
         _markTabHasNewContent('ts');
+        _agentRunPopulatedStages.add('ts');
       }
     }
+
+    // Track metrics from the most recent render event for the completion banner
+    if (event?.metrics) _agentRunMetrics = event.metrics;
 
     // Deterministic auto-switch — guarantees the user lands on the tab
     // that just received new content, even if the animated walk in
@@ -775,6 +792,10 @@
         target: stage,
         summary: `Populating ${_stageLabel(stage)} artifact from the live agent run`,
       });
+      // Toast user before tab switch so they understand the move
+      if (currentMode !== stage) {
+        showToast(`Agent moving to ${_stageLabel(stage)} tab — populating artifact`, 'info', 2500);
+      }
       await _animateTabHandoff(currentMode, stage);
       if (token !== _agentHandoffToken) return;
       if (currentMode === stage) {
@@ -794,10 +815,21 @@
   //  Mode Selector (save/restore per-tab content)
   // =========================================================================
 
+  // Tracks whether the textarea has loaded the current artifact yet. Prevents
+  // setMode from overwriting a stored artifact with an empty input on the
+  // initial page load (when the textarea hasn't yet been populated).
+  let _inputLoaded = false;
+
   function setMode(mode) {
     if (!orchestrator.isUnlocked(mode)) return;
 
-    orchestrator.setArtifact(currentMode, input.value);
+    // Only save current input back to the current-mode artifact if the
+    // textarea has actually loaded that artifact. On initial load, the
+    // textarea is empty regardless of stored artifacts; saving '' here
+    // would wipe the previously stored content.
+    if (_inputLoaded) {
+      orchestrator.setArtifact(currentMode, input.value);
+    }
 
     currentMode = mode;
     orchestrator.switchTo(mode);
@@ -808,6 +840,7 @@
 
     const cfg = MODES[mode] || MODES.idea;
     input.value = orchestrator.getArtifact(mode);
+    _inputLoaded = true;  // Textarea now reflects the artifact for this mode
     input.placeholder = cfg.placeholder;
     chkEnhance.checked = cfg.enhanceDefault;
     const _btnEnh = document.getElementById('btn-enhance');
@@ -1058,6 +1091,101 @@
     toast.addEventListener('animationend', () => {
       toast.remove();
     });
+  }
+
+  // ---- Document title management ------------------------------------------
+  // Reflects agent state in the browser tab so users know the run is still
+  // active even when they switch to another browser tab. Cleared automatically
+  // when the agent transitions back to idle.
+  const _BASE_TITLE = 'MERMATE';
+  let _titleResetTimer = null;
+
+  function _setDocTitle(prefix, project) {
+    if (_titleResetTimer) { clearTimeout(_titleResetTimer); _titleResetTimer = null; }
+    const proj = (project || '').trim();
+    document.title = prefix
+      ? (proj ? `${prefix} ${proj} · ${_BASE_TITLE}` : `${prefix} ${_BASE_TITLE}`)
+      : _BASE_TITLE;
+  }
+
+  function _resetDocTitleAfter(ms) {
+    if (_titleResetTimer) clearTimeout(_titleResetTimer);
+    _titleResetTimer = setTimeout(() => {
+      document.title = _BASE_TITLE;
+      _titleResetTimer = null;
+    }, ms);
+  }
+
+  // ---- Top-level completion notification ----------------------------------
+  // Shown at the top of the screen when an agent run completes. Lists every
+  // tab that received content, the project name, and provides quick actions
+  // (View, Download, Dismiss). More prominent than a toast because it
+  // represents the end of a long-running operation the user may have
+  // walked away from.
+  function _showCompletionBanner({ project, populatedStages, runId, paths, metrics }) {
+    // Remove any existing banner so we don't stack them
+    const existing = document.querySelector('.completion-banner');
+    if (existing) existing.remove();
+
+    const banner = document.createElement('div');
+    banner.className = 'completion-banner';
+    const stageLabels = (populatedStages || [])
+      .map(s => `<span class="completion-tag" data-stage="${s}">${_stageLabel(s)}</span>`)
+      .join('');
+    const metricsLine = metrics
+      ? `<span class="completion-meta">${metrics.nodeCount || 0} nodes · ${metrics.edgeCount || 0} edges</span>`
+      : '';
+    banner.innerHTML = `
+      <div class="completion-banner-icon">✓</div>
+      <div class="completion-banner-body">
+        <div class="completion-banner-title">Agent run complete${project ? ` — ${project}` : ''}</div>
+        <div class="completion-banner-detail">
+          <span class="completion-meta">Populated:</span>
+          ${stageLabels || '<span class="completion-meta">no new artifacts</span>'}
+          ${metricsLine}
+        </div>
+      </div>
+      <div class="completion-banner-actions">
+        ${(populatedStages && populatedStages.length) ? `<button class="completion-btn completion-btn-primary" data-action="view">View ${_stageLabel(populatedStages[populatedStages.length - 1])}</button>` : ''}
+        ${paths ? `<button class="completion-btn" data-action="download">Download</button>` : ''}
+        <button class="completion-btn-close" aria-label="Dismiss">&times;</button>
+      </div>
+    `;
+
+    // View action — switch to the highest stage that was populated
+    banner.querySelector('[data-action="view"]')?.addEventListener('click', () => {
+      const lastStage = populatedStages[populatedStages.length - 1];
+      if (lastStage && orchestrator.isUnlocked(lastStage)) {
+        setMode(lastStage);
+      }
+      _dismissCompletionBanner(banner);
+    });
+
+    // Download action — open the bundle for the run
+    banner.querySelector('[data-action="download"]')?.addEventListener('click', () => {
+      if (runId) {
+        window.open(`/api/runs/${runId}/bundle`, '_blank');
+      }
+    });
+
+    // Close button
+    banner.querySelector('.completion-banner-close, .completion-btn-close')?.addEventListener('click', () => {
+      _dismissCompletionBanner(banner);
+    });
+
+    document.body.appendChild(banner);
+    // Animate in
+    requestAnimationFrame(() => banner.classList.add('is-visible'));
+
+    // Auto-dismiss after 12s — long enough to read but not stuck on screen
+    setTimeout(() => _dismissCompletionBanner(banner), 12000);
+  }
+
+  function _dismissCompletionBanner(banner) {
+    if (!banner || banner.classList.contains('is-exiting')) return;
+    banner.classList.add('is-exiting');
+    banner.addEventListener('transitionend', () => banner.remove(), { once: true });
+    setTimeout(() => banner.remove(), 600);  // safety fallback
   }
 
   // ---- Stage progress tracker ---------------------------------------------
@@ -2336,6 +2464,24 @@
         input.readOnly = false;
         showToast('Agent workflow complete', 'success', 3500);
         syncUiGuidance();
+
+        // Top-level completion notification — surfaces the run summary even
+        // if the user has switched away to another browser tab. Lists every
+        // stage populated and offers one-click navigation/download actions.
+        const populated = Array.from(_agentRunPopulatedStages);
+        const projectName = (diagramNameInput?.value?.trim()) || currentDiagramName || '';
+        _showCompletionBanner({
+          project: projectName,
+          populatedStages: populated,
+          runId: currentRunId,
+          paths: currentPaths,
+          metrics: _agentRunMetrics,
+        });
+
+        // Update the browser tab title so users in other tabs see the
+        // completion. Reverts to MERMATE after 8s.
+        _setDocTitle('✓ Complete —', projectName);
+        _resetDocTitleAfter(8000);
       },
       onError: (msg) => {
         agentState = 'idle';
@@ -2348,10 +2494,26 @@
         input.readOnly = false;
         setLoading(false);
         syncUiGuidance();
+
+        // Surface error in browser tab title so it's visible from other tabs
+        const projectName = (diagramNameInput?.value?.trim()) || currentDiagramName || '';
+        _setDocTitle('⚠ Agent error —', projectName);
+        _resetDocTitleAfter(6000);
       },
       onStateChange: (state) => {
         agentState = state;
-        if (state === 'running') { notesDirty = false; btnAgentRun.textContent = 'Pause Agent'; btnAgentRun.classList.add('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = false; }
+        if (state === 'running') {
+          notesDirty = false;
+          btnAgentRun.textContent = 'Pause Agent';
+          btnAgentRun.classList.add('is-stopping');
+          btnAgentRun.disabled = false;
+          btnAgentRun.hidden = false;
+          // Reset completion tracking and reflect agent activity in the title
+          _agentRunPopulatedStages = new Set();
+          _agentRunMetrics = null;
+          const projectName = (diagramNameInput?.value?.trim()) || currentDiagramName || '';
+          _setDocTitle('⚡ Agent running —', projectName);
+        }
         else if (state === 'awaiting_notes') { input.readOnly = false; btnAgentRun.hidden = true; }
         else if (state === 'finalizing') { notesDirty = false; input.readOnly = true; btnAgentRun.hidden = true; setLoading(true, 'text'); }
         else if (state === 'idle') { btnAgentRun.textContent = agent ? 'Continue Agent' : 'Run Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = !agentModeActive; btnRender.hidden = agentModeActive; input.readOnly = false; setLoading(false); }

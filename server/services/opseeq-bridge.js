@@ -78,7 +78,7 @@ function getUrl() { return OPSEEQ_URL; }
  *      events server-side via the (run_id, stage, ts) tuple, so dual
  *      transport is safe and gives us full at-least-once delivery.
  */
-async function reportStage(runId, stageEvent) {
+function reportStage(runId, stageEvent) {
   if (!runId) return;
   const event = { ...stageEvent, ts: Date.now() };
   // Always persist locally
@@ -94,15 +94,17 @@ async function reportStage(runId, stageEvent) {
   // Best-effort HTTP forward — guaranteed at-least-once delivery for clients
   // that haven't enabled WS. When both transports are active, the Opseeq
   // server deduplicates by (run_id, stage, ts).
-  try {
-    await _fetch('/api/mermate/stage', {
-      method: 'POST',
-      body: JSON.stringify({ run_id: runId, ...event }),
-      timeoutMs: 3000,
-    });
-  } catch (err) {
+  // FIRE-AND-FORGET: never block the calling agent flow on Opseeq availability.
+  // When Opseeq is offline, the await would still complete fast (ECONNREFUSED),
+  // but the timeout-based fallback could add 3s of latency. Detaching ensures
+  // the agent stage progression is independent of Opseeq health.
+  void _fetch('/api/mermate/stage', {
+    method: 'POST',
+    body: JSON.stringify({ run_id: runId, ...event }),
+    timeoutMs: 3000,
+  }).catch((err) => {
     logger.debug('opseeq.report_stage_failed', { runId: runId.slice(0, 8), stage: stageEvent?.stage, error: err.message });
-  }
+  });
 }
 
 /**

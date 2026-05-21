@@ -271,6 +271,11 @@ router.post('/agent/run', async (req, res) => {
     try { res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`); } catch {}
   }
 
+  // Immediate feedback: emit ingest stage event BEFORE slow setup so the
+  // client sees progression even if runTracker.create or analyze take 1-2s.
+  // This prevents the "Starting agent..." message from appearing stuck.
+  sendEvent('stage', { stage: 'ingest', message: `Reading ${current_stage || 'idea'} input and preparing ${mode} mode...` });
+
   const runId = telemetry.createRun(`agent:${mode}`);
   const auditId = auditTracker.createRun(runId, `agent:${mode}`);
 
@@ -303,7 +308,11 @@ router.post('/agent/run', async (req, res) => {
 
   try {
     auditTracker.emit(auditId, 'agent:stage_enter', { stage: 'ingest' });
-    sendEvent('stage', { stage: 'ingest', message: 'Reading prompt and mode configuration...' });
+    sendEvent('narration', {
+      message: `Configured ${mode} mode for ${currentStage} stage`,
+      source: 'system',
+      eventType: 'agent:configured',
+    });
 
     // Surface the architecture depth decision as soon as it's known so
     // Opseeq Studio can log it without having to wait for the planning stage.
