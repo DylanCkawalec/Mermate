@@ -2259,11 +2259,12 @@
 
   // ---- Enhance button ------------------------------------------------------
   // Behavior depends on the active input mode:
-  //   • idea  → ALWAYS immediate action. Click fires copilot.enhance() right
-  //             away (rainbow ring + textarea sheen visualize the work).
-  //             Insufficient text shows a brief tooltip and aborts.
-  //   • md/mmd → Toggle render-time refinement. The button stays `active` to
-  //             tell the user "next Render will refine the source".
+  //   • idea          → Click fires copilot.enhance() right away (rainbow
+  //                     ring + textarea sheen visualize the work).
+  //   • md/mmd/tla/ts → Click fires direct enhance via /api/copilot/enhance,
+  //                     replacing the textarea with the refined text.
+  //                     This is what the user expects when they click the
+  //                     Enhance button on any tab — see request 2026-05-21.
   const _btnEnhanceClick = document.getElementById('btn-enhance');
   if (_btnEnhanceClick) {
     _btnEnhanceClick.addEventListener('click', () => {
@@ -2277,13 +2278,93 @@
         copilot.enhance();
         return;
       }
-      // md / mmd: render-time refinement toggle
-      chkEnhance.checked = !chkEnhance.checked;
-      _btnEnhanceClick.classList.toggle('active', chkEnhance.checked);
-      _btnEnhanceClick.title = chkEnhance.checked
-        ? 'Will refine on next Render'
-        : 'Refine this source on Render';
+      // md / mmd / tla / ts: directly enhance the current textarea content
+      // via the same /api/copilot/enhance endpoint the idea-mode copilot uses.
+      _enhanceCurrentTab();
     });
+  }
+
+  // Direct-enhance for non-idea tabs. Calls /api/copilot/enhance with the
+  // current textarea content, then replaces the textarea with the refined
+  // result. Auto-saves to the orchestrator artifact for the current stage so
+  // the enhanced text persists across refresh.
+  let _enhanceInFlight = false;
+  async function _enhanceCurrentTab() {
+    if (_enhanceInFlight) return;  // prevent double-clicks
+    const sourceText = input.value;
+    const trimmed = sourceText.trim();
+    if (trimmed.length < 10) {
+      showToast('Type or paste at least 10 characters to enhance', 'info', 3000);
+      return;
+    }
+    if (input.readOnly) {
+      showToast('Cannot enhance while agent is running', 'info', 3000);
+      return;
+    }
+
+    _enhanceInFlight = true;
+    // Reuse the existing animated 'is-enhancing' class (rainbow halo + pulse)
+    // for visual consistency with the idea-mode copilot enhancement.
+    _btnEnhanceClick?.classList.add('is-enhancing');
+    showToast(`Enhancing ${_stageLabel(currentMode)} (${trimmed.length.toLocaleString()} chars)…`, 'info', 3500);
+
+    const startMs = Date.now();
+    try {
+      const controller = new AbortController();
+      // Scale timeout with input size: ~1 KB per second + 30s base, capped at 120s
+      const timeoutMs = Math.min(120000, 30000 + Math.floor(trimmed.length / 100) * 1000);
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+      const res = await fetch(`${COPILOT_API_BASE}/enhance`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stage: 'copilot_enhance',
+          content_state: currentMode === 'mmd' ? 'mmd' : 'text',
+          mode: currentMode,
+          enhance_mode: 'full',
+          full_text: trimmed.slice(0, 80000),
+          selected_text: null,
+          preceding_context: '',
+          following_context: '',
+          previous_text: '',
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.details || err.error || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const enhancedSource = (data.enhanced_source || '').trim();
+
+      if (!enhancedSource || enhancedSource === trimmed) {
+        showToast('Enhancement returned no changes — text was already optimal', 'info', 4000);
+        return;
+      }
+
+      // Apply the enhancement to the textarea and persist
+      input.value = enhancedSource;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      orchestrator.setArtifact(currentMode, enhancedSource);  // auto-persists
+
+      const elapsedSec = ((Date.now() - startMs) / 1000).toFixed(1);
+      const charDelta = enhancedSource.length - trimmed.length;
+      const deltaStr = charDelta >= 0 ? `+${charDelta.toLocaleString()}` : charDelta.toLocaleString();
+      showToast(
+        `Enhanced ${_stageLabel(currentMode)} — ${enhancedSource.length.toLocaleString()} chars (${deltaStr}, ${elapsedSec}s, ${data.flavor || 'refine'})`,
+        'success',
+        5000,
+      );
+    } catch (err) {
+      const msg = err.name === 'AbortError' ? 'Enhancement timed out' : (err.message || 'Enhancement failed');
+      showToast(`Enhance failed — ${msg}`, 'error', 6000);
+    } finally {
+      _enhanceInFlight = false;
+      _btnEnhanceClick?.classList.remove('is-enhancing');
+    }
   }
 
   // ---- Top-bar New Diagram button (mirrors sidebar btn-new-diagram) ----
