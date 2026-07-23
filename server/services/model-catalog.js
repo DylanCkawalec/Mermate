@@ -151,42 +151,73 @@ function canonicalStage(legacyName) {
 // ---- Context Window Profiles -----------------------------------------------
 // Predicted token budgets per stage for queue ordering and prefetch.
 
+// Updated for GPT-5.6 reasoning models — output estimates include reasoning token overhead.
+// Reasoning models burn 500-5000 tokens on invisible reasoning before producing output.
 const CONTEXT_PROFILE = Object.freeze({
-  [Stage.EXTRACT_FACTS]:   { avgIn: 2000,  avgOut: 1500  },
-  [Stage.PLAN_DIAGRAM]:    { avgIn: 3000,  avgOut: 2000  },
-  [Stage.COMPOSE_BRANCH]:  { avgIn: 4000,  avgOut: 6000  },
-  [Stage.COMPOSE_MAX]:     { avgIn: 8000,  avgOut: 12000 },
-  [Stage.COMPOSE_MERGE]:   { avgIn: 12000, avgOut: 12000 },
-  [Stage.REPAIR_SEMANTIC]: { avgIn: 5000,  avgOut: 4000  },
-  [Stage.REPAIR_MODEL]:    { avgIn: 3000,  avgOut: 3000  },
-  [Stage.REPAIR_TRACE]:    { avgIn: 3000,  avgOut: 3000  },
-  [Stage.DECOMPOSE_VIEWS]: { avgIn: 3000,  avgOut: 4000  },
-  [Stage.RENDER_PREPARE]:  { avgIn: 2000,  avgOut: 5000  },
-  [Stage.COPILOT_SUGGEST]: { avgIn: 500,   avgOut: 100   },
-  [Stage.COPILOT_ENHANCE]: { avgIn: 3000,  avgOut: 6000  },
-  [Stage.NARRATE_SUMMARY]: { avgIn: 800,   avgOut: 200   },
-  [Stage.COMPOSE_TLA]:     { avgIn: 4000,  avgOut: 6000  },
-  [Stage.REPAIR_TLA]:      { avgIn: 5000,  avgOut: 5000  },
-  [Stage.VALIDATE_TLA]:    { avgIn: 2500,  avgOut: 1000  },
-  [Stage.COMPOSE_TS]:      { avgIn: 6000,  avgOut: 9000  },
-  [Stage.REPAIR_TS]:       { avgIn: 7000,  avgOut: 7000  },
-  [Stage.VALIDATE_TS]:     { avgIn: 2500,  avgOut: 1500  },
-  [Stage.COMPOSE_RUST]:    { avgIn: 8000,  avgOut: 12000 },
-  [Stage.REPAIR_RUST]:     { avgIn: 8000,  avgOut: 8000  },
+  [Stage.EXTRACT_FACTS]:   { avgIn: 2000,  avgOut: 3000  },   // +reasoning for structured extraction
+  [Stage.PLAN_DIAGRAM]:    { avgIn: 3000,  avgOut: 4000  },   // +reasoning for structural planning
+  [Stage.COMPOSE_BRANCH]:  { avgIn: 4000,  avgOut: 12000 },   // +reasoning for creative composition
+  [Stage.COMPOSE_MAX]:     { avgIn: 8000,  avgOut: 24000 },   // +heavy reasoning for final quality
+  [Stage.COMPOSE_MERGE]:   { avgIn: 12000, avgOut: 24000 },   // +heavy reasoning for merge synthesis
+  [Stage.REPAIR_SEMANTIC]: { avgIn: 5000,  avgOut: 8000  },   // +reasoning for trace analysis
+  [Stage.REPAIR_MODEL]:    { avgIn: 3000,  avgOut: 6000  },
+  [Stage.REPAIR_TRACE]:    { avgIn: 3000,  avgOut: 6000  },
+  [Stage.DECOMPOSE_VIEWS]: { avgIn: 3000,  avgOut: 8000  },   // +reasoning for multi-view planning
+  [Stage.RENDER_PREPARE]:  { avgIn: 2000,  avgOut: 10000 },   // +reasoning for one-shot generation
+  [Stage.COPILOT_SUGGEST]: { avgIn: 500,   avgOut: 500   },   // minimal reasoning
+  [Stage.COPILOT_ENHANCE]: { avgIn: 3000,  avgOut: 12000 },   // +reasoning for enhancement
+  [Stage.NARRATE_SUMMARY]: { avgIn: 800,   avgOut: 500   },
+  [Stage.COMPOSE_TLA]:     { avgIn: 4000,  avgOut: 24000 },   // +heavy reasoning for formal spec synthesis
+  [Stage.REPAIR_TLA]:      { avgIn: 5000,  avgOut: 10000 },   // +reasoning for SANY error repair
+  [Stage.VALIDATE_TLA]:    { avgIn: 2500,  avgOut: 3000  },
+  [Stage.COMPOSE_TS]:      { avgIn: 6000,  avgOut: 18000 },   // +reasoning for code generation
+  [Stage.REPAIR_TS]:       { avgIn: 7000,  avgOut: 14000 },
+  [Stage.VALIDATE_TS]:     { avgIn: 2500,  avgOut: 3000  },
+  [Stage.COMPOSE_RUST]:    { avgIn: 8000,  avgOut: 24000 },
+  [Stage.REPAIR_RUST]:     { avgIn: 8000,  avgOut: 16000 },
   [Stage.GENERATE_ICON]:   { avgIn: 500,   avgOut: 500   },
 });
 
-const MAX_CONTEXT_WINDOW = 128000;
+// Per-model context windows (from OpenAI API docs, July 2026)
+const MODEL_CONTEXT_WINDOW = Object.freeze({
+  'gpt-5.6-sol':    1_050_000,   // GPT-5.6 Sol — frontier reasoning
+  'gpt-5.6-terra':  1_050_000,   // GPT-5.6 Terra — balanced reasoning
+  'gpt-5.6-luna':   1_050_000,   // GPT-5.6 Luna — fast, inexpensive
+  'gpt-5.6':        1_050_000,
+  'gpt-5.4':        1_050_000,
+  'gpt-5.2':          400_000,
+  'gpt-4.1':       1_047_576,
+  'gpt-4.1-mini':  1_047_576,
+  'gpt-4.1-nano':  1_047_576,
+  'gpt-4o':          128_000,
+  'o3':              200_000,
+  'o3-mini':         200_000,
+  'o1':              200_000,
+});
 
-function estimateContext(stage, inputText) {
+const MAX_CONTEXT_WINDOW = 1_050_000;  // Updated for GPT-5.6 models
+
+function getContextWindow(model) {
+  if (!model) return MAX_CONTEXT_WINDOW;
+  // Check exact match first, then prefix match
+  if (MODEL_CONTEXT_WINDOW[model]) return MODEL_CONTEXT_WINDOW[model];
+  for (const [key, val] of Object.entries(MODEL_CONTEXT_WINDOW)) {
+    if (model.startsWith(key)) return val;
+  }
+  return MAX_CONTEXT_WINDOW;
+}
+
+function estimateContext(stage, inputText, model) {
   const canonical = STAGE_LEGACY_MAP[stage] || stage;
   const profile = CONTEXT_PROFILE[canonical] || { avgIn: 2000, avgOut: 4000 };
   const actualIn = inputText ? Math.ceil(inputText.length / CHARS_PER_TOKEN) : profile.avgIn;
+  const ctxWindow = getContextWindow(model);
   return {
     inputTokensEst:     actualIn,
     outputTokensEst:    profile.avgOut,
     totalTokensEst:     actualIn + profile.avgOut,
-    contextUtilization: actualIn / MAX_CONTEXT_WINDOW,
+    contextUtilization: actualIn / ctxWindow,
+    contextWindow:      ctxWindow,
   };
 }
 
@@ -248,6 +279,8 @@ module.exports = {
   canonicalStage,
   CONTEXT_PROFILE,
   estimateContext,
+  getContextWindow,
+  MODEL_CONTEXT_WINDOW,
   Priority,
   STAGE_PRIORITY,
   stagePriority,

@@ -926,7 +926,7 @@ function buildMaxCompositionUserPrompt(baselineMmd, facts, plan, originalSource)
   const parts = [];
 
   parts.push(`[ORIGINAL USER INTENT]`);
-  parts.push(originalSource.slice(0, 2000));
+  parts.push(originalSource.slice(0, 10000));
   parts.push('');
   parts.push(`[ARCHITECTURE FACTS]`);
   parts.push(JSON.stringify(facts, null, 2));
@@ -1020,11 +1020,11 @@ function buildMergeCompositionPrompt() {
  * @param {Array} subviewMmds - [{viewName, mmdSource, score, ...}]
  * @param {string} originalSource
  * @param {object} [opts]
- * @param {number} [opts.maxInputChars] - approximate char budget (default ~350K ≈ 100K tokens)
+ * @param {number} [opts.maxInputChars] - approximate char budget (default ~800K ≈ 230K tokens, fits gpt-5.6 1.05M context)
  * @returns {string}
  */
 function buildMergeCompositionUserPrompt(subviewMmds, originalSource, opts = {}) {
-  const maxChars = opts.maxInputChars || 350_000;
+  const maxChars = opts.maxInputChars || 800_000;
   const parts = [];
   let charBudget = maxChars;
 

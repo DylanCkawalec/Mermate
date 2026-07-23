@@ -339,7 +339,7 @@ async function renderPrepare(source, profile, useMax = false) {
   if (rt) {
     const stageLabel = useMax ? 'render_prepare_max' : 'render_prepare';
     rt.addStage(_activeRunId, stageLabel);
-    const contextEst = rmBridge.estimateContextSize('render_prepare', userPrompt);
+    const contextEst = rmBridge.estimateContextSize('render_prepare', userPrompt, result.model);
     rt.recordAgentCall(_activeRunId, {
       stage: 'render_prepare', model: result.model, provider: result.provider,
       promptText: userPrompt, outputText: result.output || '',
@@ -507,7 +507,7 @@ async function renderHPCGoT(source, profile, useMax = false) {
   stagesExecuted.push('fact_extraction');
 
   if (rt) {
-    const factContextEst = rmBridge.estimateContextSize('fact_extraction', factUserPrompt);
+    const factContextEst = rmBridge.estimateContextSize('fact_extraction', factUserPrompt, factResult.model);
     rt.recordAgentCall(_activeRunId, {
       stage: 'fact_extraction', model: factResult.model, provider: factResult.provider,
       promptText: factUserPrompt, outputText: factResult.output || '',
@@ -566,7 +566,7 @@ async function renderHPCGoT(source, profile, useMax = false) {
   stagesExecuted.push('diagram_plan');
 
   if (rt) {
-    const planContextEst = rmBridge.estimateContextSize('diagram_plan', planUserPrompt);
+    const planContextEst = rmBridge.estimateContextSize('diagram_plan', planUserPrompt, planResult.model);
     rt.recordAgentCall(_activeRunId, {
       stage: 'diagram_plan', model: planResult.model, provider: planResult.provider,
       promptText: planUserPrompt, outputText: planResult.output || '',
@@ -622,8 +622,8 @@ async function renderHPCGoT(source, profile, useMax = false) {
 
   if (rt) {
     const compLatency = Date.now() - compCallStart;
-    const compContextEstA = rmBridge.estimateContextSize('composition', compUserPrompt);
-    const compContextEstB = rmBridge.estimateContextSize('composition', compUserPrompt + branchBDirective);
+    const compContextEstA = rmBridge.estimateContextSize('composition', compUserPrompt, compResultA.model);
+    const compContextEstB = rmBridge.estimateContextSize('composition', compUserPrompt + branchBDirective, compResultB.model);
     rt.recordAgentCall(_activeRunId, {
       stage: 'composition', role: 'branch_a', model: compResultA.model, provider: compResultA.provider,
       promptText: compUserPrompt, outputText: compResultA.output || '',
@@ -775,7 +775,7 @@ async function renderHPCGoT(source, profile, useMax = false) {
 
     if (rt) {
       rt.addStage(_activeRunId, `semantic_repair_${repairAttempt}`);
-      const repairContextEst = rmBridge.estimateContextSize('semantic_repair', repairUserPrompt);
+      const repairContextEst = rmBridge.estimateContextSize('semantic_repair', repairUserPrompt, repairResult.model);
       rt.recordAgentCall(_activeRunId, {
         stage: 'semantic_repair', model: repairResult.model, provider: repairResult.provider,
         promptText: repairUserPrompt, outputText: repairResult.output || '',
@@ -938,7 +938,7 @@ async function renderMaxUpgrade(source, profile) {
   const stagesExecuted = [...baselineStages, 'max_composition'];
 
   if (rt) {
-    const maxContextEst = rmBridge.estimateContextSize('max_composition', maxUserPrompt);
+    const maxContextEst = rmBridge.estimateContextSize('max_composition', maxUserPrompt, maxResult.model);
     rt.recordAgentCall(_activeRunId, {
       stage: 'max_composition', model: maxResult.model, provider: maxResult.provider,
       promptText: maxUserPrompt, outputText: maxResult.output || '',
@@ -1122,7 +1122,7 @@ async function decomposeAndRender(source, profile, useMax = false) {
   stagesExecuted.push('decompose');
 
   if (rt) {
-    const decompContextEst = rmBridge.estimateContextSize('decompose', decomposePrompt);
+    const decompContextEst = rmBridge.estimateContextSize('decompose', decomposePrompt, decomposeResult.model);
     rt.recordAgentCall(_activeRunId, {
       stage: 'decompose', model: decomposeResult.model, provider: decomposeResult.provider,
       promptText: decomposePrompt, outputText: decomposeResult.output || '',
@@ -1248,7 +1248,7 @@ async function decomposeAndRender(source, profile, useMax = false) {
 
     let mergeCallId = null;
     if (rt) {
-      const mergeContextEst = rmBridge.estimateContextSize('merge_composition', mergePrompt);
+      const mergeContextEst = rmBridge.estimateContextSize('merge_composition', mergePrompt, mergeResult.model);
       mergeCallId = rt.recordAgentCall(_activeRunId, {
         stage: 'merge_composition', model: mergeResult.model, provider: mergeResult.provider,
         promptText: mergePrompt, outputText: mergeResult.output || '',

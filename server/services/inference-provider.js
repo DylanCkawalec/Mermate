@@ -43,6 +43,67 @@ const _useDirectFallback = OPENAI_BASE_URL !== OPENAI_DIRECT_URL;
 let _traceId = null;
 function setTraceId(id) { _traceId = id; _fallbackEvents.length = 0; }
 
+// Forward Reasoning Memory — per-run accumulator of agent insights.
+// Each stage appends a compact reasoning summary that downstream stages
+// receive as part of their system prompt. This creates the shared
+// "reasoning log" that lets GoT agents communicate across the pipeline.
+//
+// Structure: [{ stage, model, insight, timestamp }]
+// The insight is a 1-3 sentence summary of what the agent determined
+// (entities found, decisions made, invariants checked, failures detected).
+const _reasoningMemory = [];
+const REASONING_MEMORY_MAX_ENTRIES = 8;
+const REASONING_MEMORY_MAX_CHARS = 4000;
+
+function clearReasoningMemory() { _reasoningMemory.length = 0; }
+
+function appendReasoningMemory(stage, model, output) {
+  if (!output || output.length < 50) return;
+  // Extract a compact insight from the output
+  let insight = '';
+  // For JSON outputs, extract key structural facts
+  if (output.trim().startsWith('{') || output.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(output.trim().replace(/^```json\s*|\s*```$/g, ''));
+      if (parsed.entities) insight = `Found ${parsed.entities.length} entities, ${(parsed.relationships || []).length} relationships`;
+      else if (parsed.nodes) insight = `Planned ${parsed.nodes.length} nodes, ${(parsed.edges || []).length} edges, ${(parsed.subgraphs || []).length} subgraphs`;
+      else if (parsed.viewName) insight = `Decomposed view: ${parsed.viewName}`;
+      else insight = output.slice(0, 200).replace(/\n/g, ' ');
+    } catch {
+      insight = output.slice(0, 200).replace(/\n/g, ' ');
+    }
+  } else {
+    // For text outputs (Mermaid, TLA+), extract structural summary
+    const lines = output.split('\n').filter(l => l.trim() && !l.trim().startsWith('%%') && !l.trim().startsWith('---'));
+    const nodeCount = (output.match(/\[[\w"' ]+\]|\([\w"' ]+\)|\{[\w"' ]+\}/g) || []).length;
+    const edgeCount = (output.match(/-->|-.->|==>/g) || []).length;
+    if (nodeCount > 0 || edgeCount > 0) {
+      insight = `Generated ${nodeCount} nodes, ${edgeCount} edges`;
+    } else {
+      insight = lines.slice(0, 3).join(' ').slice(0, 200);
+    }
+  }
+
+  _reasoningMemory.push({ stage, model, insight, timestamp: Date.now() });
+  // Trim to max entries, keeping most recent
+  while (_reasoningMemory.length > REASONING_MEMORY_MAX_ENTRIES) {
+    _reasoningMemory.shift();
+  }
+}
+
+function getReasoningMemoryBlock() {
+  if (_reasoningMemory.length === 0) return '';
+  const lines = _reasoningMemory.map(e =>
+    `[${e.stage}|${e.model}] ${e.insight}`
+  );
+  const block = lines.join('\n');
+  // Truncate to max chars, keeping most recent
+  if (block.length > REASONING_MEMORY_MAX_CHARS) {
+    return block.slice(-REASONING_MEMORY_MAX_CHARS);
+  }
+  return block;
+}
+
 // Architecture depth tier for the active run — `shallow` | `medium` | `deep`.
 // Set by render.js before the pipeline starts; cleared in `finally`.
 // Drives _selectModelForStage so deeper architectures escalate the final
@@ -116,8 +177,8 @@ const STAGE_REASONING_MAP = Object.freeze({
   fact_extraction:     'low',       // simple extraction, low latency
   diagram_plan:        'medium',    // structural reasoning needed
   composition:         'high',      // creative Mermaid generation
-  max_composition:     'xhigh',     // final quality synthesis
-  merge_composition:   'xhigh',     // complex merge of subviews
+  max_composition:     'high',      // final quality synthesis
+  merge_composition:   'high',      // complex merge of subviews
   copilot_enhance:     'medium',    // balanced enhancement
   copilot_suggest:     'low',       // fast autocomplete
   semantic_repair:     'low',       // targeted fix
@@ -130,18 +191,189 @@ const STAGE_REASONING_MAP = Object.freeze({
   validate_ts:         'low',       // validation commentary
   compose_rust:        'high',      // Rust codegen
   repair_rust:         'medium',    // cargo error repair
-  compose_tla:         'xhigh',     // formal specification — maximum rigor
+  compose_tla:         'high',      // formal specification — deep rigor, balanced latency
   repair_tla:          'medium',    // targeted SANY error fixing
 });
 
-// Stages that benefit from Structured Outputs (json_schema enforcement).
-// These stages produce structured data, not free-form text.
-const STAGE_STRUCTURED_OUTPUT = new Set([
+// Stages that produce structured JSON output.
+// Tier 1: json_schema — exact schema enforced by the API, zero parsing failures.
+// Tier 2: json_object — valid JSON guaranteed, shape validated downstream.
+// Text stages use no response_format — they need free-form reasoning output.
+const STAGE_JSON_SCHEMA = new Set([
   'fact_extraction',
   'diagram_plan',
+  'decompose',
+  'compose_ts',
+  'repair_ts',
+]);
+
+const STAGE_JSON_OBJECT = new Set([
   'semantic_repair',
   'validate_ts',
+  'copilot_enhance',
 ]);
+
+// Union for backward compat — any stage that needs structured output
+const STAGE_STRUCTURED_OUTPUT = new Set([...STAGE_JSON_SCHEMA, ...STAGE_JSON_OBJECT]);
+
+// JSON schemas for Tier 1 stages — enforced by OpenAI structured outputs.
+// This eliminates JSON parsing failures and reduces reasoning overhead
+// (the model doesn't waste tokens guessing the output shape).
+const STAGE_JSON_SCHEMAS = {
+  fact_extraction: {
+    type: 'object',
+    properties: {
+      entities: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            type: { type: 'string', enum: ['actor', 'service', 'store', 'gateway', 'broker', 'cache', 'queue', 'external', 'decision', 'boundary'] },
+            responsibility: { type: 'string' },
+          },
+          required: ['name', 'type', 'responsibility'],
+          additionalProperties: false,
+        },
+      },
+      relationships: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            from: { type: 'string' },
+            to: { type: 'string' },
+            verb: { type: 'string' },
+            edgeType: { type: 'string' },
+          },
+          required: ['from', 'to', 'verb', 'edgeType'],
+          additionalProperties: false,
+        },
+      },
+      boundaries: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            members: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['name', 'members'],
+          additionalProperties: false,
+        },
+      },
+      failurePaths: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            trigger: { type: 'string' },
+            condition: { type: 'string' },
+            handler: { type: 'string' },
+            recovery: { type: 'string' },
+          },
+          required: ['trigger', 'condition', 'handler', 'recovery'],
+          additionalProperties: false,
+        },
+      },
+      diagramType: { type: 'string', enum: ['flowchart', 'sequence', 'state', 'er', 'gantt', 'mindmap'] },
+    },
+    required: ['entities', 'relationships', 'boundaries', 'failurePaths', 'diagramType'],
+    additionalProperties: false,
+  },
+
+  diagram_plan: {
+    type: 'object',
+    properties: {
+      directive: { type: 'string' },
+      nodes: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            label: { type: 'string' },
+            shape: { type: 'string', enum: ['rectangle', 'stadium', 'cylinder', 'diamond', 'hexagon', 'rounded'] },
+            entityRef: { type: 'string' },
+          },
+          required: ['id', 'label', 'shape', 'entityRef'],
+          additionalProperties: false,
+        },
+      },
+      edges: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            from: { type: 'string' },
+            to: { type: 'string' },
+            label: { type: 'string' },
+            style: { type: 'string', enum: ['solid', 'dashed', 'thick'] },
+            relationRef: { type: 'string' },
+          },
+          required: ['from', 'to', 'label', 'style', 'relationRef'],
+          additionalProperties: false,
+        },
+      },
+      subgraphs: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            title: { type: 'string' },
+            nodeIds: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['id', 'title', 'nodeIds'],
+          additionalProperties: false,
+        },
+      },
+      classDefs: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            style: { type: 'string' },
+          },
+          required: ['name', 'style'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['directive', 'nodes', 'edges', 'subgraphs', 'classDefs'],
+    additionalProperties: false,
+  },
+
+  decompose: {
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: {
+        viewName: { type: 'string' },
+        viewDescription: { type: 'string' },
+        suggestedType: { type: 'string' },
+        entities: { type: 'array', items: { type: 'string' } },
+        relationships: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['viewName', 'viewDescription', 'suggestedType', 'entities', 'relationships'],
+      additionalProperties: false,
+    },
+  },
+};
+
+// TS enrichment/repair schema — shared shape for compose_ts and repair_ts
+const TS_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    ts_source: { type: 'string' },
+    harness_source: { type: 'string' },
+  },
+  required: ['ts_source'],
+  additionalProperties: false,
+};
+STAGE_JSON_SCHEMAS.compose_ts = TS_OUTPUT_SCHEMA;
+STAGE_JSON_SCHEMAS.repair_ts = TS_OUTPUT_SCHEMA;
 
 // Stages that benefit most from local AI bootstrapping. The premium chain
 // remains a fallback when local providers are unavailable, but giving local
@@ -189,26 +421,63 @@ function _isStructuredStage(stage) {
   return STAGE_STRUCTURED_OUTPUT.has(stage);
 }
 
-// P5: Per-stage token caps — right-size output budget to reduce waste
+// Resolve the response_format for a given stage.
+// Returns { type: 'json_schema', json_schema: { ... } } for Tier 1 stages,
+// { type: 'json_object' } for Tier 2, or undefined for text stages.
+function _resolveResponseFormat(stage, override) {
+  if (override) return override;
+  if (STAGE_JSON_SCHEMA.has(stage) && STAGE_JSON_SCHEMAS[stage]) {
+    return {
+      type: 'json_schema',
+      json_schema: {
+        name: stage,
+        schema: STAGE_JSON_SCHEMAS[stage],
+        strict: true,
+      },
+    };
+  }
+  if (STAGE_JSON_OBJECT.has(stage)) {
+    return { type: 'json_object' };
+  }
+  return undefined;
+}
+
+// P5: Per-stage token caps — right-size output budget to reduce waste.
+// These caps include reasoning tokens for GPT-5.6 reasoning models.
+// OpenAI recommends reserving at least 25K tokens for xhigh reasoning.
+// Stages using xhigh/high reasoning get larger budgets; fast stages get less.
 const STAGE_TOKEN_CAP = Object.freeze({
-  fact_extraction:     2048,
-  diagram_plan:        3072,
-  composition:         8192,
-  semantic_repair:     4096,
-  copilot_suggest:     128,
-  copilot_enhance:     8192,
-  decompose:           6144,
-  render_prepare:      8192,
-  model_repair:        4096,
-  max_composition:     16384,
-  merge_composition:   16384,
-  repair_from_trace:   4096,
-  compose_ts:          16384,
-  repair_ts:           8192,
-  validate_ts:         4096,
-  compose_tla:         16384,
-  repair_tla:          8192,
+  fact_extraction:     8192,   // structured JSON — low reasoning
+  diagram_plan:        8192,   // structured JSON — low reasoning
+  composition:         16384,  // creative Mermaid — medium reasoning
+  semantic_repair:     8192,   // targeted JSON fix — low reasoning
+  copilot_suggest:     1024,   // short completion — minimal reasoning
+  copilot_enhance:     16384,  // full enhancement — medium reasoning
+  decompose:           12288,  // multi-view reasoning — medium
+  render_prepare:      16384,  // one-shot Mermaid — medium
+  model_repair:        8192,   // targeted fix — low reasoning
+  max_composition:     32768,  // final quality — high reasoning, needs room
+  merge_composition:   32768,  // merge all subviews — high reasoning
+  repair_from_trace:   8192,   // error-trace repair — low
+  compose_ts:          32768,  // runtime synthesis — high reasoning
+  repair_ts:           16384,  // compile/test repair — medium
+  validate_ts:         8192,   // validator commentary — low
+  compose_tla:         32768,  // formal spec synthesis — xhigh reasoning, needs 25K+
+  repair_tla:          16384,  // SANY error repair — medium reasoning
 });
+
+// Reasoning overhead multiplier — reasoning models burn tokens on invisible reasoning.
+// Multiply the stage cap by this factor to ensure enough budget for output + reasoning.
+const REASONING_TOKEN_MULTIPLIER = 2.0;
+
+function _resolveTokenLimit(stage, model) {
+  const baseCap = STAGE_TOKEN_CAP[stage] || 16384;
+  const isReasoningModel = catalog.usesCompletionTokens(model);
+  if (isReasoningModel) {
+    return Math.min(baseCap * REASONING_TOKEN_MULTIPLIER, 65536);
+  }
+  return Math.min(baseCap, 8192);
+}
 
 // ---- Health cache ---------------------------------------------------------
 
@@ -379,7 +648,18 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
           }
         }
 
-        return extractContent(data);
+        const content = extractContent(data);
+        if (!content && data.choices?.[0]) {
+          const choice = data.choices[0];
+          logger.warn(`${logPrefix}.empty_content`, {
+            model, stage: stage || logPrefix,
+            finish_reason: choice.finish_reason,
+            reasoning_tokens: data.usage?.completion_tokens_details?.reasoning_tokens,
+            completion_tokens: data.usage?.completion_tokens,
+            max_completion_tokens: finalBody.max_completion_tokens,
+          });
+        }
+        return content;
       } catch (err) {
         lastError = err;
         if (err.name === 'AbortError') {
@@ -458,7 +738,8 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
 async function _callPremiumWithKey(apiKey, systemPrompt, userPrompt, modelOverride, timeoutMs, rateEvents, stage, reasoningEffort, responseFormat) {
   const model = modelOverride || PREMIUM_MODEL;
   const events = rateEvents || [];
-  const tokenParam = catalog.usesCompletionTokens(model) ? { max_completion_tokens: 16384 } : { max_tokens: 8192 };
+  const tokenLimit = _resolveTokenLimit(stage, model);
+  const tokenParam = catalog.usesCompletionTokens(model) ? { max_completion_tokens: tokenLimit } : { max_tokens: tokenLimit };
 
   return _fetchWithRetry({
     url: `${OPENAI_BASE_URL}/chat/completions`,
@@ -479,7 +760,7 @@ async function _callPremiumWithKey(apiKey, systemPrompt, userPrompt, modelOverri
     inputText: userPrompt,
     traceId: _traceId,
     reasoningEffort: reasoningEffort || _selectReasoningEffort(stage),
-    responseFormat: responseFormat || (_isStructuredStage(stage) ? { type: 'json_object' } : undefined),
+    responseFormat: responseFormat || _resolveResponseFormat(stage),
   });
 }
 
@@ -514,7 +795,7 @@ async function _callPremium(systemPrompt, userPrompt, modelOverride, timeoutMs, 
     });
   }
 
-  const tokenLimit = maxTokensOverride || 16384;
+  const tokenLimit = maxTokensOverride || _resolveTokenLimit(stage, model);
   const tokenParam = catalog.usesCompletionTokens(model)
     ? { max_completion_tokens: tokenLimit }
     : { max_tokens: Math.min(tokenLimit, 8192) };
@@ -540,7 +821,7 @@ async function _callPremium(systemPrompt, userPrompt, modelOverride, timeoutMs, 
     inputText: userPrompt,
     traceId: _traceId,
     reasoningEffort: reasoningEffort || _selectReasoningEffort(stage),
-    responseFormat: responseFormat || (_isStructuredStage(stage) ? { type: 'json_object' } : undefined),
+    responseFormat: responseFormat || _resolveResponseFormat(stage),
   });
 }
 
@@ -627,9 +908,15 @@ async function infer(stage, context = {}) {
     ? { system: context.systemPrompt, temperature: 0 }
     : buildPrompt(stage);
 
-  const systemPrompt = promptConfig.system;
+  let systemPrompt = promptConfig.system;
   const userPrompt = context.userPrompt || '';
   const rateEvents = [];
+
+  // Inject forward reasoning memory — compact context from prior pipeline stages
+  const memoryBlock = getReasoningMemoryBlock();
+  if (memoryBlock) {
+    systemPrompt = `${systemPrompt}\n\n[FORWARD REASONING MEMORY — prior agent insights from this pipeline run]\n${memoryBlock}`;
+  }
 
   const stageModel = _selectModelForStage(stage);
   const stageTokenCap = STAGE_TOKEN_CAP[stage] || undefined;
@@ -701,6 +988,8 @@ async function infer(stage, context = {}) {
 
     const usedFallback = !!(prov.isPremium && callResult?.usedDirectFallback);
     logger.info('provider.ok', { provider: prov.name, stage, len: output.length, ms: latencyMs, model: prov.isPremium ? stageModel : undefined, tag: actionTag?.tag, usedDirectFallback: usedFallback || undefined });
+    // Append to forward reasoning memory for downstream stages
+    appendReasoningMemory(stage, prov.isPremium ? stageModel : prov.name, output);
     return {
       output: output.trim(), provider: prov.name, noOp: false, latencyMs,
       model: prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer'),
@@ -729,9 +1018,15 @@ async function inferMax(stage, context = {}) {
     ? { system: context.systemPrompt, temperature: 0 }
     : buildPrompt(stage);
 
-  const systemPrompt = promptConfig.system;
+  let systemPrompt = promptConfig.system;
   const userPrompt = context.userPrompt || '';
   const rateEvents = [];
+
+  // Inject forward reasoning memory — compact context from prior pipeline stages
+  const memoryBlock = getReasoningMemoryBlock();
+  if (memoryBlock) {
+    systemPrompt = `${systemPrompt}\n\n[FORWARD REASONING MEMORY — prior agent insights from this pipeline run]\n${memoryBlock}`;
+  }
 
   logger.info('provider.max.attempting', { model: maxModel, stage });
   const callStart = Date.now();
@@ -743,6 +1038,8 @@ async function inferMax(stage, context = {}) {
   if (output && output.trim() && output.trim() !== userPrompt.trim()) {
     const usedFallback = !!callResult?.usedDirectFallback;
     logger.info('provider.max.success', { model: maxModel, stage, outputLen: output.length, latencyMs, rmTag: actionTag?.tag, usedDirectFallback: usedFallback || undefined });
+    // Append to forward reasoning memory for downstream stages
+    appendReasoningMemory(stage, maxModel, output);
     return {
       output: output.trim(), provider: `premium-max:${maxModel}`, noOp: false, latencyMs, model: maxModel,
       rateEvents: rateEvents.length ? rateEvents : undefined,
@@ -874,4 +1171,5 @@ module.exports = {
   infer, inferMax, inferWithRole, checkProviders, isMaxAvailable,
   setTraceId, setDepthTier, getDepthTier,
   getFallbackEvents, clearFallbackEvents,
+  clearReasoningMemory, getReasoningMemoryBlock, appendReasoningMemory,
 };

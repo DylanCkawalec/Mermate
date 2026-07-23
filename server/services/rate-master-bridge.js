@@ -83,7 +83,8 @@ function _getInstance() {
     });
 
     _instance.on('ooda:decision', (d) => {
-      logger.info('rm.ooda', {
+      if (d.previousLimit === d.newLimit) return;
+      logger.debug('rm.ooda', {
         endpoint: d.endpoint,
         prev: d.previousLimit,
         next: d.newLimit,
@@ -166,7 +167,7 @@ async function execute(stage, model, inputText, fn) {
     const result = await rm.execute(endpoint, fn, {
       priority,
       traceId: `mermate-${actionTag.seq}`,
-      timeoutMs: priority === catalog.Priority.CRITICAL ? 180_000 : 120_000,
+      timeoutMs: parseInt(process.env.MERMATE_INFER_TIMEOUT_MS || process.env.MERMATE_INFER_TIMEOUT || '180000', 10),
     });
 
     actionTag.queueWaitMs = 0;
@@ -221,8 +222,8 @@ function getPriority(stage) {
 /**
  * Estimate context window for a stage (delegates to catalog).
  */
-function estimateContextSize(stage, inputText) {
-  return catalog.estimateContext(stage, inputText);
+function estimateContextSize(stage, inputText, model) {
+  return catalog.estimateContext(stage, inputText, model);
 }
 
 /**

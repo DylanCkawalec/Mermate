@@ -3018,17 +3018,77 @@
       }
     } catch { diagramsData = null; }
 
-    // Step 5: Complete
+    // Step 5: Complete — show Opseeq status (poll if warming up)
+    if (healthData?.opseeq?.warming && !healthData.opseeq.healthy) {
+      _bootProgress('Opseeq warming up...');
+      for (let i = 0; i < 15; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+          const pollRes = await fetch('/api/health');
+          const pollData = await pollRes.json();
+          if (pollData.opseeq?.healthy) {
+            healthData.opseeq = pollData.opseeq;
+            break;
+          }
+        } catch { /* keep polling */ }
+      }
+    }
     const providerCount = healthData
       ? ['premium', 'ollama', 'enhancer'].filter(k => healthData.providers?.[k]).length
       : 0;
+    const opseeqStatus = healthData?.opseeq
+      ? (healthData.opseeq.healthy ? 'Opseeq ready' : (healthData.opseeq.warming ? 'Opseeq warming' : 'Opseeq offline'))
+      : '';
     _bootProgress(
       healthData
-        ? `Ready — ${providerCount} provider(s), ${healthData.agents?.active || 0} agents`
+        ? `Ready — ${providerCount} provider(s), ${healthData.agents?.active || 0} agents${opseeqStatus ? ', ' + opseeqStatus : ''}`
         : 'Ready (limited — no server health)'
     );
     _bootComplete();
   }
+
+  // ---- Opseeq gateway lifecycle (browser-window heartbeat) -----------------
+  // Pings the backend every 20s while the tab is visible.
+  // The backend starts the Opseeq container on first heartbeat and
+  // stops it after 60s of no heartbeats (tab closed/navigated away).
+  let _opseeqHeartbeatTimer = null;
+
+  async function _opseeqHeartbeat() {
+    try {
+      await fetch('/api/opseeq/heartbeat', { method: 'POST' });
+    } catch { /* server may be briefly unreachable */ }
+  }
+
+  function _startOpseeqHeartbeat() {
+    if (_opseeqHeartbeatTimer) return;
+    _opseeqHeartbeat();
+    _opseeqHeartbeatTimer = setInterval(_opseeqHeartbeat, 20_000);
+  }
+
+  function _stopOpseeqHeartbeat() {
+    if (_opseeqHeartbeatTimer) {
+      clearInterval(_opseeqHeartbeatTimer);
+      _opseeqHeartbeatTimer = null;
+    }
+  }
+
+  // Start heartbeat immediately — ensures Opseeq is running when the app loads
+  _startOpseeqHeartbeat();
+
+  // Pause heartbeat when tab is hidden, resume when visible
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      _stopOpseeqHeartbeat();
+    } else {
+      _startOpseeqHeartbeat();
+    }
+  });
+
+  // Stop heartbeat when page is unloaded — backend will shut down Opseeq after idle timeout
+  window.addEventListener('beforeunload', () => {
+    _stopOpseeqHeartbeat();
+    navigator.sendBeacon('/api/opseeq/stop', new Blob([''], { type: 'application/json' }));
+  });
 
   _runBootSequence();
 

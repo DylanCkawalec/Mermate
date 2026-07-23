@@ -512,6 +512,7 @@ router.post('/render', async (req, res) => {
       _setRunId(runId);
       provider.setTraceId(runId);
       provider.setDepthTier(profile.architectureDepthTier || null);
+      provider.clearReasoningMemory();
       runTracker.setPipeline(runId, pipelineName);
       runTracker.setDepth(runId, {
         score: profile.architectureDepthScore,
