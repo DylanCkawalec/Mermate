@@ -197,7 +197,7 @@ function _generateReadme(diagramName, manifest) {
 
 router.get('/runs/:runId/bundle', async (req, res) => {
   const { runId } = req.params;
-  if (!runId || runId.includes('..')) {
+  if (!require('../utils/naming').safeSegment(runId)) {
     return res.status(400).json({ success: false, error: 'invalid run_id' });
   }
 

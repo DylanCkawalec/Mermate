@@ -203,14 +203,14 @@ const STAGE_JSON_SCHEMA = new Set([
   'fact_extraction',
   'diagram_plan',
   'decompose',
-  'compose_ts',
-  'repair_ts',
+  'validate_ts',
 ]);
 
 const STAGE_JSON_OBJECT = new Set([
   'semantic_repair',
-  'validate_ts',
   'copilot_enhance',
+  'compose_ts',
+  'repair_ts',
 ]);
 
 // Union for backward compat — any stage that needs structured output
@@ -360,20 +360,30 @@ const STAGE_JSON_SCHEMAS = {
       additionalProperties: false,
     },
   },
-};
 
-// TS enrichment/repair schema — shared shape for compose_ts and repair_ts
-const TS_OUTPUT_SCHEMA = {
-  type: 'object',
-  properties: {
-    ts_source: { type: 'string' },
-    harness_source: { type: 'string' },
+  validate_ts: {
+    type: 'object',
+    properties: {
+      valid: { type: 'boolean' },
+      issues: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            severity: { type: 'string', enum: ['error', 'warning', 'info'] },
+            message: { type: 'string' },
+            location: { type: 'string' },
+          },
+          required: ['severity', 'message'],
+          additionalProperties: false,
+        },
+      },
+      summary: { type: 'string' },
+    },
+    required: ['valid', 'issues', 'summary'],
+    additionalProperties: false,
   },
-  required: ['ts_source'],
-  additionalProperties: false,
 };
-STAGE_JSON_SCHEMAS.compose_ts = TS_OUTPUT_SCHEMA;
-STAGE_JSON_SCHEMAS.repair_ts = TS_OUTPUT_SCHEMA;
 
 // Stages that benefit most from local AI bootstrapping. The premium chain
 // remains a fallback when local providers are unavailable, but giving local
@@ -1167,9 +1177,26 @@ async function inferWithRole(stage, context, roleName) {
   }
 }
 
+function createRealInferenceProvider(config = {}) {
+  const apiKey = config.apiKey || PREMIUM_API_KEY;
+  const baseUrl = config.baseUrl || OPENAI_BASE_URL;
+
+  return {
+    infer: (stage, context) => infer(stage, context),
+    inferMax: (stage, context) => inferMax(stage, context),
+    inferWithRole: (stage, context, roleName) => inferWithRole(stage, context, roleName),
+    isMaxAvailable,
+    checkProviders,
+    apiKey,
+    baseUrl,
+  };
+}
+
 module.exports = {
   infer, inferMax, inferWithRole, checkProviders, isMaxAvailable,
   setTraceId, setDepthTier, getDepthTier,
   getFallbackEvents, clearFallbackEvents,
   clearReasoningMemory, getReasoningMemoryBlock, appendReasoningMemory,
+  STAGE_JSON_SCHEMAS,
+  createRealInferenceProvider,
 };

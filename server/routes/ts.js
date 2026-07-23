@@ -159,7 +159,7 @@ router.post('/render/ts', async (req, res) => {
     });
   }
 
-  const name = diagram_name || runData.user_request?.diagram_name || runData.request?.user_diagram_name || 'runtime';
+  const name = (diagram_name && require('../utils/naming').slugify(diagram_name)) || runData.user_request?.diagram_name || runData.request?.user_diagram_name || 'runtime';
   const flowDir = path.join(FLOWS_DIR, name, 'ts-runtime');
   await fsp.mkdir(flowDir, { recursive: true });
 

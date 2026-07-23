@@ -272,11 +272,12 @@ function _sanitizeCompileError(raw) {
  * @param {string} baseName
  * @returns {Promise<{result: object, mmdSource: string, attempts: number, repairChanges: string[]}>}
  */
-async function compileWithRetry(mmdSource, outputDir, baseName) {
+async function compileWithRetry(mmdSource, outputDir, baseName, ports = null) {
+  const p = _resolvePorts(ports);
   const repairChanges = [];
 
   // Attempt 1: compile as-is
-  let result = await compile(mmdSource, outputDir, baseName);
+  let result = await p.compiler.compile(mmdSource, outputDir, baseName);
   if (result.ok) return { result, mmdSource, attempts: 1, repairChanges };
 
   const attempt1Error = _sanitizeCompileError(result.error);
@@ -287,7 +288,7 @@ async function compileWithRetry(mmdSource, outputDir, baseName) {
   if (repaired.changes.length > 0) {
     repairChanges.push(...repaired.changes);
     logger.info('compile.deterministic_repair', { changes: repaired.changes });
-    result = await compile(repaired.source, outputDir, baseName);
+    result = await p.compiler.compile(repaired.source, outputDir, baseName);
     if (result.ok) return { result, mmdSource: repaired.source, attempts: 2, repairChanges };
   }
 
@@ -324,14 +325,21 @@ async function compileWithRetry(mmdSource, outputDir, baseName) {
  * @param {object} profile - InputProfile from input-analyzer
  * @returns {Promise<{mmdSource: string, enhanced: boolean, provider: string, stagesExecuted: string[]}>}
  */
-async function renderPrepare(source, profile, useMax = false) {
+async function renderPrepare(source, profile, ports = null, useMax = false) {
+  let actualPorts = ports;
+  let actualUseMax = useMax;
+  if (typeof ports === 'boolean') {
+    actualUseMax = ports;
+    actualPorts = null;
+  }
+  const p = _resolvePorts(actualPorts);
   const stagesExecuted = [];
   const userPrompt = buildRenderPrepareUserPrompt(source, profile);
-  const rt = _rt();
+  const rt = p.runTracker || _rt();
   const phases = createPhaseTracker(_auditEmit, _activeRunId);
   phases.enter(Phase.ANALYZE);
 
-  const inferFn = useMax ? provider.inferMax : provider.infer;
+  const inferFn = actualUseMax ? (stage, ctx) => p.inference.inferMax(stage, ctx) : (stage, ctx) => p.inference.infer(stage, ctx);
   const callStart = Date.now();
   const result = await inferFn('render_prepare', { userPrompt });
   stagesExecuted.push(useMax ? 'render_prepare_max' : 'render_prepare');
@@ -485,11 +493,33 @@ function _rt() {
   return _runTrackerRef;
 }
 
-async function renderHPCGoT(source, profile, useMax = false) {
+function _resolvePorts(ports) {
+  if (ports && typeof ports === 'object' && (ports.inference || ports.compiler)) {
+    return ports;
+  }
+  try {
+    return require('./ports').createProductionPorts();
+  } catch {
+    return {
+      inference: provider,
+      compiler: { compile, validate: require('./mermaid-validator').validate },
+      runTracker: _rt(),
+    };
+  }
+}
+
+async function renderHPCGoT(source, profile, ports = null, useMax = false) {
+  let actualPorts = ports;
+  let actualUseMax = useMax;
+  if (typeof ports === 'boolean') {
+    actualUseMax = ports;
+    actualPorts = null;
+  }
+  const p = _resolvePorts(actualPorts);
   const stagesExecuted = [];
-  const inferFn = useMax ? provider.inferMax : provider.infer;
+  const inferFn = actualUseMax ? (stage, ctx) => p.inference.inferMax(stage, ctx) : (stage, ctx) => p.inference.infer(stage, ctx);
   const gotCfg = getGotConfig();
-  const rt = _rt();
+  const rt = p.runTracker || _rt();
   const phases = createPhaseTracker(_auditEmit, _activeRunId);
 
   let stateCount = 1;
@@ -1101,7 +1131,14 @@ function _extractLineNumber(errorStr) {
   return m ? parseInt(m[1], 10) : null;
 }
 
-async function decomposeAndRender(source, profile, useMax = false) {
+async function decomposeAndRender(source, profile, ports = null, useMax = false) {
+  let actualPorts = ports;
+  let actualUseMax = useMax;
+  if (typeof ports === 'boolean') {
+    actualUseMax = ports;
+    actualPorts = null;
+  }
+  const p = _resolvePorts(actualPorts);
   const stagesExecuted = [];
   const fsp = require('node:fs/promises');
   const nodePath = require('node:path');
@@ -1110,8 +1147,8 @@ async function decomposeAndRender(source, profile, useMax = false) {
     buildDecomposeUserPrompt, buildRepairFromTraceUserPrompt,
     buildMergeCompositionUserPrompt,
   } = require('./axiom-prompts');
-  const inferFn = useMax ? provider.inferMax : provider.infer;
-  const rt = _rt();
+  const inferFn = actualUseMax ? (stage, ctx) => p.inference.inferMax(stage, ctx) : (stage, ctx) => p.inference.infer(stage, ctx);
+  const rt = p.runTracker || _rt();
 
   _audit('decompose:start', { useMax });
   if (rt) rt.addStage(_activeRunId, 'decompose');
@@ -1178,14 +1215,14 @@ async function decomposeAndRender(source, profile, useMax = false) {
       if (repairResult.output) {
         const repairedCompile = await compileWithRetry(repairResult.output, outputDir, 'subview');
         if (repairedCompile.result.ok) {
-          const repairedScore = _scoreSubView(repairedCompile.mmdSource, profile.shadow);
+          const repairedScore = _scoreSubView(repairedCompile.mmdSource, profile?.shadow);
           return { mmdSource: repairedCompile.mmdSource, score: repairedScore.composite, scoreFactors: repairedScore, viewName: view.viewName, viewSlug, outputDir, compileResult: repairedCompile.result, stages: [`render_subview:${view.viewName || 'unnamed'}`, 'repair_from_trace'] };
         }
       }
       return { mmdSource: prep.mmdSource, score: 0.0, scoreFactors: null, viewName: view.viewName, viewSlug, outputDir, compileResult: compileOut.result, stages: [`render_subview:${view.viewName || 'unnamed'}`] };
     }
 
-    const viewScore = _scoreSubView(compileOut.mmdSource, profile.shadow);
+    const viewScore = _scoreSubView(compileOut.mmdSource, profile?.shadow);
     return { mmdSource: compileOut.mmdSource, score: viewScore.composite, scoreFactors: viewScore, viewName: view.viewName, viewSlug, outputDir, compileResult: compileOut.result, stages: [`render_subview:${view.viewName || 'unnamed'}`] };
   }
 
@@ -1263,7 +1300,7 @@ async function decomposeAndRender(source, profile, useMax = false) {
     if (mergeResult.output) {
       const contract = _enforceMmdContract(mergeResult.output);
       if (contract.mmd) {
-        const mergeScore = _scoreSubView(contract.mmd, profile.shadow);
+        const mergeScore = _scoreSubView(contract.mmd, profile?.shadow);
         const bestSingleScore = results[0].score;
 
         logger.info('decompose.merge_scored', {

@@ -28,6 +28,8 @@ async function readTextArtifact(urlPath) {
 }
 
 async function loadRunData(runId) {
+  const { safeSegment } = require('../utils/naming');
+  if (!safeSegment(runId)) throw new Error(`Invalid run_id: ${String(runId).slice(0, 40)}`);
   const runPath = path.join(RUNS_DIR, `${runId}.json`);
   const raw = await fsp.readFile(runPath, 'utf8');
   return {
@@ -66,10 +68,12 @@ function getOriginalInput(runData) {
 }
 
 function resolveDiagramName(runData, fallback = 'architecture') {
-  return runData?.final_artifact?.diagram_name
+  const { slugify } = require('../utils/naming');
+  const name = runData?.final_artifact?.diagram_name
     || runData?.user_request?.diagram_name
     || runData?.request?.user_diagram_name
     || fallback;
+  return slugify(String(name)) || 'architecture';
 }
 
 async function loadCompiledMmd(runData, diagramName) {

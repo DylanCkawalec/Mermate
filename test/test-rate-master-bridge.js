@@ -76,7 +76,7 @@ describe('rate-master-bridge', () => {
   it('estimateContextSize uses stage profile for unknown input', () => {
     const est = rmBridge.estimateContextSize('max_composition');
     assert.equal(est.inputTokensEst, 8000);
-    assert.equal(est.outputTokensEst, 12000);
+    assert.equal(est.outputTokensEst, 24000);
   });
 
   it('buildActionTag creates valid structured tag', () => {

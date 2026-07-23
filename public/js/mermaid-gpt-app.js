@@ -300,7 +300,6 @@
 
   const input = document.getElementById('mermaid-input');
   const copilotWrap = input?.closest('.copilot-wrap') || null;
-  const pipelineProgress = document.getElementById('pipeline-progress');
   const btnRender = document.getElementById('btn-render');
   const renderIcon = document.getElementById('render-icon');
   const btnNewDiagram = document.getElementById('btn-new-diagram');
@@ -371,9 +370,9 @@
     });
   }
 
-  // ---- Max mode ----
-  const btnMax = document.getElementById('btn-max');
+  // ---- Max mode (toggled from the Agent dropdown) ----
   let maxMode = false;
+  let maxAvailable = false;
 
   // ---- Agent mode ----
   const btnAgentToggle = document.getElementById('btn-agent-toggle');
@@ -495,6 +494,24 @@
       });
 
       dropdown.appendChild(btn);
+    }
+
+    // Max mode toggle — lives in the dropdown to keep the controls row lean
+    if (maxAvailable) {
+      const maxBtn = document.createElement('button');
+      maxBtn.className = 'agent-mode-option agent-mode-max';
+      if (maxMode) maxBtn.classList.add('selected');
+      maxBtn.innerHTML = `<span class="agent-mode-icon">\u26a1</span>`
+        + `<span class="agent-mode-info">`
+        + `<span class="agent-mode-name">Max mode ${maxMode ? 'ON' : 'OFF'}</span>`
+        + `<span class="agent-mode-desc">Use strongest premium model for architect-grade output</span>`
+        + `</span>`;
+      maxBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        maxMode = !maxMode;
+        _rebuildAgentDropdown();
+      });
+      dropdown.appendChild(maxBtn);
     }
 
     // Add disable option when agent mode is active
@@ -628,24 +645,7 @@
       resultSection.hidden = true;
     }
 
-    document.querySelectorAll('.pipeline-segment').forEach(seg => {
-      const stage = seg.dataset.stage;
-      if (stage === mode) seg.dataset.state = 'active';
-      else if (orchestrator.isCompleted(stage)) seg.dataset.state = 'completed';
-      else if (orchestrator.isUnlocked(stage)) seg.dataset.state = 'pending';
-      else seg.dataset.state = 'locked';
-    });
   }
-
-  document.querySelectorAll('.pipeline-segment').forEach(seg => {
-    seg.addEventListener('click', () => {
-      const stage = seg.dataset.stage;
-      if (orchestrator.isUnlocked(stage)) {
-        _agentHandoffToken++;
-        setMode(stage);
-      }
-    });
-  });
 
   orchestrator.subscribe(renderUI);
 
@@ -667,21 +667,10 @@
     return currentMode || 'idea';
   }
 
-  function _animateTabHandoff(fromStage, toStage) {
-    if (!pipelineProgress || !fromStage || !toStage || fromStage === toStage) return Promise.resolve();
-    const fromEl = pipelineProgress.querySelector(`.pipeline-segment[data-stage="${fromStage}"]`);
-    const toEl = pipelineProgress.querySelector(`.pipeline-segment[data-stage="${toStage}"]`);
-    if (!fromEl || !toEl) return Promise.resolve();
-
-    pipelineProgress.classList.add('is-handoff-active');
-    fromEl.classList.add('is-handoff-source');
-    toEl.classList.add('is-handoff-target');
-
-    return _agentSleep(950).finally(() => {
-      pipelineProgress.classList.remove('is-handoff-active');
-      fromEl.classList.remove('is-handoff-source');
-      toEl.classList.remove('is-handoff-target');
-    });
+  function _animateTabHandoff() {
+    // Pipeline progress bar was removed — stage state is shown on the mode
+    // selector tabs. Kept as a no-op so agent choreography timing is stable.
+    return Promise.resolve();
   }
 
   function _ensureAgentGazeChip() {
@@ -1455,6 +1444,7 @@
 
     if (INPUT_STAGES.has(currentMode)) {
       flipCard.showFront();
+      if (btnFlip) btnFlip.setAttribute('aria-checked', 'false');
       if (flipCardContainer) flipCardContainer.hidden = false;
     }
 
@@ -2459,7 +2449,10 @@
     syncUiGuidance();
   });
 
-  btnFlip.addEventListener('click', () => flipCard.toggle());
+  btnFlip.addEventListener('click', () => {
+    flipCard.toggle();
+    btnFlip.setAttribute('aria-checked', String(flipCard.flipped));
+  });
   btnResetZoom.addEventListener('click', () => { if (pzFront) pzFront.fitToViewport(); if (pzBack) pzBack.fitToViewport(); });
   btnDismissError.addEventListener('click', hideError);
 
@@ -2585,17 +2578,6 @@
   const btnNewDiagramFloat = document.getElementById('btn-new-diagram-float');
   if (btnNewDiagramFloat) {
     btnNewDiagramFloat.addEventListener('click', () => btnNewDiagram.click());
-  }
-
-  // ---- Max mode toggle ----
-  if (btnMax) {
-    btnMax.addEventListener('click', () => {
-      maxMode = !maxMode;
-      btnMax.classList.toggle('active', maxMode);
-      btnMax.title = maxMode
-        ? 'Max mode ON: strongest premium model will be used for render'
-        : 'Max: use strongest premium model for architect-grade output';
-    });
   }
 
   // =========================================================================
@@ -2977,7 +2959,7 @@
     try {
       const res = await fetch('/api/copilot/health');
       copilotData = await res.json();
-      if (copilotData.maxAvailable && btnMax) btnMax.classList.add('visible');
+      if (copilotData.maxAvailable) maxAvailable = true;
       // Feed health result to copilot if it exists (avoids redundant fetch)
       if (copilot && typeof copilot.setHealthState === 'function') {
         copilot.setHealthState(copilotData.available);

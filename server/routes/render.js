@@ -537,11 +537,14 @@ router.post('/render', async (req, res) => {
         depth_tier: profile.architectureDepthTier,
       });
 
+      const { createProductionPorts } = require('../services/ports');
+      const ports = createProductionPorts();
+
       const _prepStart = Date.now();
       let prepResult;
       try {
       if (useDecompose) {
-        prepResult = await decomposeAndRender(source, profile, maxRequested);
+        prepResult = await decomposeAndRender(source, profile, ports, maxRequested);
       } else if (maxRequested) {
         // Max mode: always run the full Max upgrade pipeline.
         // No gate — the user explicitly asked for Max. renderMaxUpgrade
@@ -549,10 +552,10 @@ router.post('/render', async (req, res) => {
         // via the strongest model with an architect-grade prompt.
         prepResult = await renderMaxUpgrade(source, profile);
       } else if (useHPCGoT) {
-        prepResult = await renderHPCGoT(source, profile, false);
+        prepResult = await renderHPCGoT(source, profile, ports, false);
       } else {
         // Simple idea: single-shot render is faster and more reliable
-        prepResult = await renderPrepare(source, profile, false);
+        prepResult = await renderPrepare(source, profile, ports, false);
       }
 
       } finally {
@@ -1010,8 +1013,8 @@ router.get('/diagrams', async (_req, res) => {
  * Remove a diagram's compiled outputs and archived source.
  */
 router.delete('/diagrams/:name', async (req, res) => {
-  const name = req.params.name;
-  if (!name || /[\/\\]/.test(name)) {
+  const name = require('../utils/naming').safeSegment(req.params.name);
+  if (!name) {
     return res.status(400).json({ success: false, error: 'invalid_name' });
   }
 

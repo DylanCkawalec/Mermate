@@ -98,6 +98,7 @@
   if (sidebar && btnFlipToOpseeq && btnFlipBack) {
     btnFlipToOpseeq.addEventListener('click', () => {
       sidebar.classList.add('flipped');
+      btnFlipToOpseeq.setAttribute('aria-expanded', 'true');
       if (sidebarOpseeqFrame && !sidebarOpseeqFrame.src) {
         if (sidebarOpseeqStatus) sidebarOpseeqStatus.textContent = `Connecting to ${cachedBaseUrl}…`;
         sidebarOpseeqFrame.onload = () => {
@@ -111,6 +112,7 @@
     });
     btnFlipBack.addEventListener('click', () => {
       sidebar.classList.remove('flipped');
+      btnFlipToOpseeq.setAttribute('aria-expanded', 'false');
     });
   }
 })();

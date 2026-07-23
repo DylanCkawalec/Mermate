@@ -35,7 +35,7 @@ async function _readSafe(filePath) {
 router.get('/artifacts/:run_id', async (req, res) => {
   const { run_id } = req.params;
 
-  if (!run_id || run_id.length < 8) {
+  if (!run_id || run_id.length < 8 || !require('../utils/naming').safeSegment(run_id)) {
     return res.status(400).json({ success: false, error: 'Invalid run_id' });
   }
 

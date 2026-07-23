@@ -160,7 +160,7 @@ router.post('/render/tla', async (req, res) => {
       }
     }
 
-    const name = diagram_name || resolveDiagramName(runData, 'spec');
+    const name = (diagram_name && require('../utils/naming').slugify(diagram_name)) || resolveDiagramName(runData, 'spec');
     const moduleName = tlaCompiler._sanitizeId(name).replace(/^v/, 'M') || 'Spec';
     const tlaDir = path.join(FLOWS_DIR, name);
     await fsp.mkdir(tlaDir, { recursive: true });
