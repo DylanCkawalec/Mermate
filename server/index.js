@@ -86,6 +86,7 @@ const artifactsRouter = require('./routes/artifacts');
 const rustRouter = require('./routes/rust');
 const traceRouter = require('./routes/trace');
 const runsRouter = require('./routes/runs');
+const speculaRouter = require('./routes/specula');
 app.use('/api', renderRouter);
 app.use('/api', agentRouter);
 app.use('/api', transcribeRouter);
@@ -100,12 +101,68 @@ app.use('/api', artifactsRouter);
 app.use('/api', rustRouter);
 app.use('/api', traceRouter);
 app.use('/api', runsRouter);
+app.use('/api', speculaRouter);
 
 // Run retention cleanup on startup (non-blocking)
 const runTracker = require('./services/run-tracker');
 const runExporter = require('./services/run-exporter');
 runTracker.cleanup().catch(() => {});
 runExporter.cleanup().catch(() => {});
+
+// ---- Health endpoint (boot verification) -----------------------------------
+// Returns comprehensive server health: provider availability, model config,
+// and critical service status. Used by mermaid.sh to verify boot readiness.
+app.get('/api/health', async (_req, res) => {
+  try {
+    const inferenceProvider = require('./services/inference-provider');
+    const providers = await inferenceProvider.checkProviders();
+    const maxAvailable = inferenceProvider.isMaxAvailable();
+    const roles = roleRegistry.getRoles();
+    const activeRoles = roles.filter(r => r.enabled).length;
+
+    const health = {
+      success: true,
+      status: 'ok',
+      // Payload-contract version: bump when the canonical envelope shape
+      // (artifacts / progressionUpdate) changes incompatibly. The frontend
+      // boot sequence reads this to detect contract mismatches.
+      schema_version: 1,
+      uptime: process.uptime(),
+      port: PORT,
+      models: {
+        orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || 'gpt-5.6-sol',
+        worker: process.env.MERMATE_WORKER_MODEL || 'gpt-5.6-terra',
+        fast: process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-5.6-luna',
+      },
+      providers: {
+        premium: providers.premium,
+        ollama: providers.ollama,
+        enhancer: providers.enhancer,
+        maxAvailable,
+      },
+      agents: {
+        total: roles.length,
+        active: activeRoles,
+      },
+      got: {
+        enabled: gotConfig.getConfig()?.controllerEnabled || false,
+        mode: gotConfig.getConfig()?.mode || 'unknown',
+      },
+    };
+
+    const anyProvider = providers.premium || providers.ollama || providers.enhancer;
+    health.status = anyProvider ? 'ok' : 'degraded';
+
+    return res.status(200).json(health);
+  } catch (err) {
+    logger.error('health.error', { error: err.message });
+    return res.status(503).json({
+      success: false,
+      status: 'error',
+      error: err.message,
+    });
+  }
+});
 
 // Agent definitions endpoint
 app.get('/api/agents', async (_req, res) => {
@@ -148,6 +205,12 @@ if (require.main === module) {
   server.once('listening', () => {
     logger.info('server.started', { port: PORT });
     console.log(`\n  Mermaid-GPT running at http://localhost:${PORT}\n`);
+    // TLA+ toolbox warm-up: cache Java version + jar presence now so the
+    // first /api/render/tla request skips the probe entirely.
+    try { require('./services/tla-validator').warmUp(); } catch { /* non-fatal */ }
+    // Specula engine warm-up: pre-probe the pinned submodule and cache skill
+    // prompts so boot-time discovery never blocks a render request.
+    try { require('./services/specula-engine-bridge').warmUp(); } catch { /* non-fatal */ }
   });
 
   server.once('error', (err) => {

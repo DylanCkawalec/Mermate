@@ -22,31 +22,35 @@ function estimateTokens(text) {
 // ---- Cost Model ------------------------------------------------------------
 
 const COST_PER_1K = Object.freeze({
-  'gpt-5.1':     { input: 0.01,    output: 0.03   },
-  'gpt-5.2':     { input: 0.015,   output: 0.04   },
-  'gpt-5.4':     { input: 0.03,    output: 0.06   },
-  'gpt-4o':      { input: 0.0025,  output: 0.01   },
-  'gpt-4o-mini': { input: 0.00015, output: 0.0006 },
-  'gpt-4.1':     { input: 0.002,   output: 0.008  },
-  'gpt-4.1-mini':{ input: 0.0004,  output: 0.0016 },
-  'gpt-4.1-nano':{ input: 0.0001,  output: 0.0004 },
-  'o1':          { input: 0.015,   output: 0.06   },
-  'o1-mini':     { input: 0.003,   output: 0.012  },
-  'o3':          { input: 0.01,    output: 0.04   },
-  'o3-mini':     { input: 0.0011,  output: 0.0044 },
-  'o4-mini':     { input: 0.0011,  output: 0.0044 },
-  'gpt-oss:20b': { input: 0.0,     output: 0.0    },
-  'enhancer':    { input: 0.0,     output: 0.0    },
+  'gpt-5.6-sol':  { input: 0.03,    output: 0.06   },
+  'gpt-5.6-terra':{ input: 0.015,   output: 0.04   },
+  'gpt-5.6-luna': { input: 0.0004,  output: 0.0016 },
+  'gpt-5.6':      { input: 0.03,    output: 0.06   },
+  'gpt-5.1':      { input: 0.01,    output: 0.03   },
+  'gpt-5.2':      { input: 0.015,   output: 0.04   },
+  'gpt-5.4':      { input: 0.03,    output: 0.06   },
+  'gpt-4o':       { input: 0.0025,  output: 0.01   },
+  'gpt-4o-mini':  { input: 0.00015, output: 0.0006 },
+  'gpt-4.1':      { input: 0.002,   output: 0.008  },
+  'gpt-4.1-mini': { input: 0.0004,  output: 0.0016 },
+  'gpt-4.1-nano': { input: 0.0001,  output: 0.0004 },
+  'o1':           { input: 0.015,   output: 0.06   },
+  'o1-mini':      { input: 0.003,   output: 0.012  },
+  'o3':           { input: 0.01,    output: 0.04   },
+  'o3-mini':      { input: 0.0011,  output: 0.0044 },
+  'o4-mini':      { input: 0.0011,  output: 0.0044 },
+  'gpt-oss:20b':  { input: 0.0,     output: 0.0    },
+  'enhancer':     { input: 0.0,     output: 0.0    },
 });
 
 function estimateCost(model, tokensIn, tokensOut) {
-  const rates = COST_PER_1K[model] || COST_PER_1K['gpt-4o-mini'];
+  const rates = COST_PER_1K[model] || COST_PER_1K['gpt-5.6-luna'];
   return +((tokensIn / 1000) * rates.input + (tokensOut / 1000) * rates.output).toFixed(6);
 }
 
 // ---- Capability Flags ------------------------------------------------------
 
-const COMPLETION_TOKEN_MODELS = /^(gpt-[45]\.[1-9]|gpt-5$|o[1-4])/;
+const COMPLETION_TOKEN_MODELS = /^(gpt-[45]\.[1-9]|gpt-5$|gpt-5\.6|o[1-4])/;
 
 function usesCompletionTokens(model) {
   return COMPLETION_TOKEN_MODELS.test(model);
@@ -69,9 +73,9 @@ function classifyTier(model) {
   const cached = _tierCache.get(model);
   if (cached) return cached;
 
-  const orchModel  = process.env.MERMATE_ORCHESTRATOR_MODEL || process.env.MERMATE_AI_MAX_MODEL || 'gpt-4o';
-  const workModel  = process.env.MERMATE_WORKER_MODEL       || process.env.MERMATE_AI_MODEL     || 'gpt-4o';
-  const fastModel  = process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-4o-mini';
+  const orchModel  = process.env.MERMATE_ORCHESTRATOR_MODEL || process.env.MERMATE_AI_MAX_MODEL || 'gpt-5.6-sol';
+  const workModel  = process.env.MERMATE_WORKER_MODEL       || process.env.MERMATE_AI_MODEL     || 'gpt-5.6-terra';
+  const fastModel  = process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-5.6-luna';
   const localModel = process.env.LOCAL_LLM_MODEL || process.env.MERMATE_OLLAMA_MODEL || 'gpt-oss:20b';
 
   let tier = Tier.WORKER;
@@ -79,9 +83,9 @@ function classifyTier(model) {
   else if (model === workModel) tier = Tier.WORKER;
   else if (model === fastModel) tier = Tier.FAST;
   else if (model === localModel || model === 'enhancer') tier = Tier.LOCAL;
-  else if (/^gpt-5\.[3-9]|^gpt-5$|^o[1-9]/.test(model)) tier = Tier.ORCHESTRATOR;
-  else if (/^gpt-5\.[0-2]|^gpt-4o$/.test(model)) tier = Tier.WORKER;
-  else if (/mini|nano/.test(model)) tier = Tier.FAST;
+  else if (/^gpt-5\.[3-9]|^gpt-5$|^gpt-5\.6-sol|^o[1-9]/.test(model)) tier = Tier.ORCHESTRATOR;
+  else if (/^gpt-5\.[0-2]|^gpt-5\.6-terra|^gpt-4o$/.test(model)) tier = Tier.WORKER;
+  else if (/mini|nano|luna/.test(model)) tier = Tier.FAST;
 
   _tierCache.set(model, tier);
   return tier;

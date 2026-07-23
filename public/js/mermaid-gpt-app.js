@@ -17,13 +17,127 @@
 
   const STAGES = ['idea', 'md', 'mmd', 'tla', 'ts'];
   const INPUT_STAGES = new Set(['idea', 'md', 'mmd']);
-  const RENDER_ICON_SVGS = {
-    idea: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5a4.5 4.5 0 0 1 2.25 8.4v1.85a1.25 1.25 0 0 1-1.25 1.25h-2a1.25 1.25 0 0 1-1.25-1.25V9.9A4.5 4.5 0 0 1 8 1.5z"/></svg>',
-    md:   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="1.5" width="12" height="13" rx="1.5"/><line x1="5" y1="5" x2="11" y2="5"/><line x1="5" y1="8" x2="11" y2="8"/></svg>',
-    mmd:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="5 4 2 8 5 12"/><polyline points="11 4 14 8 11 12"/><line x1="9" y1="2" x2="7" y2="14"/></svg>',
-    tla:  '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5l5.5 3v7L8 14.5 2.5 11.5v-7z"/><path d="M5 8h6"/><path d="M8 5.5v5"/></svg>',
-    ts:   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M6 6h4M8 6v5"/></svg>',
+
+  // =========================================================================
+  //  STAGE_REGISTRY — the single source of truth for every stage's identity,
+  //  visuals, input config, expected wait times, and IPO contract.
+  //  Every label map, color config, placeholder, and duration band in the
+  //  app derives from this object. Never duplicate stage semantics elsewhere.
+  // =========================================================================
+
+  const STAGE_REGISTRY = {
+    idea: {
+      id: 'idea',
+      label: 'Simple Idea',
+      color: '#fbbf24', rgb: '251,191,36',
+      revealLabel: 'STAGE 1 \u00b7 IDEA',
+      icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5a4.5 4.5 0 0 1 2.25 8.4v1.85a1.25 1.25 0 0 1-1.25 1.25h-2a1.25 1.25 0 0 1-1.25-1.25V9.9A4.5 4.5 0 0 1 8 1.5z"/></svg>',
+      placeholder: 'Describe your system, workflow, or diagram idea...\n\nStart simply:\n  "A user logs in, the server checks credentials, then redirects to dashboard"\n\nOr more structured:\n  "Payment flow: Browser \u2192 API Gateway \u2192 Payment Service \u2192 Stripe \u2192 Bank\n   - on success: return confirmation to browser\n   - on failure: show error, retry up to 3 times \u2192 dead letter queue"\n\nUseful signals: actors, services, arrows (\u2192), steps, decisions, states, failures',
+      hint: 'Type an idea \u00b7 \u2318\u23ce / Ctrl+Return to enhance text \u00b7 Tab to accept suggestion',
+      enhanceDefault: true,
+      showUpload: false,
+      duration: { label: '\u22485\u201315s', ms: 15000 },
+      ipo: {
+        input: 'Raw text dump \u2014 ideas, notes, speech',
+        process: 'Copilot profile analysis + AI enhancement',
+        output: 'Refined idea, ready for Markdown structuring',
+      },
+    },
+    md: {
+      id: 'md',
+      label: 'Markdown Spec',
+      color: '#38bdf8', rgb: '56,189,248',
+      revealLabel: 'STAGE 2 \u00b7 MARKDOWN',
+      icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="1.5" width="12" height="13" rx="1.5"/><line x1="5" y1="5" x2="11" y2="5"/><line x1="5" y1="8" x2="11" y2="8"/></svg>',
+      placeholder: 'Paste your Markdown architecture specification...\n\nInclude diagram descriptions in markdown format:\n  ## User Authentication Flow\n  The user submits credentials to the login API...\n\nSupported formats: .md, .markdown, .txt',
+      hint: 'Paste or upload a markdown spec with diagram descriptions',
+      enhanceDefault: true,
+      showUpload: true,
+      accept: '.md,.markdown,.txt',
+      duration: { label: '\u224810\u201360s', ms: 60000 },
+      ipo: {
+        input: 'Idea artifact or pasted/uploaded .md',
+        process: 'Agent planning + spec refinement',
+        output: 'Corrected architecture spec, Mermaid unlocked',
+      },
+    },
+    mmd: {
+      id: 'mmd',
+      label: 'Mermaid',
+      color: '#818cf8', rgb: '129,140,248',
+      revealLabel: 'STAGE 3 \u00b7 DIAGRAM',
+      icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="5 4 2 8 5 12"/><polyline points="11 4 14 8 11 12"/><line x1="9" y1="2" x2="7" y2="14"/></svg>',
+      placeholder: 'Paste or upload Mermaid (.mmd) source code...\n\nExample:\n  graph TD\n    A[User] \u2192|logs in| B[Server]\n    B \u2192|checks| C[Database]\n\nSupported format: .mmd',
+      hint: 'Paste Mermaid source directly for compilation',
+      enhanceDefault: false,
+      showUpload: true,
+      accept: '.mmd',
+      duration: { label: '\u22485\u201330s', ms: 30000 },
+      ipo: {
+        input: 'Markdown spec or raw .mmd source',
+        process: 'Compile + repair + depth scoring',
+        output: 'Mastered diagram (PNG/SVG) \u2014 the run TLA+/TS build from',
+      },
+    },
+    tla: {
+      id: 'tla',
+      label: 'TLA+',
+      color: '#a78bfa', rgb: '167,139,250',
+      revealLabel: 'STAGE 4 \u00b7 TLA+',
+      icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1.5l5.5 3v7L8 14.5 2.5 11.5v-7z"/><path d="M5 8h6"/><path d="M8 5.5v5"/></svg>',
+      placeholder: 'TLA+ specification source...\n\nGenerated after a successful Mermaid render.\nEdit the specification, then press Render to verify with SANY and TLC.\n\nThe spec includes:\n  - State variables\n  - Invariants\n  - Next-state relation',
+      hint: 'Edit the TLA+ specification, then Render to verify with SANY/TLC',
+      enhanceDefault: false,
+      showUpload: false,
+      duration: { label: '\u22481\u20132 min', ms: 120000 },
+      ipo: {
+        input: 'Mastered run (run_id + diagram)',
+        process: 'Specula generation \u2192 SANY parse \u2192 TLC model check',
+        output: 'Verified formal spec + config, invariants, traces',
+      },
+    },
+    ts: {
+      id: 'ts',
+      label: 'TypeScript',
+      color: '#34d399', rgb: '52,211,153',
+      revealLabel: 'STAGE 5 \u00b7 TYPESCRIPT',
+      icon: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M6 6h4M8 6v5"/></svg>',
+      placeholder: 'TypeScript runtime source...\n\nGenerated after TLA+ verification.\nEdit the runtime code, then press Render to compile and run the test harness.\n\nThe runtime includes:\n  - State machine implementation\n  - Test harness\n  - Coverage reports',
+      hint: 'Edit the TypeScript runtime, then Render to compile and test',
+      enhanceDefault: false,
+      showUpload: false,
+      duration: { label: '\u224820\u201390s', ms: 90000 },
+      ipo: {
+        input: 'Verified TLA+ spec of the mastered run',
+        process: 'Compile to single runtime \u2192 tsc \u2192 harness \u2192 coverage',
+        output: 'One script \u2014 the functional replica proving the architecture',
+      },
+    },
   };
+
+  // Named confidence levels — every orchestrator confidence write uses these.
+  // Meaning is fixed: what the value SAYS about the artifact's verification.
+  const CONFIDENCE = {
+    RENDERED: 1.0,   // diagram compiled and rendered — definitive for its stage
+    VERIFIED: 0.95,  // formally verified (TLC clean / tests pass)
+    COMPILED: 0.94,  // mermaid compiled successfully from the plan
+    PASS: 0.9,       // primary check passed (SANY / tsc)
+    DRAFT: 0.86,     // agent-generated draft, not yet verified
+    PARTIAL: 0.7,    // primary passed, secondary incomplete
+    WEAK: 0.6,       // compiles but tests fail
+    FAILED: 0.45,    // generated but failed verification
+    BROKEN: 0.3,     // hard failure
+    REJECTED: 0.2,   // unusable output
+  };
+
+  // Stages unlocked up to and including `stage` — replaces hand-typed arrays.
+  const unlockedThrough = (stage) => STAGES.slice(0, STAGES.indexOf(stage) + 1);
+
+  // Derived view for the reveal pod (stage colors + labels + final variant).
+  const _STAGE_CFG = Object.fromEntries(
+    STAGES.map(s => [s, { color: STAGE_REGISTRY[s].color, rgb: STAGE_REGISTRY[s].rgb, label: STAGE_REGISTRY[s].revealLabel }])
+  );
+  _STAGE_CFG.final = { color: '#f59e0b', rgb: '245,158,11', label: '\u2726 COMPLETE' };
 
   class WorkflowOrchestrator {
     constructor() {
@@ -33,8 +147,12 @@
         completed: {},
         confidence: {},
         guidance: {},
+        nextRecommended: null,
       };
       this.artifacts = {};
+      // Session lineage — the mastered run all downstream stages derive from.
+      // Owned here so state + artifacts + session persist as ONE payload.
+      this.session = { runId: null, diagramName: '', paths: null };
       this._subscribers = [];
     }
 
@@ -83,9 +201,10 @@
       if (payload.guidance && payload.stage) {
         this.state.guidance[payload.stage] = payload.guidance;
       }
-      if (payload.nextRecommended && this.isUnlocked(payload.nextRecommended)) {
-        this.state.currentStage = payload.nextRecommended;
-      }
+      // nextRecommended is a HINT, not a switch. Silently mutating
+      // currentStage here desynced the visible tab from the FSM — stage
+      // changes go through switchTo()/setMode() only.
+      this.state.nextRecommended = payload.nextRecommended || null;
       this._persist();
       this._notify();
     }
@@ -112,8 +231,10 @@
         completed: {},
         confidence: {},
         guidance: {},
+        nextRecommended: null,
       };
       this.artifacts = {};
+      this.session = { runId: null, diagramName: '', paths: null };
       this._persist();
       this._notify();
     }
@@ -126,30 +247,47 @@
       }
     }
 
+    setSession(patch) {
+      this.session = { ...this.session, ...patch };
+      this._persist();
+    }
+
     _persist() {
       try {
         const payload = JSON.stringify({
           state: this.state,
           artifacts: this.artifacts,
+          session: this.session,
         });
-        // localStorage survives browser restart; sessionStorage is a
-        // secondary write so older code paths that still read it keep
-        // working until the entire app moves to localStorage.
+        // localStorage survives browser restart — sole persistence layer,
+        // ONE payload: FSM state + artifacts + session lineage together.
         localStorage.setItem('mermate_workflow', payload);
-        sessionStorage.setItem('mermate_workflow', payload);
       } catch { /* storage full or unavailable */ }
     }
 
     restore() {
       try {
-        // Prefer localStorage (durable across restarts). Fall back to
-        // sessionStorage for users who only have data in the old store.
-        const raw = localStorage.getItem('mermate_workflow')
-          || sessionStorage.getItem('mermate_workflow');
+        // localStorage is the sole persistence layer (durable across restarts).
+        const raw = localStorage.getItem('mermate_workflow');
         if (!raw) return;
         const saved = JSON.parse(raw);
         if (saved.state) this.state = { ...this.state, ...saved.state };
         if (saved.artifacts) this.artifacts = saved.artifacts;
+        if (saved.session) {
+          this.session = { ...this.session, ...saved.session };
+        } else {
+          // One-time migration from the legacy split store.
+          const legacy = localStorage.getItem('mermate_session');
+          if (legacy) {
+            const s = JSON.parse(legacy);
+            this.session = {
+              runId: s.runId || null,
+              diagramName: s.diagramName || '',
+              paths: s.paths || null,
+            };
+            localStorage.removeItem('mermate_session');
+          }
+        }
       } catch { /* corrupt or missing */ }
     }
   }
@@ -259,28 +397,20 @@
   let _agentHandoffToken = 0;
   let _agentGazeTimer = null;
 
+  // The local currentRunId/currentDiagramName/currentPaths variables are
+  // in-memory working mirrors; the orchestrator owns persistence (single
+  // payload alongside FSM state + artifacts).
   function _persistSession() {
-    try {
-      const payload = JSON.stringify({
-        runId: currentRunId, diagramName: currentDiagramName, paths: currentPaths,
-      });
-      // localStorage survives browser restart; sessionStorage kept as a
-      // backwards-compatible secondary write.
-      localStorage.setItem('mermate_session', payload);
-      sessionStorage.setItem('mermate_session', payload);
-    } catch {}
+    orchestrator.setSession({
+      runId: currentRunId, diagramName: currentDiagramName, paths: currentPaths,
+    });
   }
 
   function _restoreSession() {
-    try {
-      const raw = localStorage.getItem('mermate_session')
-        || sessionStorage.getItem('mermate_session');
-      if (!raw) return;
-      const s = JSON.parse(raw);
-      if (s.runId) currentRunId = s.runId;
-      if (s.diagramName) currentDiagramName = s.diagramName;
-      if (s.paths) currentPaths = s.paths;
-    } catch {}
+    const s = orchestrator.session;
+    if (s.runId) currentRunId = s.runId;
+    if (s.diagramName) currentDiagramName = s.diagramName;
+    if (s.paths) currentPaths = s.paths;
   }
   let isFullscreen = false;
   let copilot = null;
@@ -387,43 +517,10 @@
   const COPILOT_API_BASE = '/api/copilot';
 
   // =========================================================================
-  //  Mode Configuration (5 stages)
+  //  Mode Configuration — placeholders/hints/upload config live in
+  //  STAGE_REGISTRY (top of file). LOADING_MESSAGES is keyed by content
+  //  state (not stage), so it stays separate.
   // =========================================================================
-
-  const MODE_CONFIG = {
-    idea: {
-      placeholder: 'Describe your system, workflow, or diagram idea...\n\nStart simply:\n  "A user logs in, the server checks credentials, then redirects to dashboard"\n\nOr more structured:\n  "Payment flow: Browser \u2192 API Gateway \u2192 Payment Service \u2192 Stripe \u2192 Bank\n   - on success: return confirmation to browser\n   - on failure: show error, retry up to 3 times \u2192 dead letter queue"\n\nUseful signals: actors, services, arrows (\u2192), steps, decisions, states, failures',
-      hint: 'Type an idea \u00b7 \u2318\u23ce / Ctrl+Return to enhance text \u00b7 Tab to accept suggestion',
-      enhanceDefault: true,
-      showUpload: false,
-    },
-    md: {
-      placeholder: 'Paste your Markdown architecture specification...\n\nInclude diagram descriptions in markdown format:\n  ## User Authentication Flow\n  The user submits credentials to the login API...\n\nSupported formats: .md, .markdown, .txt',
-      hint: 'Paste or upload a markdown spec with diagram descriptions',
-      enhanceDefault: true,
-      showUpload: true,
-      accept: '.md,.markdown,.txt',
-    },
-    mmd: {
-      placeholder: 'Paste or upload Mermaid (.mmd) source code...\n\nExample:\n  graph TD\n    A[User] \u2192|logs in| B[Server]\n    B \u2192|checks| C[Database]\n\nSupported format: .mmd',
-      hint: 'Paste Mermaid source directly for compilation',
-      enhanceDefault: false,
-      showUpload: true,
-      accept: '.mmd',
-    },
-    tla: {
-      placeholder: 'TLA+ specification source...\n\nGenerated after a successful Mermaid render.\nEdit the specification, then press Render to verify with SANY and TLC.\n\nThe spec includes:\n  - State variables\n  - Invariants\n  - Next-state relation',
-      hint: 'Edit the TLA+ specification, then Render to verify with SANY/TLC',
-      enhanceDefault: false,
-      showUpload: false,
-    },
-    ts: {
-      placeholder: 'TypeScript runtime source...\n\nGenerated after TLA+ verification.\nEdit the runtime code, then press Render to compile and run the test harness.\n\nThe runtime includes:\n  - State machine implementation\n  - Test harness\n  - Coverage reports',
-      hint: 'Edit the TypeScript runtime, then Render to compile and test',
-      enhanceDefault: false,
-      showUpload: false,
-    },
-  };
 
   const LOADING_MESSAGES = {
     text: 'Converting text to diagram...',
@@ -503,7 +600,7 @@
     });
 
     if (renderIcon) {
-      renderIcon.innerHTML = RENDER_ICON_SVGS[mode] || RENDER_ICON_SVGS.idea;
+      renderIcon.innerHTML = (STAGE_REGISTRY[mode] || STAGE_REGISTRY.idea).icon;
     }
 
     const isDiagramMode = INPUT_STAGES.has(mode);
@@ -559,7 +656,7 @@
   const _agentSleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
   function _stageLabel(stage) {
-    return ({ idea: 'Simple Idea', md: 'Markdown Spec', mmd: 'Mermaid', tla: 'TLA+', ts: 'TypeScript' })[stage] || stage;
+    return STAGE_REGISTRY[stage]?.label || stage;
   }
 
   function _agentTargetForPhase(phase) {
@@ -640,98 +737,109 @@
   let _agentRunPopulatedStages = new Set();
   let _agentRunMetrics = null;
 
+  // Canonical agent-event adapter — the ONE place that understands both the
+  // canonical envelope (`artifacts: {md, mmd, tla, ts}`) and the legacy
+  // per-key payloads (md_source/draft_text, mmd_source/compiled_source…).
+  // Everything downstream consumes the normalized shape only.
+  let _legacyKeysWarned = false;
+  function normalizeAgentEvent(event) {
+    if (!event) {
+      return {
+        artifacts: { md: '', mmd: '', tla: '', ts: '' },
+        verification: { sanyValid: false, tsCompiled: false },
+        runId: null, diagramName: '', paths: null, metrics: null, progressionUpdate: null,
+      };
+    }
+    const canonical = event.artifacts || null;
+    if (!canonical && (event.draft_text || event.compiled_source) && !_legacyKeysWarned) {
+      _legacyKeysWarned = true;
+      console.warn('[normalizeAgentEvent] legacy payload keys detected (draft_text/compiled_source) — server should emit the canonical `artifacts` envelope');
+    }
+    return {
+      artifacts: {
+        md: (canonical?.md ?? event.md_source ?? event.draft_text ?? '') || '',
+        mmd: (canonical?.mmd ?? event.mmd_source ?? event.compiled_source ?? '') || '',
+        tla: (canonical?.tla ?? event.tla_source ?? '') || '',
+        ts: (canonical?.ts ?? event.ts_source ?? '') || '',
+      },
+      verification: {
+        sanyValid: !!event.sany_valid,
+        tsCompiled: !!(event.compile_ok || event.ts_compiled),
+      },
+      runId: event.run_id || null,
+      diagramName: event.diagram_name || '',
+      paths: (event.paths && (event.paths.png || event.paths.svg)) ? event.paths : null,
+      metrics: event.metrics || null,
+      progressionUpdate: event.progressionUpdate || null,
+    };
+  }
+
+  // Per-stage artifact application config — how each stage's arrival is
+  // scored, what it unlocks, and how it's described. Confidence resolvers
+  // read the normalized verification block.
+  const AGENT_ARTIFACT_RULES = {
+    md: {
+      unlocks: 'mmd',
+      confidence: () => CONFIDENCE.DRAFT,
+      guidance: 'Markdown spec generated from agent planning/refinement.',
+    },
+    mmd: {
+      unlocks: 'ts',
+      confidence: () => CONFIDENCE.COMPILED,
+      guidance: 'Mermaid source compiled from the Markdown/architecture plan.',
+    },
+    tla: {
+      unlocks: 'ts',
+      confidence: (v) => (v.sanyValid ? CONFIDENCE.PASS : CONFIDENCE.FAILED),
+      guidance: 'TLA+ specification generated from the current diagram run.',
+    },
+    ts: {
+      unlocks: 'ts',
+      confidence: (v) => (v.tsCompiled ? CONFIDENCE.PASS : CONFIDENCE.FAILED),
+      guidance: 'TypeScript runtime generated from the verified TLA+ artifact.',
+    },
+  };
+
   function _applyAgentArtifacts(event) {
-    const mdSource = event?.md_source || event?.draft_text || '';
-    const mmdSource = event?.mmd_source || event?.compiled_source || '';
-    const tlaSource = event?.tla_source || '';
-    const tsSource = event?.ts_source || '';
+    const ev = normalizeAgentEvent(event);
 
-    if (event?.diagram_name) currentDiagramName = event.diagram_name;
-    if (event?.run_id) currentRunId = event.run_id;
-    // Only update currentPaths if the event provides valid, non-empty paths
-    if (event?.paths && (event.paths.png || event.paths.svg)) {
-      currentPaths = event.paths;
-    }
+    if (ev.diagramName) currentDiagramName = ev.diagramName;
+    if (ev.runId) currentRunId = ev.runId;
+    if (ev.paths) currentPaths = ev.paths;
 
-    if (mdSource.trim()) {
-      const prev = orchestrator.getArtifact('md') || '';
-      orchestrator.setArtifact('md', mdSource);
-      orchestrator.updateFromBackend({
-        stage: 'md',
-        unlockedStages: ['idea', 'md', 'mmd'],
-        confidence: 0.86,
-        guidance: 'Markdown spec generated from agent planning/refinement.',
-      });
-      if (prev.trim() !== mdSource.trim()) {
-        showToast(`Markdown tab populated (${mdSource.length.toLocaleString()} chars)`, 'success', 3000);
-        _markTabHasNewContent('md');
-        _agentRunPopulatedStages.add('md');
-      }
-    }
+    // One registry-driven loop replaces the four hand-rolled stage blocks.
+    let highestNewStage = null;
+    for (const stage of ['md', 'mmd', 'tla', 'ts']) {
+      const src = ev.artifacts[stage];
+      if (!src.trim()) continue;
+      highestNewStage = stage;
 
-    if (mmdSource.trim()) {
-      const prev = orchestrator.getArtifact('mmd') || '';
-      orchestrator.setArtifact('mmd', mmdSource);
-      orchestrator.updateFromBackend({
-        stage: 'mmd',
-        unlockedStages: ['idea', 'md', 'mmd', 'tla', 'ts'],
-        confidence: 0.94,
-        guidance: 'Mermaid source compiled from the Markdown/architecture plan.',
-      });
-      if (prev.trim() !== mmdSource.trim()) {
-        showToast(`Mermaid tab populated (${mmdSource.length.toLocaleString()} chars)`, 'success', 3000);
-        _markTabHasNewContent('mmd');
-        _agentRunPopulatedStages.add('mmd');
-      }
-    }
-
-    if (tlaSource.trim()) {
-      const prev = orchestrator.getArtifact('tla') || '';
-      orchestrator.setArtifact('tla', tlaSource);
-      orchestrator.updateFromBackend({
-        stage: 'tla',
-        unlockedStages: ['idea', 'md', 'mmd', 'tla', 'ts'],
-        confidence: event?.sany_valid ? 0.9 : 0.45,
-        guidance: 'TLA+ specification generated from the current diagram run.',
-      });
-      if (prev.trim() !== tlaSource.trim()) {
-        showToast(`TLA+ tab populated (${tlaSource.length.toLocaleString()} chars)`, 'success', 3000);
-        _markTabHasNewContent('tla');
-        _agentRunPopulatedStages.add('tla');
-      }
-    }
-
-    if (tsSource.trim()) {
-      const prev = orchestrator.getArtifact('ts') || '';
-      orchestrator.setArtifact('ts', tsSource);
-      orchestrator.updateFromBackend({
-        stage: 'ts',
-        unlockedStages: ['idea', 'md', 'mmd', 'tla', 'ts'],
-        confidence: event?.compile_ok || event?.ts_compiled ? 0.9 : 0.45,
-        guidance: 'TypeScript runtime generated from the verified TLA+ artifact.',
-      });
-      if (prev.trim() !== tsSource.trim()) {
-        showToast(`TypeScript tab populated (${tsSource.length.toLocaleString()} chars)`, 'success', 3000);
-        _markTabHasNewContent('ts');
-        _agentRunPopulatedStages.add('ts');
+      const rule = AGENT_ARTIFACT_RULES[stage];
+      const prev = orchestrator.getArtifact(stage) || '';
+      orchestrator.setArtifact(stage, src);
+      // Server progressionUpdate is authoritative when provided; the local
+      // rule is the fallback during the legacy-payload transition.
+      orchestrator.updateFromBackend(ev.progressionUpdate?.stage === stage
+        ? ev.progressionUpdate
+        : {
+            stage,
+            unlockedStages: unlockedThrough(rule.unlocks),
+            confidence: rule.confidence(ev.verification),
+            guidance: rule.guidance,
+          });
+      if (prev.trim() !== src.trim()) {
+        showToast(`${_stageLabel(stage)} tab populated (${src.length.toLocaleString()} chars)`, 'success', 3000);
+        _markTabHasNewContent(stage);
+        _agentRunPopulatedStages.add(stage);
       }
     }
 
     // Track metrics from the most recent render event for the completion banner
-    if (event?.metrics) _agentRunMetrics = event.metrics;
+    if (ev.metrics) _agentRunMetrics = ev.metrics;
 
     // Deterministic auto-switch — guarantees the user lands on the tab
     // that just received new content, even if the animated walk in
     // _agenticallyReviewArtifacts gets cancelled by a subsequent event.
-    const stageOrder = ['md', 'mmd', 'tla', 'ts'];
-    let highestNewStage = null;
-    for (const stage of stageOrder) {
-      const src = stage === 'md' ? mdSource
-        : stage === 'mmd' ? mmdSource
-        : stage === 'tla' ? tlaSource
-        : tsSource;
-      if (src.trim()) highestNewStage = stage;
-    }
     if (highestNewStage && orchestrator.isUnlocked(highestNewStage)) {
       _scheduleAutoSwitchToStage(highestNewStage);
     }
@@ -776,11 +884,8 @@
 
   async function _agenticallyReviewArtifacts(event) {
     const token = ++_agentHandoffToken;
-    const stages = [];
-    if ((event?.md_source || event?.draft_text || '').trim()) stages.push('md');
-    if ((event?.mmd_source || event?.compiled_source || '').trim()) stages.push('mmd');
-    if ((event?.tla_source || '').trim()) stages.push('tla');
-    if ((event?.ts_source || '').trim()) stages.push('ts');
+    const ev = normalizeAgentEvent(event);
+    const stages = ['md', 'mmd', 'tla', 'ts'].filter(s => ev.artifacts[s].trim());
     if (stages.length === 0) return;
 
     await _agentSleep(450);
@@ -798,12 +903,31 @@
       }
       await _animateTabHandoff(currentMode, stage);
       if (token !== _agentHandoffToken) return;
+
+      // THE rainbow moment — the raw idea dump becoming a structured
+      // architecture spec is the flagship transformation of the pipeline.
+      // Play the word-level semantic transition from idea → md so the user
+      // SEES their words become architecture (agent runs included).
+      const isMdHandoff = stage === 'md' && _agentRunPopulatedStages.has('md');
+      const priorIdea = isMdHandoff ? (orchestrator.getArtifact('idea') || '') : '';
+
       if (currentMode === stage) {
         input.value = orchestrator.getArtifact(stage);
         input.dispatchEvent(new Event('input', { bubbles: true }));
         syncUiGuidance();
       } else {
         setMode(stage);
+      }
+      if (isMdHandoff && priorIdea.trim()) {
+        await animateRenderTransition(priorIdea, orchestrator.getArtifact('md'));
+        if (token !== _agentHandoffToken) return;
+        _playRenderReveal({
+          stage: 'md',
+          isFinal: false,
+          diagramName: currentDiagramName,
+          metrics: null,
+          paths: null,
+        });
       }
       copilotWrap?.classList.add('is-agent-reviewing');
       await _agentSleep(stage === 'md' ? 1800 : 1300);
@@ -838,7 +962,7 @@
     // if it was set by a prior agent run.
     _clearTabNewContent(mode);
 
-    const cfg = MODES[mode] || MODES.idea;
+    const cfg = STAGE_REGISTRY[mode] || STAGE_REGISTRY.idea;
     input.value = orchestrator.getArtifact(mode);
     _inputLoaded = true;  // Textarea now reflects the artifact for this mode
     input.placeholder = cfg.placeholder;
@@ -861,11 +985,8 @@
       btnUpload.classList.remove('visible');
     }
 
-    // Update input hint text based on mode
-    if (inputHint) inputHint.textContent = cfg.hint || '';
-
-    // Update placeholder text based on mode
-    input.placeholder = cfg.placeholder || '';
+    // Hint text is owned by syncUiGuidance() (called below) and the
+    // placeholder was already set above — no duplicate writes.
 
     try {
       if (mode === 'idea' && window.MermaidCopilot) {
@@ -899,13 +1020,14 @@
     if ((mode === 'tla' || mode === 'ts') && currentRunId && currentDiagramName) {
       const artifact = orchestrator.getArtifact(mode);
       if (!artifact || !artifact.trim()) {
-        input.value = mode === 'tla'
-          ? `Generating TLA+ specification from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)}\nPress Render or wait for auto-start.`
-          : `Generating TypeScript runtime from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)}\nPress Render or wait for auto-start.`;
-        // Only mark readOnly while the auto-generate fetch is in flight.
-        // The render() call below clears readOnly when complete (see lines
-        // ~1842, ~1934). If the user manually pastes/edits before render
-        // fires, they should be allowed to — so we keep readOnly off here.
+        // Real pending state: the textarea stays EMPTY (data never fakes UI).
+        // The placeholder carries the generating message + expected wait,
+        // and syncUiGuidance's hasRun branch shows the auto-start hint.
+        input.placeholder = mode === 'tla'
+          ? `Generating TLA+ specification from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)} (the mastered run)\nExpected wait: ${cfg.duration.label} — Specula → SANY → TLC\nPress Render or wait for auto-start.`
+          : `Generating TypeScript runtime from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)} (the mastered run)\nExpected wait: ${cfg.duration.label} — compile → tsc → harness → coverage\nPress Render or wait for auto-start.`;
+        // The user can paste their own content before auto-start fires —
+        // render() only proceeds when it still targets this mode.
         setTimeout(() => {
           if (currentMode === mode && !isLoading) render();
         }, 600);
@@ -937,7 +1059,7 @@
     const hasInput = source.trim().length > 0;
     const hasName = !!diagramNameInput?.value?.trim();
     const hasResult = !!currentPaths;
-    const activeMode = MODES[currentMode] || MODES.idea;
+    const activeMode = STAGE_REGISTRY[currentMode] || STAGE_REGISTRY.idea;
     let hint = activeMode.hint;
     let nextAction = '';
     let tone = 'ready';
@@ -968,11 +1090,11 @@
       tone = 'ready';
     } else if (currentMode === 'tla') {
       const hasRun = !!(currentRunId && currentDiagramName);
-      if (hasInput && hasInput !== input.value.startsWith('Generating')) {
+      if (hasInput) {
         hint = activeMode.hint;
-        nextAction = 'Next: render to verify TLA+';
+        nextAction = `Next: render to verify TLA+ (${activeMode.duration.label})`;
       } else if (hasRun) {
-        hint = `Ready to generate TLA+ for "${currentDiagramName}" — auto-starting...`;
+        hint = `Ready to generate TLA+ for "${currentDiagramName}" — auto-starting (${activeMode.duration.label})...`;
         nextAction = 'Next: generating TLA+ specification via Specula';
         tone = 'busy';
       } else {
@@ -982,11 +1104,11 @@
       tone = tone || 'ready';
     } else if (currentMode === 'ts') {
       const hasRun = !!(currentRunId && currentDiagramName);
-      if (hasInput && !input.value.startsWith('Generating')) {
+      if (hasInput) {
         hint = activeMode.hint;
-        nextAction = 'Next: render to compile TypeScript';
+        nextAction = `Next: render to compile TypeScript (${activeMode.duration.label})`;
       } else if (hasRun) {
-        hint = `Ready to generate TypeScript for "${currentDiagramName}" — auto-starting...`;
+        hint = `Ready to generate TypeScript for "${currentDiagramName}" — auto-starting (${activeMode.duration.label})...`;
         nextAction = 'Next: compiling TypeScript runtime';
         tone = 'busy';
       } else {
@@ -1196,13 +1318,12 @@
     if (!stageTrackerEl) return;
     stageTrackerEl.hidden = false;
     const steps = stageTrackerEl.querySelectorAll('.stage-tracker-step');
-    const stageOrder = ['idea', 'md', 'mmd', 'tla', 'ts'];
-    const targetIdx = stageOrder.indexOf(stage);
+    const targetIdx = STAGES.indexOf(stage);
     if (targetIdx === -1) return;
 
     steps.forEach((el) => {
       const s = el.dataset.stage;
-      const idx = stageOrder.indexOf(s);
+      const idx = STAGES.indexOf(s);
       el.classList.remove('is-active', 'is-complete', 'is-error');
       if (s === stage) {
         if (status === 'complete') el.classList.add('is-complete');
@@ -1225,6 +1346,27 @@
   // (Duplicate mode-btn listener + duplicate syncUiGuidance block removed —
   //  the canonical versions are defined earlier in this IIFE.)
 
+  // Elapsed-time ticker for the loading overlay. Long stages (TLA+ ≈1–2 min,
+  // TS ≈20–90s) need proof-of-life: the user sees elapsed seconds against
+  // the expected band, so a slow verification never reads as a hang.
+  let _loadingTicker = null;
+  let _loadingStartedAt = 0;
+
+  function _startLoadingTicker(baseMessage, durationLabel) {
+    _stopLoadingTicker();
+    _loadingStartedAt = Date.now();
+    const suffix = durationLabel ? ` · expected ${durationLabel}` : '';
+    loadingText.textContent = `${baseMessage}${suffix}`;
+    _loadingTicker = setInterval(() => {
+      const elapsed = Math.round((Date.now() - _loadingStartedAt) / 1000);
+      loadingText.textContent = `${baseMessage} — ${elapsed}s${suffix}`;
+    }, 1000);
+  }
+
+  function _stopLoadingTicker() {
+    if (_loadingTicker) { clearInterval(_loadingTicker); _loadingTicker = null; }
+  }
+
   function setLoading(on, contentState) {
     // Don't show loading overlay during agent operations - agent panel shows progress
     if (on && (agentState === 'running' || agentState === 'finalizing' || agentState === 'awaiting_notes')) {
@@ -1238,10 +1380,13 @@
     isLoading = on;
     btnRender.disabled = on;
     input.readOnly = on;
-    if (on && contentState && LOADING_MESSAGES[contentState]) {
-      loadingText.textContent = LOADING_MESSAGES[contentState];
-    } else if (on) {
-      loadingText.textContent = 'Compiling...';
+    if (on) {
+      const baseMessage = (contentState && LOADING_MESSAGES[contentState]) || 'Compiling...';
+      // contentState maps to a stage for tla/ts — surface its duration band.
+      const durationLabel = STAGE_REGISTRY[contentState]?.duration?.label || '';
+      _startLoadingTicker(baseMessage, durationLabel);
+    } else {
+      _stopLoadingTicker();
     }
 
     if (on) {
@@ -1278,7 +1423,12 @@
     el.dataset.tier = tier;
     const text = el.querySelector('.depth-badge-text');
     if (text) text.textContent = `Depth · ${tier} · ${score}`;
-    el.title = `Architecture depth tier: ${tier} (score ${score})`;
+    const tierMeaning = {
+      deep: 'rich state space — TLA+ verification will cover more behavior',
+      medium: 'moderate state space — good TLA+ coverage expected',
+      shallow: 'simple structure — consider adding actors/failure paths before TLA+',
+    }[tier] || '';
+    el.title = `Architecture depth tier: ${tier} (score ${score})${tierMeaning ? ' · ' + tierMeaning : ''}`;
     el.hidden = false;
   }
 
@@ -1357,10 +1507,14 @@
     resultSection.classList.add('is-revealing');
     window.setTimeout(() => resultSection.classList.remove('is-revealing'), 220);
 
+    const resultStage = INPUT_STAGES.has(currentMode) ? 'mmd' : currentMode;
+    const unlockedUpTo = resultStage === 'mmd'
+      ? unlockedThrough('tla')
+      : STAGES.filter(s => orchestrator.isUnlocked(s));
     orchestrator.updateFromBackend({
-      stage: 'mmd',
-      unlockedStages: ['idea', 'md', 'mmd', 'tla'],
-      confidence: 1.0,
+      stage: resultStage,
+      unlockedStages: unlockedUpTo,
+      confidence: CONFIDENCE.RENDERED,
     });
 
     _persistSession();
@@ -1375,7 +1529,15 @@
     });
 
     if (INPUT_STAGES.has(currentMode) && currentRunId) {
-      _showStandaloneContinuation('tla', `Diagram "${currentDiagramName}" rendered`, 'Continue to TLA+ Specification');
+      // Timeline anchor — this render IS the mastered run. Downstream
+      // stages (TLA+ / TypeScript) derive from exactly this run_id, and
+      // the user should know that without having to think about it.
+      _showStandaloneContinuation(
+        'tla',
+        `\u2605 Mastered run — "${currentDiagramName}" · TLA+ & TypeScript will build from this diagram`,
+        'Continue to TLA+ Specification',
+      );
+      sidebar.markActiveLineage?.(currentRunId);
     }
   }
 
@@ -1392,14 +1554,8 @@
 
   let _revealActive = false;
 
-  const _STAGE_CFG = {
-    idea:  { color: '#fbbf24', rgb: '251,191,36',   label: 'STAGE 1 · IDEA'      },
-    md:    { color: '#38bdf8', rgb: '56,189,248',   label: 'STAGE 2 · MARKDOWN'  },
-    mmd:   { color: '#818cf8', rgb: '129,140,248',  label: 'STAGE 3 · DIAGRAM'   },
-    tla:   { color: '#a78bfa', rgb: '167,139,250',  label: 'STAGE 4 · TLA+'      },
-    ts:    { color: '#34d399', rgb: '52,211,153',   label: 'STAGE 5 · TYPESCRIPT' },
-    final: { color: '#f59e0b', rgb: '245,158,11',   label: '✦ COMPLETE'          },
-  };
+  // Stage colors/labels for the reveal pod come from STAGE_REGISTRY via the
+  // derived _STAGE_CFG defined at the top of this file.
 
   function _buildRevealMessage({ stage, isFinal, diagramName, metrics }) {
     const name = diagramName ? `"${diagramName}"` : 'architecture';
@@ -1415,6 +1571,10 @@
       const n = metrics?.nodeCount ?? '?';
       const e = metrics?.edgeCount ?? '?';
       return `★ ${name} rendered · ${n} nodes · ${e} edges — Open TLA+ to verify behavior, or Render as is.`;
+    }
+    if (stage === 'md') {
+      const chars = (orchestrator.getArtifact('md') || '').length;
+      return `\u2726 ${name} — idea structured into an architecture spec (${chars.toLocaleString()} chars). Review it, then continue to Mermaid.`;
     }
     const cfg = _STAGE_CFG[stage];
     return `${cfg?.label ?? 'MERMATE'} · ${name} updated — continue to next stage.`;
@@ -1858,6 +2018,20 @@
   //  Render Strategies (Strategy pattern — one per stage family)
   // =========================================================================
 
+  // One sidebar-entry shape for every producer (manual render, agent
+  // preview, agent final) — no more per-call-site field drift.
+  function buildSidebarEntry(data, source) {
+    return {
+      name: data.diagram_name,
+      type: data.diagram_type || 'flowchart',
+      paths: data.paths,
+      timestamp: new Date().toLocaleString(),
+      source: source || '',
+      contentState: data.content_state || undefined,
+      run_id: data.run_id || null,
+    };
+  }
+
   async function renderMermaid() {
     const source = input.value.trim();
     if (!source) { showError('Please enter a diagram description or paste Mermaid source.'); return; }
@@ -1915,15 +2089,7 @@
       showToast(`Diagram rendered — ${data.diagram_name || currentDiagramName}`, 'success', 3000);
 
 
-      sidebar.add({
-        name: data.diagram_name,
-        type: data.diagram_type,
-        paths: data.paths,
-        timestamp: new Date().toLocaleString(),
-        source: source,
-        contentState: data.content_state,
-        run_id: data.run_id || null,
-      });
+      sidebar.add(buildSidebarEntry(data, source));
     } catch (err) {
       if (err.name === 'TypeError') { showError('Could not reach server. Is Mermaid-GPT running?'); }
       else { showError(err.message || 'Unexpected error'); }
@@ -1961,6 +2127,7 @@
       input.readOnly = false;
 
       const statusEl = document.getElementById('tla-status');
+      const provenanceEl = document.getElementById('tla-provenance');
       const sourceEl = document.getElementById('tla-source');
       const invEl = document.getElementById('tla-invariants');
       const violPanel = document.getElementById('tla-violations-panel');
@@ -1994,6 +2161,31 @@
       }
 
       if (statusEl) statusEl.innerHTML = `${sanyBadge} ${tlcBadge}`;
+
+      if (provenanceEl && data.verification) {
+        const v = data.verification;
+        const toolboxVerified = v.sany?.valid && v.tlc?.checked;
+        const verifiedBadge = toolboxVerified
+          ? '<span class="tla-provenance-chip tla-provenance-verified" title="Passed SANY syntax check and TLC model check">Toolbox-verified</span>'
+          : '<span class="tla-provenance-chip" title="Verification did not complete">Toolbox-pending</span>';
+        const writer = v.generator?.provider === 'deterministic'
+          ? 'deterministic compiler'
+          : `${v.generator?.provider || 'unknown'} ${v.generator?.model || ''}`.trim();
+        const sanySec = ((v.toolbox?.sanyMs || 0) / 1000).toFixed(1);
+        const tlcSec = ((v.toolbox?.tlcMs || 0) / 1000).toFixed(1);
+        const spsRaw = v.tlc?.statesPerSec || 0;
+        const sps = spsRaw >= 1000 ? `${(spsRaw / 1000).toFixed(1)}k` : String(spsRaw);
+        const repairs = v.generator?.repairAttempts ?? 0;
+        const chipParts = [
+          `written by ${writer}`,
+          `SANY ${sanySec}s`,
+          `TLC ${tlcSec}s`,
+          `${sps} states/s`,
+          `${repairs} repair${repairs === 1 ? '' : 's'}`,
+        ];
+        provenanceEl.innerHTML = `${verifiedBadge}<span class="tla-provenance-chip">${chipParts.join(' \u00b7 ')}</span>`;
+      }
+
       if (sourceEl) sourceEl.textContent = data.tla_source || '';
 
       const invItems = (data.tlc?.invariantsChecked || []).map(inv =>
@@ -2018,10 +2210,12 @@
         metricsEl.innerHTML = `<span>Variables: ${m.variableCount}</span><span>Actions: ${m.actionCount}</span><span>Invariants: ${m.invariantCount}</span><span>Entity coverage: ${(m.entityCoverage * 100).toFixed(0)}%</span><span>State space: ~${m.stateSpaceEstimate}</span>`;
       }
 
-      const tlaConfidence = data.sany?.valid ? (data.tlc?.success ? 0.95 : 0.7) : 0.3;
+      const tlaConfidence = data.sany?.valid
+        ? (data.tlc?.success ? CONFIDENCE.VERIFIED : CONFIDENCE.PARTIAL)
+        : CONFIDENCE.BROKEN;
       orchestrator.updateFromBackend({
         stage: 'tla',
-        unlockedStages: data.sany?.valid ? ['idea', 'md', 'mmd', 'tla', 'ts'] : ['idea', 'md', 'mmd', 'tla'],
+        unlockedStages: unlockedThrough(data.sany?.valid ? 'ts' : 'tla'),
         confidence: tlaConfidence,
         nextRecommended: data.sany?.valid ? 'ts' : undefined,
       });
@@ -2114,7 +2308,9 @@
       if (compileEl) compileEl.innerHTML = `<span>Repairs: ${data.compile?.repairs || 0}</span><span>Timed out: ${data.compile?.timedOut ? 'yes' : 'no'}</span>`;
       if (testsEl) testsEl.innerHTML = `<span>Checked: ${data.tests?.checked ? 'yes' : 'no'}</span><span>Repairs: ${data.tests?.repairs || 0}</span><span>Timed out: ${data.tests?.timedOut ? 'yes' : 'no'}</span>`;
       const coverage = data.coverage || {};
-      if (coverageEl) coverageEl.innerHTML = `<span>Entities: ${((coverage.entityCoverage || 0) * 100).toFixed(0)}%</span><span>Actions: ${((coverage.actionCoverage || 0) * 100).toFixed(0)}%</span><span>Invariants: ${((coverage.invariantCoverage || 0) * 100).toFixed(0)}%</span>`;
+      // Each coverage metric is tied back to its TLA+ counterpart so the
+      // user knows exactly WHAT the harness proved about the architecture.
+      if (coverageEl) coverageEl.innerHTML = `<span title="Share of TLA+ state entities exercised by the runtime">Entities: ${((coverage.entityCoverage || 0) * 100).toFixed(0)}%</span><span title="Share of TLA+ actions the harness executed">Actions: ${((coverage.actionCoverage || 0) * 100).toFixed(0)}%</span><span title="Share of TLA+ invariants the harness verified at runtime">Invariants: ${((coverage.invariantCoverage || 0) * 100).toFixed(0)}%</span>`;
       if (sourceEl) sourceEl.textContent = data.ts_source || '';
 
       if (Array.isArray(data.traces) && data.traces.length > 0) {
@@ -2123,7 +2319,9 @@
         if (tracesEl) tracesEl.textContent = 'No failure traces.';
       }
 
-      const tsConfidence = data.success ? 0.95 : (compileOk ? 0.6 : 0.2);
+      const tsConfidence = data.success
+        ? CONFIDENCE.VERIFIED
+        : (compileOk ? CONFIDENCE.WEAK : CONFIDENCE.REJECTED);
       orchestrator.updateFromBackend({ stage: 'ts', confidence: tsConfidence });
 
       if (data.progressionUpdate) {
@@ -2131,7 +2329,23 @@
       }
 
       if (data.success) {
-        _showStandaloneContinuation('download', 'TypeScript compiled — pipeline complete', 'Download Full Bundle');
+        // The finale — the entire pipeline (idea → md → mmd → tla → ts) is
+        // now proven by one runnable script. Celebrate it like it deserves.
+        _playRenderReveal({
+          stage: 'ts',
+          isFinal: true,
+          diagramName: currentDiagramName,
+          metrics: null,
+          paths: currentPaths,
+        });
+        _showCompletionBanner({
+          project: currentDiagramName,
+          populatedStages: STAGES.filter(s => orchestrator.isCompleted(s)),
+          runId: currentRunId,
+          paths: currentPaths,
+          metrics: _agentRunMetrics,
+        });
+        _showStandaloneContinuation('download', 'TypeScript compiled — pipeline complete · the runtime proves the full architecture', 'Download Full Bundle');
       }
     } catch (err) {
       const errMsg = err.message || 'TypeScript generation error';
@@ -2478,7 +2692,7 @@
           const depthMeta = (event.depth_score != null || event.depth_tier != null)
             ? { score: event.depth_score, tier: event.depth_tier } : null;
           showResult(event.paths, event.diagram_name, event.run_id, event.metrics, depthMeta);
-          sidebar.add({ name: event.diagram_name, type: event.diagram_type || 'flowchart', paths: event.paths, timestamp: new Date().toLocaleString(), source: input.value, run_id: event.run_id || null });
+          sidebar.add(buildSidebarEntry(event, input.value));
           showToast(`Preview ready — ${event.metrics?.nodeCount || '?'} nodes, ${event.metrics?.edgeCount || '?'} edges`, 'success', 3500);
         }
         _updateStageTracker('mmd', 'complete');
@@ -2490,7 +2704,7 @@
           const depthMeta = (event.depth_score != null || event.depth_tier != null)
             ? { score: event.depth_score, tier: event.depth_tier } : null;
           showResult(event.paths, event.diagram_name, event.run_id, event.metrics, depthMeta);
-          sidebar.add({ name: event.diagram_name, type: event.diagram_type || 'flowchart', paths: event.paths, timestamp: new Date().toLocaleString(), source: input.value, run_id: event.run_id || null });
+          sidebar.add(buildSidebarEntry(event, input.value));
           showToast(`Diagram finalized — ${event.diagram_name}`, 'success', 4000);
         }
       },
@@ -2527,12 +2741,12 @@
         if (completedStages.includes('tla')) {
           orchestrator.updateFromBackend({
             stage: 'tla',
-            unlockedStages: ['idea', 'md', 'mmd', 'tla', 'ts'],
-            confidence: event.tla_valid ? 0.9 : 0.4,
+            unlockedStages: unlockedThrough('ts'),
+            confidence: event.tla_valid ? CONFIDENCE.PASS : CONFIDENCE.FAILED,
           });
         }
         if (completedStages.includes('ts')) {
-          orchestrator.updateFromBackend({ stage: 'ts', confidence: event.ts_compiled ? 0.9 : 0.3 });
+          orchestrator.updateFromBackend({ stage: 'ts', confidence: event.ts_compiled ? CONFIDENCE.PASS : CONFIDENCE.BROKEN });
         }
         showToast(`Full build complete — ${completedStages.join(' \u2192 ')}`, 'success', 5000);
         _showStandaloneContinuation('download', `Full build complete — ${completedStages.join(' \u2192 ')}`, 'Download Full Bundle');
@@ -2707,41 +2921,116 @@
       });
   }
 
-  fetch('/api/copilot/health')
-    .then(r => r.json())
-    .then(data => { if (data.maxAvailable && btnMax) btnMax.classList.add('visible'); })
-    .catch(() => {});
+  // =========================================================================
+  //  Boot Sequence — coordinated health checks before app is ready
+  // =========================================================================
 
-  fetch('/api/render/tla/status')
-    .then(r => r.json())
-    .then(data => {
-      const tlaBtn = document.querySelector('.mode-btn[data-mode="tla"]');
-      if (!tlaBtn) return;
-      const speculaReady = data.specula?.apiKeyPresent && data.available;
-      if (speculaReady) {
-        tlaBtn.dataset.specula = 'ready';
-        tlaBtn.title = `TLA+ — Specula ready (${data.specula.model})`;
-      } else {
-        tlaBtn.dataset.specula = 'unavailable';
-        tlaBtn.title = data.specula?.apiKeyPresent
-          ? 'TLA+ — Java/TLC not available'
-          : 'TLA+ — Specula unavailable (set CLAUDE_API_KEY)';
+  const _bootOverlay = document.getElementById('boot-overlay');
+  const _bootStatusText = document.getElementById('boot-status-text');
+
+  function _bootProgress(msg) {
+    if (_bootStatusText) _bootStatusText.textContent = msg;
+  }
+
+  function _bootComplete() {
+    if (_bootOverlay) {
+      _bootOverlay.style.transition = 'opacity 0.4s ease';
+      _bootOverlay.style.opacity = '0';
+      setTimeout(() => _bootOverlay.remove(), 500);
+    }
+  }
+
+  function _bootFail(msg) {
+    if (_bootStatusText) {
+      _bootStatusText.textContent = 'Boot failed: ' + msg;
+      _bootStatusText.style.color = '#ff6b6b';
+    }
+    // Remove overlay after 3s even on failure so user can interact
+    setTimeout(() => {
+      if (_bootOverlay) _bootOverlay.remove();
+    }, 3000);
+  }
+
+  async function _runBootSequence() {
+    let healthData = null;
+    let copilotData = null;
+    let tlaData = null;
+    let diagramsData = null;
+
+    // Step 1: Server health + payload-contract compatibility
+    const EXPECTED_SCHEMA_VERSION = 1;
+    _bootProgress('Checking server health...');
+    try {
+      const res = await fetch('/api/health');
+      healthData = await res.json();
+      if (!healthData.success) throw new Error('health endpoint returned failure');
+      if (healthData.schema_version != null && healthData.schema_version !== EXPECTED_SCHEMA_VERSION) {
+        console.warn(`[boot] payload-contract mismatch — server schema_version ${healthData.schema_version}, frontend expects ${EXPECTED_SCHEMA_VERSION}. Artifact envelopes may not parse correctly.`);
       }
-    })
-    .catch(() => {});
+    } catch (err) {
+      _bootFail('server health check failed');
+      healthData = null;
+    }
 
-  fetch('/api/diagrams')
-    .then(r => r.json())
-    .then(data => {
-      if (data.success && data.diagrams) {
-        const serverNames = new Set(data.diagrams.map(d => d.name));
+    // Step 2: Copilot + Max mode availability
+    _bootProgress('Checking inference providers...');
+    try {
+      const res = await fetch('/api/copilot/health');
+      copilotData = await res.json();
+      if (copilotData.maxAvailable && btnMax) btnMax.classList.add('visible');
+      // Feed health result to copilot if it exists (avoids redundant fetch)
+      if (copilot && typeof copilot.setHealthState === 'function') {
+        copilot.setHealthState(copilotData.available);
+      }
+    } catch { copilotData = null; }
+
+    // Step 3: TLA+ status
+    _bootProgress('Checking TLA+ toolchain...');
+    try {
+      const res = await fetch('/api/render/tla/status');
+      tlaData = await res.json();
+      const tlaBtn = document.querySelector('.mode-btn[data-mode="tla"]');
+      if (tlaBtn && tlaData) {
+        const speculaReady = tlaData.specula?.apiKeyPresent && tlaData.available;
+        if (speculaReady) {
+          tlaBtn.dataset.specula = 'ready';
+          tlaBtn.title = `TLA+ — Specula ready (${tlaData.specula.model})`;
+        } else {
+          tlaBtn.dataset.specula = 'unavailable';
+          tlaBtn.title = tlaData.specula?.apiKeyPresent
+            ? 'TLA+ — Java/TLC not available'
+            : 'TLA+ — Specula unavailable (set CLAUDE_API_KEY)';
+        }
+      }
+    } catch { tlaData = null; }
+
+    // Step 4: Diagrams list (sidebar reconciliation)
+    _bootProgress('Loading diagrams...');
+    try {
+      const res = await fetch('/api/diagrams');
+      diagramsData = await res.json();
+      if (diagramsData.success && diagramsData.diagrams) {
+        const serverNames = new Set(diagramsData.diagrams.map(d => d.name));
         sidebar.reconcile(serverNames);
-        data.diagrams.forEach(d => {
+        diagramsData.diagrams.forEach(d => {
           sidebar.add({ name: d.name, type: d.diagram_type || '', paths: d.paths, timestamp: d.created_at ? new Date(d.created_at).toLocaleString() : '', run_id: d.run_id || null });
         });
       }
-    })
-    .catch(() => {});
+    } catch { diagramsData = null; }
+
+    // Step 5: Complete
+    const providerCount = healthData
+      ? ['premium', 'ollama', 'enhancer'].filter(k => healthData.providers?.[k]).length
+      : 0;
+    _bootProgress(
+      healthData
+        ? `Ready — ${providerCount} provider(s), ${healthData.agents?.active || 0} agents`
+        : 'Ready (limited — no server health)'
+    );
+    _bootComplete();
+  }
+
+  _runBootSequence();
 
   // =========================================================================
   //  State Bus — read-only facade for external modules (autoguide, etc.)

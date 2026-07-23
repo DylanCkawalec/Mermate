@@ -61,13 +61,13 @@ function clearFallbackEvents() { _fallbackEvents.length = 0; }
 // Tiered model pool — each stage picks the right tier
 const MODELS = Object.freeze({
   // Orchestrator / final synthesis — most capable, slowest
-  orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || process.env.MERMATE_AI_MAX_MODEL || 'gpt-4o',
+  orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || process.env.MERMATE_AI_MAX_MODEL || 'gpt-5.6-sol',
   // Worker — primary reasoning, branch exploration, enhance
-  worker:       process.env.MERMATE_WORKER_MODEL       || process.env.MERMATE_AI_MODEL       || 'gpt-4o',
+  worker:       process.env.MERMATE_WORKER_MODEL       || process.env.MERMATE_AI_MODEL       || 'gpt-5.6-terra',
   // Fast structured — JSON extraction, routing, repair, narration
-  fast:         process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-4o-mini',
+  fast:         process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-5.6-luna',
   // Validator / router — cheap scoring, suggestions
-  nano:         process.env.MERMATE_ROUTER_MODEL       || 'gpt-4o-mini',
+  nano:         process.env.MERMATE_ROUTER_MODEL       || 'gpt-5.6-luna',
   // Image generation
   image:        process.env.MERMATE_IMAGE_MODEL        || 'gpt-image-1',
 });
@@ -88,24 +88,60 @@ const MAX_RETRIES          = parseInt(process.env.MERMATE_MAX_RETRIES || '2', 10
 
 // P3: Per-stage model routing — each stage gets the optimal model tier
 const STAGE_MODEL_MAP = Object.freeze({
-  fact_extraction:     MODELS.worker,       // MAX-preferred: richer fact extraction via gpt-5.2
-  diagram_plan:        MODELS.worker,       // MAX-preferred: better plan structure via gpt-5.2
-  composition:         MODELS.worker,       // creative Mermaid — gpt-5.2
-  semantic_repair:     MODELS.fast,         // targeted JSON fix — gpt-4.1-mini
-  copilot_suggest:     MODELS.nano,         // short completion — gpt-4.1-nano
-  copilot_enhance:     MODELS.worker,       // full enhancement — gpt-5.2
-  decompose:           MODELS.worker,       // multi-view reasoning — gpt-5.2
-  render_prepare:      MODELS.worker,       // one-shot Mermaid — gpt-5.2
-  model_repair:        MODELS.fast,         // targeted fix — gpt-4.1-mini
-  max_composition:     MODELS.orchestrator, // final quality — gpt-5.4
-  merge_composition:   MODELS.orchestrator, // merge all subviews into mega-diagram — gpt-5.4
-  repair_from_trace:   MODELS.fast,         // error-trace repair — gpt-4.1-mini
-  compose_ts:          MODELS.worker,       // runtime synthesis — gpt-5.2
-  repair_ts:           MODELS.fast,         // compile/test repair — gpt-4.1-mini
-  validate_ts:         MODELS.fast,         // validator commentary — gpt-4.1-mini
-  compose_rust:        MODELS.worker,       // Rust codegen — gpt-5.2
-  repair_rust:         MODELS.fast,         // cargo error repair — gpt-4.1-mini
+  fact_extraction:     MODELS.worker,       // richer fact extraction — gpt-5.6-terra
+  diagram_plan:        MODELS.worker,       // better plan structure — gpt-5.6-terra
+  composition:         MODELS.worker,       // creative Mermaid — gpt-5.6-terra
+  semantic_repair:     MODELS.fast,         // targeted JSON fix — gpt-5.6-luna
+  copilot_suggest:     MODELS.nano,         // short completion — gpt-5.6-luna
+  copilot_enhance:     MODELS.worker,       // full enhancement — gpt-5.6-terra
+  decompose:           MODELS.worker,       // multi-view reasoning — gpt-5.6-terra
+  render_prepare:      MODELS.worker,       // one-shot Mermaid — gpt-5.6-terra
+  model_repair:        MODELS.fast,         // targeted fix — gpt-5.6-luna
+  max_composition:     MODELS.orchestrator, // final quality — gpt-5.6-sol
+  merge_composition:   MODELS.orchestrator, // merge all subviews — gpt-5.6-sol
+  repair_from_trace:   MODELS.fast,         // error-trace repair — gpt-5.6-luna
+  compose_ts:          MODELS.worker,       // runtime synthesis — gpt-5.6-terra
+  repair_ts:           MODELS.fast,         // compile/test repair — gpt-5.6-luna
+  validate_ts:         MODELS.fast,         // validator commentary — gpt-5.6-luna
+  compose_rust:        MODELS.worker,       // Rust codegen — gpt-5.6-terra
+  repair_rust:         MODELS.fast,         // cargo error repair — gpt-5.6-luna
+  compose_tla:         MODELS.orchestrator, // formal spec synthesis — gpt-5.6-sol
+  repair_tla:          MODELS.fast,         // SANY error repair — gpt-5.6-luna
 });
+
+// Per-stage reasoning effort for GPT-5.6 models.
+// Supports: none, low, medium, high, xhigh, max.
+// Lower effort = lower latency + cost; higher effort = deeper reasoning.
+const STAGE_REASONING_MAP = Object.freeze({
+  fact_extraction:     'low',       // simple extraction, low latency
+  diagram_plan:        'medium',    // structural reasoning needed
+  composition:         'high',      // creative Mermaid generation
+  max_composition:     'xhigh',     // final quality synthesis
+  merge_composition:   'xhigh',     // complex merge of subviews
+  copilot_enhance:     'medium',    // balanced enhancement
+  copilot_suggest:     'low',       // fast autocomplete
+  semantic_repair:     'low',       // targeted fix
+  render_prepare:      'high',      // one-shot render quality
+  decompose:           'medium',    // multi-view reasoning
+  model_repair:        'low',       // targeted fix
+  repair_from_trace:   'medium',    // error-trace analysis
+  compose_ts:          'high',      // code generation
+  repair_ts:           'medium',    // compile error fixing
+  validate_ts:         'low',       // validation commentary
+  compose_rust:        'high',      // Rust codegen
+  repair_rust:         'medium',    // cargo error repair
+  compose_tla:         'xhigh',     // formal specification — maximum rigor
+  repair_tla:          'medium',    // targeted SANY error fixing
+});
+
+// Stages that benefit from Structured Outputs (json_schema enforcement).
+// These stages produce structured data, not free-form text.
+const STAGE_STRUCTURED_OUTPUT = new Set([
+  'fact_extraction',
+  'diagram_plan',
+  'semantic_repair',
+  'validate_ts',
+]);
 
 // Stages that benefit most from local AI bootstrapping. The premium chain
 // remains a fallback when local providers are unavailable, but giving local
@@ -145,6 +181,14 @@ function _selectModelForStage(stage) {
   return baseModel;
 }
 
+function _selectReasoningEffort(stage) {
+  return STAGE_REASONING_MAP[stage] || 'medium';
+}
+
+function _isStructuredStage(stage) {
+  return STAGE_STRUCTURED_OUTPUT.has(stage);
+}
+
 // P5: Per-stage token caps — right-size output budget to reduce waste
 const STAGE_TOKEN_CAP = Object.freeze({
   fact_extraction:     2048,
@@ -162,6 +206,8 @@ const STAGE_TOKEN_CAP = Object.freeze({
   compose_ts:          16384,
   repair_ts:           8192,
   validate_ts:         4096,
+  compose_tla:         16384,
+  repair_tla:          8192,
 });
 
 // ---- Health cache ---------------------------------------------------------
@@ -235,7 +281,7 @@ function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
  * @param {string} [opts.inputText] - input text for context size estimation
  * @returns {Promise<{content: string|null, actionTag: object|null}>}
  */
-async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix, rateEvents, extractContent, stage, inputText, traceId }) {
+async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix, rateEvents, extractContent, stage, inputText, traceId, reasoningEffort, responseFormat }) {
   let lastError = null;
   let actionTag = null;
   let _usedDirectFallback = false;
@@ -245,6 +291,10 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
   if (traceId) traceHeaders['X-Request-Id'] = traceId;
 
   const rawFetch = async () => {
+    const finalBody = { ...body };
+    if (reasoningEffort) finalBody.reasoning_effort = reasoningEffort;
+    if (responseFormat) finalBody.response_format = responseFormat;
+
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -253,7 +303,7 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
       try {
         const res = await fetch(url, {
           method: 'POST', headers: traceHeaders,
-          body: JSON.stringify(body),
+          body: JSON.stringify(finalBody),
           signal: controller.signal,
         });
 
@@ -308,6 +358,27 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
         }
 
         const data = await res.json();
+
+        // Track prompt caching stats from API response
+        const usage = data.usage;
+        if (usage && (usage.prompt_tokens_details?.cached_tokens || usage.cache_write_tokens)) {
+          const cachedTokens = usage.prompt_tokens_details?.cached_tokens || 0;
+          const cacheWriteTokens = usage.cache_write_tokens || 0;
+          if (cachedTokens > 0 || cacheWriteTokens > 0) {
+            rateEvents.push({
+              type: 'prompt_cache',
+              cached_tokens: cachedTokens,
+              cache_write_tokens: cacheWriteTokens,
+              model,
+              stage: stage || logPrefix,
+            });
+            logger.info(`${logPrefix}.cache`, {
+              model, cached: cachedTokens, written: cacheWriteTokens,
+              stage: stage || logPrefix,
+            });
+          }
+        }
+
         return extractContent(data);
       } catch (err) {
         lastError = err;
@@ -353,9 +424,12 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
+      const finalBody = { ...body };
+      if (reasoningEffort) finalBody.reasoning_effort = reasoningEffort;
+      if (responseFormat) finalBody.response_format = responseFormat;
       const res = await fetch(directUrl, {
         method: 'POST', headers: traceHeaders,
-        body: JSON.stringify(body),
+        body: JSON.stringify(finalBody),
         signal: controller.signal,
       });
       if (res.ok) {
@@ -381,7 +455,7 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
  * Includes 429/503 retry with exponential backoff.
  * @returns {Promise<{content: string|null, actionTag: object|null}>}
  */
-async function _callPremiumWithKey(apiKey, systemPrompt, userPrompt, modelOverride, timeoutMs, rateEvents, stage) {
+async function _callPremiumWithKey(apiKey, systemPrompt, userPrompt, modelOverride, timeoutMs, rateEvents, stage, reasoningEffort, responseFormat) {
   const model = modelOverride || PREMIUM_MODEL;
   const events = rateEvents || [];
   const tokenParam = catalog.usesCompletionTokens(model) ? { max_completion_tokens: 16384 } : { max_tokens: 8192 };
@@ -404,13 +478,15 @@ async function _callPremiumWithKey(apiKey, systemPrompt, userPrompt, modelOverri
     stage: stage || 'copilot_enhance',
     inputText: userPrompt,
     traceId: _traceId,
+    reasoningEffort: reasoningEffort || _selectReasoningEffort(stage),
+    responseFormat: responseFormat || (_isStructuredStage(stage) ? { type: 'json_object' } : undefined),
   });
 }
 
 /**
  * @returns {Promise<{content: string|null, actionTag: object|null}>}
  */
-async function _callPremium(systemPrompt, userPrompt, modelOverride, timeoutMs, maxTokensOverride, rateEvents, stage) {
+async function _callPremium(systemPrompt, userPrompt, modelOverride, timeoutMs, maxTokensOverride, rateEvents, stage, reasoningEffort, responseFormat) {
   const model = modelOverride || PREMIUM_MODEL;
   const timeout = timeoutMs || INFER_TIMEOUT_MS;
   const events = rateEvents || [];
@@ -463,6 +539,8 @@ async function _callPremium(systemPrompt, userPrompt, modelOverride, timeoutMs, 
     stage: stage || 'copilot_enhance',
     inputText: userPrompt,
     traceId: _traceId,
+    reasoningEffort: reasoningEffort || _selectReasoningEffort(stage),
+    responseFormat: responseFormat || (_isStructuredStage(stage) ? { type: 'json_object' } : undefined),
   });
 }
 
@@ -573,7 +651,7 @@ async function infer(stage, context = {}) {
   }
 
   const providers = [
-    { name: 'premium',  ok: premiumOk,  call: () => _callPremium(systemPrompt, userPrompt, stageModel, undefined, stageTokenCap, rateEvents, stage), isPremium: true },
+    { name: 'premium',  ok: premiumOk,  call: () => _callPremium(systemPrompt, userPrompt, stageModel, undefined, stageTokenCap, rateEvents, stage, context.reasoningEffort, context.responseFormat), isPremium: true },
     { name: 'ollama',   ok: ollamaOk,   call: () => _callOllama(systemPrompt, userPrompt), isPremium: false },
     { name: 'enhancer', ok: enhancerOk, call: () => _callEnhancer(systemPrompt, userPrompt, stage, context.extra), isPremium: false },
   ];
@@ -657,7 +735,7 @@ async function inferMax(stage, context = {}) {
 
   logger.info('provider.max.attempting', { model: maxModel, stage });
   const callStart = Date.now();
-  const callResult = await _callPremium(systemPrompt, userPrompt, maxModel, MAX_INFER_TIMEOUT_MS, undefined, rateEvents, stage);
+  const callResult = await _callPremium(systemPrompt, userPrompt, maxModel, MAX_INFER_TIMEOUT_MS, undefined, rateEvents, stage, context.reasoningEffort, context.responseFormat);
   const latencyMs = Date.now() - callStart;
   const output = callResult?.content;
   const actionTag = callResult?.actionTag;
@@ -764,7 +842,7 @@ async function inferWithRole(stage, context, roleName) {
   const rateEvents = [];
   const callStart = Date.now();
   try {
-    const callResult = await _callPremiumWithKey(apiKey, systemPrompt, userPrompt, model, INFER_TIMEOUT_MS, rateEvents, stage);
+    const callResult = await _callPremiumWithKey(apiKey, systemPrompt, userPrompt, model, INFER_TIMEOUT_MS, rateEvents, stage, context.reasoningEffort, context.responseFormat);
     const latencyMs = Date.now() - callStart;
     const output = callResult?.content;
     const actionTag = callResult?.actionTag;

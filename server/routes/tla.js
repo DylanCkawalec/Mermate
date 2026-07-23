@@ -16,6 +16,7 @@ const tlaValidator = require('../services/tla-validator');
 const { buildTlaRepairPrompt, buildTlaRepairUserPrompt } = require('../services/axiom-prompts-tla');
 const provider = require('../services/inference-provider');
 const speculaLlm = require('../services/specula-llm');
+const speculaBridge = require('../services/specula-engine-bridge');
 const { buildSpeculaBundle } = require('../services/specula-bundle');
 const {
   loadRunData,
@@ -38,19 +39,27 @@ const router = Router();
 
 router.get('/render/tla/status', async (_req, res) => {
   const available = await tlaValidator.isAvailable();
-  const [java, jar] = await Promise.all([
+  const [java, jar, speculaEngineStatus] = await Promise.all([
     tlaValidator.checkJava(),
     tlaValidator.checkJar(),
+    speculaBridge.isAvailable().catch(() => ({ available: false })),
   ]);
   res.json({
     success: true,
     available,
     java,
+    javaVersion: tlaValidator.getJavaVersion(),
     jar,
     jarPath: tlaValidator.JAR_PATH,
     sanyTimeoutMs: tlaValidator.SANY_TIMEOUT_MS,
     tlcTimeoutMs: tlaValidator.TLC_TIMEOUT_MS,
-    specula: speculaLlm.getConfig(),
+    tlcMaxStates: tlaValidator.TLC_MAX_STATES,
+    specula: {
+      llm: speculaLlm.getConfig(),
+      engine: speculaBridge.getConfig(),
+      available: speculaEngineStatus.available,
+      setupComplete: speculaEngineStatus.setupComplete,
+    },
   });
 });
 
@@ -194,6 +203,7 @@ router.post('/render/tla', async (req, res) => {
     const useSplit = boundaries.length >= 2;
     let validation, cfgSource, variables, actions, invariants;
     let submoduleResults = [];
+    let generatorResult = { provider: 'deterministic', model: 'tla-compiler', latencyMs: 0, fallbackUsed: false };
 
     if (useSplit) {
       // Subsystem-level splitting: one .tla per boundary
@@ -221,18 +231,26 @@ router.post('/render/tla', async (req, res) => {
 
       let masterTlaSource = master.tlaSource;
       if (speculaLlm.isAvailable()) {
-        const claudeResult = await speculaLlm.generateTlaSpec(facts, plan, moduleName, masterTlaSource);
-        if (claudeResult.tlaSource) masterTlaSource = claudeResult.tlaSource;
+        logger.info('tla.claude_primary', { moduleName, seedLen: masterTlaSource.length });
+        generatorResult = await speculaLlm.generateTlaSpec(facts, plan, moduleName, masterTlaSource);
+        if (generatorResult.tlaSource) {
+          masterTlaSource = generatorResult.tlaSource;
+          logger.info('tla.claude_spec_accepted', { moduleName, len: masterTlaSource.length, ms: generatorResult.latencyMs });
+        } else {
+          logger.info('tla.claude_unavailable_fallback', { error: generatorResult.error });
+        }
       }
 
-      validation = await tlaValidator.fullValidation(masterTlaSource, cfgSource, tlaDir, moduleName, repairFn);
+      validation = await tlaValidator.validateWithScaffoldFastPath(
+        masterTlaSource, master.tlaSource, cfgSource, tlaDir, moduleName, repairFn,
+      );
 
       const masterResult = tlaCompiler.factsToTlaModule(facts, plan, moduleName);
       variables = masterResult.variables;
       actions = masterResult.actions;
       invariants = masterResult.invariants;
     } else {
-      // Single-module path: deterministic seed -> Claude refinement -> validation
+      // Single-module path: deterministic seed -> Specula LLM refinement -> scaffold fast-path validation
       const result = tlaCompiler.factsToTlaModule(facts, plan, moduleName);
       variables = result.variables;
       actions = result.actions;
@@ -241,19 +259,30 @@ router.post('/render/tla', async (req, res) => {
 
       let tlaSource = result.tlaSource;
 
-      // Promote Claude to primary TLA+ writer when available
       if (speculaLlm.isAvailable()) {
         logger.info('tla.claude_primary', { moduleName, seedLen: tlaSource.length });
-        const claudeResult = await speculaLlm.generateTlaSpec(facts, plan, moduleName, tlaSource);
-        if (claudeResult.tlaSource) {
-          tlaSource = claudeResult.tlaSource;
-          logger.info('tla.claude_spec_accepted', { moduleName, len: tlaSource.length, ms: claudeResult.latencyMs });
+        generatorResult = await speculaLlm.generateTlaSpec(facts, plan, moduleName, tlaSource);
+        if (generatorResult.tlaSource) {
+          tlaSource = generatorResult.tlaSource;
+          logger.info('tla.claude_spec_accepted', { moduleName, len: tlaSource.length, ms: generatorResult.latencyMs });
         } else {
-          logger.info('tla.claude_unavailable_fallback', { error: claudeResult.error });
+          logger.info('tla.claude_unavailable_fallback', { error: generatorResult.error });
         }
       }
 
-      validation = await tlaValidator.fullValidation(tlaSource, cfgSource, tlaDir, moduleName, repairFn);
+      // State-space guard: warn early on architectures likely to explode TLC runtime,
+      // but keep the bounded 60s cap authoritative.
+      const stateSpaceEstimate = tlaValidator.estimateStateSpace(variables, actions);
+      logger.info('tla.statespace_estimate', { moduleName, estimate: stateSpaceEstimate });
+
+      validation = await tlaValidator.validateWithScaffoldFastPath(
+        tlaSource, result.tlaSource, cfgSource, tlaDir, moduleName, repairFn,
+      );
+    }
+
+    // If the scaffold fast-path adopted the deterministic scaffold, report that honestly.
+    if (validation.usedScaffold) {
+      generatorResult = { provider: 'deterministic', model: 'tla-compiler', latencyMs: 0, fallbackUsed: false };
     }
 
     // Phase: PERSIST — write artifacts to flows/
@@ -300,18 +329,32 @@ router.post('/render/tla', async (req, res) => {
       logger.warn('tla.dump_failed', { error: err.message });
     }
 
-    // Compute quality metrics
+    // Compute quality + IPO metrics
     const metrics = tlaCompiler.computeTlaMetrics(variables, actions, invariants, facts);
     metrics.sanyPassedFirstAttempt = validation.sany.repairAttempts === 0 && validation.sany.valid;
     metrics.tlcCompleted = validation.tlc.checked;
     metrics.tlcViolations = validation.tlc.violations.length;
     metrics.tlcStatesExplored = validation.tlc.statesExplored;
     metrics.tlcWallClockMs = validation.tlc.wallClockMs;
+    const tlcStatesPerSec = validation.tlc.wallClockMs > 0
+      ? Math.round((validation.tlc.statesExplored / (validation.tlc.wallClockMs / 1000)) * 10) / 10
+      : 0;
+    metrics.tlcStatesPerSec = tlcStatesPerSec;
     if (useSplit) {
       metrics.splitMode = true;
       metrics.submoduleCount = submoduleResults.length;
       metrics.submodulesSanyValid = submoduleResults.filter(s => s.sany?.valid).length;
     }
+
+    const entityCoverage = facts?.entities?.length
+      ? Math.round((variables.length / facts.entities.length) * 100)
+      : 0;
+    const invariantCoverage = facts?.failurePaths?.length
+      ? Math.round((invariants.length / facts.failurePaths.length) * 100)
+      : 100;
+    metrics.entityCoverage = Math.min(100, entityCoverage);
+    metrics.invariantCoverage = Math.min(100, invariantCoverage);
+    metrics.stateSpaceEstimate = tlaValidator.estimateStateSpace(variables, actions);
 
     const speculaBundle = buildSpeculaBundle({
       runId: run_id,
@@ -338,6 +381,72 @@ router.post('/render/tla', async (req, res) => {
     const tlaConfidence = validation.sany.valid
       ? (validation.tlc.success ? 0.95 : 0.7)
       : 0.3;
+
+    const verifiedAt = new Date().toISOString();
+    const verification = {
+      generator: {
+        provider: generatorResult.provider,
+        model: generatorResult.model,
+        latencyMs: generatorResult.latencyMs,
+        repairAttempts: validation.sany.repairAttempts,
+        fallbackUsed: generatorResult.fallbackUsed || false,
+        usedScaffold: validation.usedScaffold || false,
+      },
+      toolbox: {
+        javaVersion: tlaValidator.getJavaVersion(),
+        jarPath: tlaValidator.JAR_PATH,
+        sanyMs: validation.sany.wallClockMs,
+        tlcMs: validation.tlc.wallClockMs,
+        workers: 'auto',
+      },
+      sany: {
+        valid: validation.sany.valid,
+        errors: validation.sany.errors,
+      },
+      tlc: {
+        checked: validation.tlc.checked,
+        success: validation.tlc.success,
+        statesExplored: validation.tlc.statesExplored,
+        statesPerSec: metrics.tlcStatesPerSec,
+        invariantsChecked: validation.tlc.invariantsChecked,
+        violations: validation.tlc.violations,
+      },
+      verifiedAt,
+    };
+
+    // IPO summary log line — measurable flawlessness over time.
+    logger.info('tla.ipo_summary', {
+      run_id: run_id.slice(0, 8),
+      moduleName,
+      splitMode: useSplit,
+      input: {
+        entities: facts?.entities?.length || 0,
+        relationships: facts?.relationships?.length || 0,
+        failurePaths: facts?.failurePaths?.length || 0,
+        boundaries: facts?.boundaries?.length || 0,
+        tsxManifestPresent: !!tsxManifest,
+      },
+      process: {
+        firstPassSanyValid: metrics.sanyPassedFirstAttempt,
+        repairAttempts: validation.sany.repairAttempts,
+        llmMs: generatorResult.latencyMs,
+        sanyMs: validation.sany.wallClockMs,
+        tlcMs: validation.tlc.wallClockMs,
+        provider: generatorResult.provider,
+        model: generatorResult.model,
+        usedScaffold: verification.generator.usedScaffold,
+      },
+      output: {
+        variables: variables.length,
+        actions: actions.length,
+        invariants: invariants.length,
+        statesExplored: validation.tlc.statesExplored,
+        statesPerSec: metrics.tlcStatesPerSec,
+        entityCoverage: metrics.entityCoverage,
+        invariantCoverage: metrics.invariantCoverage,
+        speculaFileCount: speculaBundle.files.length,
+      },
+    });
 
     // Update run JSON with TLA+ metrics
     try {
@@ -369,8 +478,10 @@ router.post('/render/tla', async (req, res) => {
         validation_loop: `/flows/${name}/specula/validation-loop.json`,
         hunt_cfgs: speculaBundle.huntConfigs.map((config) => `/flows/${name}/specula/${config.fileName}`),
       };
+      runData.tla_verification = verification;
       runData.tla_env = {
         claude: speculaLlm.getConfig(),
+        specula_engine: speculaBridge.getConfig(),
       };
       await persistRunData(runPath, runData);
     } catch (err) {
@@ -445,9 +556,11 @@ router.post('/render/tla', async (req, res) => {
           hunt_cfgs: speculaBundle.huntConfigs.map((config) => `/flows/${name}/specula/${config.fileName}`),
         },
       },
+      verification,
       specula: {
         upstream: speculaBundle.upstream,
         env: speculaLlm.getConfig(),
+        engine: speculaBridge.getConfig(),
         modeling_brief: speculaBundle.modelingBrief,
         modeling_brief_markdown: speculaBundle.modelingBriefMarkdown,
         mc: {
@@ -502,6 +615,7 @@ router.get('/render/tla/errors/:run_id', async (req, res) => {
 
     const metrics = runData.tla_metrics || {};
     const speculaCfg = runData.tla_env?.claude || {};
+    const verification = runData.tla_verification || null;
 
     return res.json({
       success: true,
@@ -509,6 +623,7 @@ router.get('/render/tla/errors/:run_id', async (req, res) => {
       tla_source: tlaSource,
       artifacts: runData.tla_artifacts,
       metrics,
+      verification,
       sany: {
         passed_first: metrics.sanyPassedFirstAttempt ?? null,
       },
@@ -576,15 +691,47 @@ router.post('/render/tla/revalidate', async (req, res) => {
         await fsp.writeFile(tlaArtPath, validation.tlaSource, 'utf8');
       }
 
+      const priorGenerator = runData.tla_verification?.generator || { provider: 'revalidate', model: 'n/a' };
+      const revalidateVerification = {
+        generator: {
+          ...priorGenerator,
+          repairAttempts: validation.sany.repairAttempts,
+          usedScaffold: false,
+        },
+        toolbox: {
+          javaVersion: tlaValidator.getJavaVersion(),
+          jarPath: tlaValidator.JAR_PATH,
+          sanyMs: validation.sany.wallClockMs,
+          tlcMs: validation.tlc.wallClockMs,
+          workers: 'auto',
+        },
+        sany: {
+          valid: validation.sany.valid,
+          errors: validation.sany.errors,
+        },
+        tlc: {
+          checked: validation.tlc.checked,
+          success: validation.tlc.success,
+          statesExplored: validation.tlc.statesExplored,
+          statesPerSec: validation.tlc.wallClockMs > 0
+            ? Math.round((validation.tlc.statesExplored / (validation.tlc.wallClockMs / 1000)) * 10) / 10
+            : 0,
+          invariantsChecked: validation.tlc.invariantsChecked,
+          violations: validation.tlc.violations,
+        },
+        verifiedAt: new Date().toISOString(),
+      };
+
       runData.tla_metrics = {
         ...(runData.tla_metrics || {}),
-        revalidated_at: new Date().toISOString(),
+        revalidated_at: revalidateVerification.verifiedAt,
         sanyPassedFirstAttempt: validation.sany.repairAttempts === 0 && validation.sany.valid,
         tlcCompleted: validation.tlc.checked,
         tlcViolations: validation.tlc.violations.length,
         tlcStatesExplored: validation.tlc.statesExplored,
         tlcWallClockMs: validation.tlc.wallClockMs,
       };
+      runData.tla_verification = revalidateVerification;
       await persistRunData(runPath, runData);
 
       opseeq.reportStage(run_id, {
@@ -598,6 +745,7 @@ router.post('/render/tla/revalidate', async (req, res) => {
 
       return res.json({
         success: validation.sany.valid,
+        verification: revalidateVerification,
         repaired: validation.tlaSource !== tlaSource,
         sany: validation.sany,
         tlc: {
@@ -656,15 +804,48 @@ router.post('/render/tla/edit', async (req, res) => {
         await fsp.writeFile(cfgArtPath, effectiveCfg, 'utf8');
       }
 
+      const editVerification = {
+        generator: {
+          provider: 'user-edit',
+          model: 'manual',
+          latencyMs: 0,
+          repairAttempts: validation.sany.repairAttempts,
+          fallbackUsed: false,
+          usedScaffold: false,
+        },
+        toolbox: {
+          javaVersion: tlaValidator.getJavaVersion(),
+          jarPath: tlaValidator.JAR_PATH,
+          sanyMs: validation.sany.wallClockMs,
+          tlcMs: validation.tlc.wallClockMs,
+          workers: 'auto',
+        },
+        sany: {
+          valid: validation.sany.valid,
+          errors: validation.sany.errors,
+        },
+        tlc: {
+          checked: validation.tlc.checked,
+          success: validation.tlc.success,
+          statesExplored: validation.tlc.statesExplored,
+          statesPerSec: validation.tlc.wallClockMs > 0
+            ? Math.round((validation.tlc.statesExplored / (validation.tlc.wallClockMs / 1000)) * 10) / 10
+            : 0,
+          invariantsChecked: validation.tlc.invariantsChecked,
+          violations: validation.tlc.violations,
+        },
+        verifiedAt: new Date().toISOString(),
+      };
       runData.tla_metrics = {
         ...(runData.tla_metrics || {}),
-        edited_at: new Date().toISOString(),
+        edited_at: editVerification.verifiedAt,
         sanyPassedFirstAttempt: validation.sany.repairAttempts === 0 && validation.sany.valid,
         tlcCompleted: validation.tlc.checked,
         tlcViolations: validation.tlc.violations.length,
         tlcStatesExplored: validation.tlc.statesExplored,
         tlcWallClockMs: validation.tlc.wallClockMs,
       };
+      runData.tla_verification = editVerification;
       await persistRunData(runPath, runData);
 
       opseeq.reportStage(run_id, {
@@ -677,6 +858,7 @@ router.post('/render/tla/edit', async (req, res) => {
 
       return res.json({
         success: validation.sany.valid,
+        verification: editVerification,
         sany: validation.sany,
         tlc: {
           checked: validation.tlc.checked,
@@ -725,6 +907,22 @@ router.post('/render/tla/check', async (req, res) => {
 
     return res.json({
       success: sanyResult.valid,
+      verification: {
+        generator: { provider: 'sany-check', model: 'syntax-only', latencyMs: 0, repairAttempts: 0, fallbackUsed: false, usedScaffold: false },
+        toolbox: {
+          javaVersion: tlaValidator.getJavaVersion(),
+          jarPath: tlaValidator.JAR_PATH,
+          sanyMs: sanyResult.wallClockMs,
+          tlcMs: 0,
+          workers: 'auto',
+        },
+        sany: {
+          valid: sanyResult.valid,
+          errors: sanyResult.errors,
+        },
+        tlc: { checked: false, success: false, statesExplored: 0, statesPerSec: 0, invariantsChecked: [], violations: [] },
+        verifiedAt: new Date().toISOString(),
+      },
       sany: {
         valid: sanyResult.valid,
         errors: sanyResult.errors,

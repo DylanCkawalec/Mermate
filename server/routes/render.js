@@ -395,9 +395,9 @@ router.post('/render', async (req, res) => {
       inputMode: input_mode || 'idea',
       gotConfig,
       models: {
-        orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || 'gpt-4o',
-        worker: process.env.MERMATE_WORKER_MODEL || 'gpt-4o',
-        fast: process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-4o-mini',
+        orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || 'gpt-5.6-sol',
+        worker: process.env.MERMATE_WORKER_MODEL || 'gpt-5.6-terra',
+        fast: process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-5.6-luna',
       },
     });
     runTracker.setProfile(runId, profile);

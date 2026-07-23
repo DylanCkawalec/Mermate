@@ -39,12 +39,12 @@ async function isAvailable() {
  *
  * @param {string} rawSource       - Raw input text
  * @param {string} [diagramType]   - Pre-classified mermaid type (optional)
- * @param {string} [stage]         - Pipeline stage: text_to_md, md_to_mmd, validate_mmd, repair
- *                                   null defaults to validate_mmd for backward compat
+ * @param {string} [stage]         - Pipeline stage: text_to_md, md_to_mmd, validate_mmd, repair, render, copilot_suggest, copilot_enhance, decompose, repair_from_trace
  * @param {string} [contentState]  - Detected input type: text, md, mmd, hybrid
+ * @param {object} [options]       - Additional options: { dump_id, use_max, context, shadow_context, compile_error, original_description }
  * @returns {Promise<{source: string, enhanced: boolean, meta: object}>}
  */
-async function enhance(rawSource, diagramType, stage, contentState) {
+async function enhance(rawSource, diagramType, stage, contentState, options = {}) {
   let timer = null;
   try {
     const controller = new AbortController();
@@ -52,17 +52,27 @@ async function enhance(rawSource, diagramType, stage, contentState) {
 
     const promptConfig = buildPrompt(stage || 'validate_mmd');
 
+    const body = {
+      raw_source: rawSource,
+      diagram_type: diagramType || null,
+      stage: stage || null,
+      content_state: contentState || null,
+      system_prompt: promptConfig.system,
+      temperature: promptConfig.temperature,
+    };
+
+    // Hybrid routing options
+    if (options.dump_id) body.dump_id = options.dump_id;
+    if (options.use_max) body.use_max = options.use_max;
+    if (options.context) body.context = options.context;
+    if (options.shadow_context) body.shadow_context = options.shadow_context;
+    if (options.compile_error) body.compile_error = options.compile_error;
+    if (options.original_description) body.original_description = options.original_description;
+
     const res = await fetch(`${ENHANCER_URL}/mermaid/enhance`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        raw_source: rawSource,
-        diagram_type: diagramType || null,
-        stage: stage || null,
-        content_state: contentState || null,
-        system_prompt: promptConfig.system,
-        temperature: promptConfig.temperature,
-      }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
 
@@ -111,4 +121,70 @@ function passthrough(source, reason) {
   };
 }
 
-module.exports = { isAvailable, enhance };
+/**
+ * Audit a dump or a realtime call pair.
+ * @param {object} params - { dump_id } or { request_body, response_body, stage }
+ * @returns {Promise<object>}
+ */
+async function audit(params = {}) {
+  try {
+    const res = await fetch(`${ENHANCER_URL}/mermaid/audit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) return { error: `Audit returned ${res.status}` };
+    return await res.json();
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+/**
+ * Organize dump cache.
+ * @param {string} [dumpId] - Specific dump to organize, or null for all
+ * @returns {Promise<object>}
+ */
+async function organize(dumpId = null) {
+  try {
+    const res = await fetch(`${ENHANCER_URL}/mermaid/organize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dump_id: dumpId }),
+    });
+    if (!res.ok) return { error: `Organize returned ${res.status}` };
+    return await res.json();
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+/**
+ * Get telemetry stats.
+ * @returns {Promise<object>}
+ */
+async function getTelemetryStats() {
+  try {
+    const res = await fetch(`${ENHANCER_URL}/telemetry/stats`);
+    if (!res.ok) return { error: `Telemetry returned ${res.status}` };
+    return await res.json();
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+/**
+ * List all available dumps.
+ * @returns {Promise<object>}
+ */
+async function listDumps() {
+  try {
+    const res = await fetch(`${ENHANCER_URL}/dumps`);
+    if (!res.ok) return { error: `Dumps returned ${res.status}` };
+    return await res.json();
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+module.exports = { isAvailable, enhance, audit, organize, getTelemetryStats, listDumps };

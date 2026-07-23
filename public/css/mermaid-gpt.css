@@ -388,6 +388,17 @@ body {
   opacity: 0.5;
 }
 
+/* Mastered-run lineage anchor — the run TLA+/TypeScript derive from */
+.sidebar-item.lineage-anchor {
+  border-left: 2px solid #f59e0b;
+}
+
+.sidebar-lineage-tag {
+  color: #f59e0b;
+  font-size: 0.7rem;
+  margin-right: 2px;
+}
+
 .sidebar-empty {
   display: flex;
   flex-direction: column;
@@ -3205,6 +3216,31 @@ body {
 .btn-close:hover { color: var(--text-primary); }
 
 .tla-status { margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+.tla-provenance {
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.tla-provenance-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+}
+.tla-provenance-verified {
+  background: #16a34a22;
+  color: #22c55e;
+  border: 1px solid #22c55e44;
+  font-weight: 600;
+}
 
 .tla-badge {
   display: inline-block;

@@ -3,7 +3,9 @@
 # mermaid.sh — Single entrypoint for the Mermaid-GPT application.
 #
 # Usage:
-#   ./mermaid.sh start              # start the app (UI + API on port 3333)
+#   ./mermaid.sh start              # start the app (health check + build + prod launch)
+#   ./mermaid.sh dev                # start in dev mode (skip build, fast launch)
+#   ./mermaid.sh build              # run pre-flight build checks (deps + module load + health)
 #   ./mermaid.sh compile            # compile all archs/*.mmd via Node mmdc
 #   ./mermaid.sh compile <file.mmd> # compile a specific .mmd file
 #   ./mermaid.sh test               # run the test suite
@@ -13,6 +15,7 @@
 #   PORT                       App server port      (default: 3333)
 #   MERMAID_ENHANCER_URL       GPT enhancer base URL (default: http://localhost:8100)
 #   MERMAID_ENHANCER_START_CMD Shell command to start the enhancer if not running
+#   MERMATE_BOOT_TIMEOUT        Health check timeout in seconds (default: 30)
 # =============================================================================
 
 set -euo pipefail
@@ -158,8 +161,129 @@ clear_port() {
     exit 1
 }
 
-start_service() {
+# ---- pre-flight build checks ------------------------------------------------
+
+check_node_modules() {
+    if [ ! -d "${SCRIPT_DIR}/node_modules" ] || [ ! -x "${MMDC_BIN}" ]; then
+        echo "  node_modules missing or incomplete — running npm install..."
+        (cd "${SCRIPT_DIR}" && npm install --silent 2>&1 | tail -3)
+        if [ ! -x "${MMDC_BIN}" ]; then
+            echo "Error: npm install failed — @mermaid-js/mermaid-cli not found" >&2
+            exit 1
+        fi
+    fi
+    echo "  node_modules: OK"
+}
+
+check_modules_load() {
+    echo "  Verifying server modules load..."
+    (cd "${SCRIPT_DIR}" && node -e "
+        const mods = [
+            './server/services/model-catalog',
+            './server/services/inference-provider',
+            './server/services/role-registry',
+            './server/services/got-config',
+            './server/services/rate-master-bridge',
+            './server/services/axiom-prompts',
+            './server/services/input-router',
+            './server/services/input-analyzer',
+        ];
+        let ok = 0;
+        for (const m of mods) {
+            try { require(m); ok++; }
+            catch (e) { console.error('  FAIL: ' + m + ' — ' + e.message); process.exit(1); }
+        }
+        console.log('  Modules: ' + ok + '/' + mods.length + ' loaded OK');
+    " 2>&1) || exit 1
+}
+
+check_env_config() {
+    echo "  Verifying .env configuration..."
+    if [ ! -f "${SCRIPT_DIR}/.env" ]; then
+        echo "  Warning: .env not found — using defaults"
+        return
+    fi
+    (cd "${SCRIPT_DIR}" && node -e "
+        const fs = require('fs');
+        const lines = fs.readFileSync('.env', 'utf-8').split('\n');
+        const vars = {};
+        for (const line of lines) {
+            const t = line.trim();
+            if (!t || t.startsWith('#')) continue;
+            const eq = t.indexOf('=');
+            if (eq < 0) continue;
+            vars[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
+        }
+        const required = ['OPENAI_API_KEY', 'MERMATE_ORCHESTRATOR_MODEL', 'MERMATE_WORKER_MODEL'];
+        let missing = required.filter(k => !vars[k] || vars[k].includes('YOUR_'));
+        if (missing.length > 0) {
+            console.log('  Warning: missing or placeholder: ' + missing.join(', '));
+        } else {
+            console.log('  .env: OK (orchestrator=' + vars.MERMATE_ORCHESTRATOR_MODEL + ', worker=' + vars.MERMATE_WORKER_MODEL + ')');
+        }
+    " 2>&1)
+}
+
+run_build() {
+    echo ""
+    echo "==========================================="
+    echo "  Mermaid-GPT — Pre-flight Build Checks"
+    echo "==========================================="
+    echo ""
     check_deps
+    check_node_modules
+    check_modules_load
+    check_env_config
+    echo ""
+    echo "  Build checks: PASSED"
+    echo ""
+}
+
+# ---- health check (post-launch verification) ---------------------------------
+
+wait_for_health() {
+    local timeout="${MERMATE_BOOT_TIMEOUT:-30}"
+    local health_url="http://localhost:${APP_PORT}/api/health"
+    local elapsed=0
+
+    echo "  Waiting for server health (timeout: ${timeout}s)..."
+
+    while [ "${elapsed}" -lt "${timeout}" ]; do
+        if curl -fsS "${health_url}" 2>/dev/null | node -e "
+            let d=''; process.stdin.on('data',c=>d+=c);
+            process.stdin.on('end',()=>{
+                try {
+                    const h=JSON.parse(d);
+                    if(h.success) {
+                        console.log('  Health: OK (status=' + h.status + ', providers: premium=' + h.providers.premium + ', ollama=' + h.providers.ollama + ', enhancer=' + h.providers.enhancer + ', agents=' + h.agents.active + '/' + h.agents.total + ')');
+                        process.exit(0);
+                    }
+                    process.exit(1);
+                } catch { process.exit(1); }
+            });
+        " 2>/dev/null; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    echo "Error: server did not become healthy within ${timeout}s" >&2
+    echo "  Check server logs for errors." >&2
+    return 1
+}
+
+start_service() {
+    local mode="${1:-prod}"
+
+    if [ "${mode}" = "prod" ]; then
+        run_build
+    else
+        check_deps
+        check_node_modules
+        echo "  Dev mode: skipping full build checks"
+    fi
+
     clear_port
     check_enhancer
 
@@ -167,9 +291,30 @@ start_service() {
     echo "============================================"
     echo "  Mermaid-GPT starting on port ${APP_PORT}"
     echo "  http://localhost:${APP_PORT}"
+    echo "  Mode: ${mode}"
     echo "============================================"
     echo ""
-    exec npm start
+
+    if [ "${mode}" = "prod" ]; then
+        # Start server in background, wait for health, then foreground it
+        npm start &
+        local server_pid=$!
+
+        if wait_for_health; then
+            echo ""
+            echo "  Server is healthy and ready."
+            echo "  Press Ctrl+C to stop."
+            echo ""
+            # Bring server to foreground
+            wait "${server_pid}"
+        else
+            echo "  Server started but health check failed — showing logs." >&2
+            wait "${server_pid}"
+        fi
+    else
+        # Dev mode: just exec
+        exec npm start
+    fi
 }
 
 run_tests() {
@@ -334,7 +479,13 @@ meta_cron() {
 
 case "${1:-}" in
     start)
-        start_service
+        start_service prod
+        ;;
+    dev)
+        start_service dev
+        ;;
+    build)
+        run_build
         ;;
     compile)
         shift
@@ -366,7 +517,9 @@ case "${1:-}" in
         ;;
     *)
         echo "Usage:"
-        echo "  ./mermaid.sh start              Start the app server"
+        echo "  ./mermaid.sh start              Start the app (build checks + health + prod launch)"
+        echo "  ./mermaid.sh dev                Start in dev mode (skip build, fast launch)"
+        echo "  ./mermaid.sh build              Run pre-flight build checks only"
         echo "  ./mermaid.sh compile            Compile all archs/*.mmd"
         echo "  ./mermaid.sh compile <file.mmd> Compile a specific file"
         echo "  ./mermaid.sh test               Run the test suite"

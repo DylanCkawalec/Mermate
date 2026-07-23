@@ -3,13 +3,17 @@
 module.exports = Object.freeze({
   repo: 'https://github.com/DylanCkawalec/Specula',
   branch: 'main',
-  commit: '72d0b3d4c27d10d7f4eba18ca11647b57ae84fbe',
+  commit: '433574cbed78ec3120789a77536453f38fb8a359',
   skills: [
     'code_analysis',
     'spec_generation',
     'validation-workflow',
     'tla-trace-workflow',
     'tla-checking-workflow',
+    // Added upstream since the previous pin (72d0b3d4):
+    'bug-classification',
+    'bug-confirmation',
+    'harness-generation',
   ],
   tools: [
     'spec_analyzer',

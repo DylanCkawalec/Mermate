@@ -36,6 +36,20 @@ const RENDER_TIMEOUT_MS = parseInt(process.env.MERMATE_RENDER_TIMEOUT || '660000
 
 const router = Router();
 
+// Canonical artifacts envelope — attached to every SSE event that carries
+// artifact sources. The frontend's normalizeAgentEvent prefers this shape;
+// the legacy per-key fields (md_source, draft_text…) remain for older
+// clients during the transition.
+function _withArtifactsEnvelope(data) {
+  if (!data) return data;
+  const md = data.md_source || data.draft_text || '';
+  const mmd = data.mmd_source || data.compiled_source || '';
+  const tla = data.tla_source || '';
+  const ts = data.ts_source || '';
+  if (!md && !mmd && !tla && !ts) return data;
+  return { ...data, artifacts: { md, mmd, tla, ts } };
+}
+
 const ASSETS_DIR = path.resolve(__dirname, '..', '..', '.cursor', 'assets');
 
 const AGENT_MODES = {
@@ -268,7 +282,7 @@ router.post('/agent/run', async (req, res) => {
 
   function sendEvent(type, data) {
     if (abort.signal.aborted) return;
-    try { res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`); } catch {}
+    try { res.write(`data: ${JSON.stringify({ type, ..._withArtifactsEnvelope(data) })}\n\n`); } catch {}
   }
 
   // Immediate feedback: emit ingest stage event BEFORE slow setup so the
@@ -294,9 +308,9 @@ router.post('/agent/run', async (req, res) => {
       inputMode: currentStage,
       gotConfig,
       models: {
-        orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || 'gpt-4o',
-        worker: process.env.MERMATE_WORKER_MODEL || 'gpt-4o',
-        fast: process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-4o-mini',
+        orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || 'gpt-5.6-sol',
+        worker: process.env.MERMATE_WORKER_MODEL || 'gpt-5.6-terra',
+        fast: process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-5.6-luna',
       },
     }).catch(() => null),
     _loadModePrompt(mode),
@@ -816,7 +830,7 @@ router.post('/agent/finalize', async (req, res) => {
 
   function sendEvent(type, data) {
     if (abort.signal.aborted) return;
-    try { res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`); } catch {}
+    try { res.write(`data: ${JSON.stringify({ type, ..._withArtifactsEnvelope(data) })}\n\n`); } catch {}
   }
 
   const finalizeAuditId = auditTracker.createRun(null, 'agent:finalize');
