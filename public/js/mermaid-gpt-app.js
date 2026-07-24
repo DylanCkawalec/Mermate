@@ -1141,13 +1141,10 @@
             : `Loading TypeScript runtime for "${currentDiagramName}"…`;
           _hydratePersistedArtifact(mode).then((hydrated) => {
             if (hydrated || currentMode !== mode) return;
-            // Real pending state: the textarea stays EMPTY (data never fakes UI).
+            // Don't auto-fire expensive AI API calls — let the user press Render.
             input.placeholder = mode === 'tla'
-              ? `Generating TLA+ specification from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)} (the mastered run)\nExpected wait: ${cfg.duration.label} — Specula → SANY → TLC\nPress Render or wait for auto-start.`
-              : `Generating TypeScript runtime from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)} (the mastered run)\nExpected wait: ${cfg.duration.label} — compile → tsc → harness → coverage\nPress Render or wait for auto-start.`;
-            // On boot restore, show the placeholder but DON'T auto-fire
-            // an expensive AI API call — let the user press Render.
-            if (!_isBootRestore && currentMode === mode && !isLoading) render();
+              ? `No TLA+ specification found for "${currentDiagramName}".\n\nPress Render to generate one from run ${currentRunId.slice(0, 8)}.`
+              : `No TypeScript runtime found for "${currentDiagramName}".\n\nPress Render to generate one from run ${currentRunId.slice(0, 8)}.`;
           });
         }
       }
@@ -2358,7 +2355,7 @@
 
       if (data.sany?.valid) {
         if (agent && typeof agent.showTsContinuation === 'function') {
-          agent.showTsContinuation({ autoChain: true });
+          agent.showTsContinuation({ autoChain: false });
         } else {
           _showStandaloneContinuation('ts', 'TLA+ verified — SANY passed', 'Continue to TypeScript Runtime');
         }

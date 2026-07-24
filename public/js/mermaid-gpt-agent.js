@@ -623,7 +623,7 @@ window.MermaidAgent = class MermaidAgent {
           );
           this.onRenderResult(event);
           if (this._mode !== 'full-build') {
-            this._showContinuationCTA('tla', 'Diagram complete', 'Continue to TLA+ Specification', { autoChain: true, delayMs: 3000 });
+            this._showContinuationCTA('tla', 'Diagram complete', 'Continue to TLA+ Specification', { autoChain: false });
           }
         } else {
           this._addNarrationLog(`Render failed  —  ${(event.error || 'unknown').slice(0, 45)}`, 'system', 'render:failed');
