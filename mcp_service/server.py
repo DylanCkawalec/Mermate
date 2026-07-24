@@ -14,6 +14,7 @@ except ImportError as exc:  # pragma: no cover - exercised only when dependency 
     ) from exc
 
 from .client import MermateClient, MermateHttpError, summarize_sse_events, get_shared_client, get_shared_openclaw_client
+from .tla_harness import is_available as _harness_available, get_info as _harness_info, sany_check as _harness_sany, tlc_check as _harness_tlc, pluscal_compile as _harness_pluscal, tla_to_latex as _harness_latex
 
 
 SERVER_NAME = "mermate-openclaw-mcp"
@@ -118,6 +119,10 @@ STAGE_MAP = {
         "route": "/api/architect/pipeline",
         "description": "Run the OpenClaw wrapper protocol: idea to architecture, optional TLA+, optional TypeScript, and optional scaffold.",
     },
+    "tla_harness": {
+        "route": "direct:vendor/tla2tools.jar",
+        "description": "Direct TLA+ tools harness: SANY syntax check, TLC model check, PlusCal compilation, LaTeX pretty-print — bypasses Express for low-latency jar access.",
+    },
 }
 
 TOOL_ROUTE_MAP = {
@@ -190,6 +195,11 @@ TOOL_ROUTE_MAP = {
     "openclaw_architect_status": ["/api/architect/status"],
     "openclaw_application_protocol": ["/api/architect/pipeline"],
     "openclaw_builder_scaffold": ["/api/builder/scaffold"],
+    "tla_harness_info": ["direct:vendor/tla2tools.jar"],
+    "tla_harness_sany": ["direct:vendor/tla2tools.jar:tla2sany.SANY"],
+    "tla_harness_tlc": ["direct:vendor/tla2tools.jar:tlc2.TLC"],
+    "tla_harness_pluscal": ["direct:vendor/tla2tools.jar:pcal.trans"],
+    "tla_harness_latex": ["direct:vendor/tla2tools.jar:tla2tex.TLA"],
 }
 
 INSTRUCTIONS = (
@@ -1023,6 +1033,46 @@ def mermate_trace_get(run_id: str) -> dict[str, Any]:
 @mcp.tool(description="Read aggregate trace statistics across all runs.")
 def mermate_trace_stats() -> dict[str, Any]:
     return _call_json("GET", "/api/mermate/trace-stats")
+
+
+# ---- TLA+ Harness (direct jar access) ----------------------------------------
+
+@mcp.tool(description="Check TLA+ harness availability: Java version, jar path, and available tools (SANY, TLC, PlusCal, LaTeX).")
+def tla_harness_info() -> dict[str, Any]:
+    return _harness_info()
+
+
+@mcp.tool(description="Run SANY syntax check directly on TLA+ source via tla2tools.jar. Bypasses Express for low-latency validation.")
+def tla_harness_sany(
+    tla_source: str,
+    module_name: str = "Spec",
+) -> dict[str, Any]:
+    return _harness_sany(tla_source, module_name)
+
+
+@mcp.tool(description="Run TLC model checker directly on TLA+ source via tla2tools.jar. Returns violations, states explored, and counterexample trace.")
+def tla_harness_tlc(
+    tla_source: str,
+    cfg_source: str | None = None,
+    module_name: str = "Spec",
+) -> dict[str, Any]:
+    return _harness_tlc(tla_source, cfg_source, module_name)
+
+
+@mcp.tool(description="Compile PlusCal algorithm to TLA+ source directly via tla2tools.jar (pcal.trans). Not available through the Express API.")
+def tla_harness_pluscal(
+    tla_source: str,
+    module_name: str = "Spec",
+) -> dict[str, Any]:
+    return _harness_pluscal(tla_source, module_name)
+
+
+@mcp.tool(description="Pretty-print TLA+ source to LaTeX directly via tla2tools.jar (tla2tex.TLA). Not available through the Express API.")
+def tla_harness_latex(
+    tla_source: str,
+    module_name: str = "Spec",
+) -> dict[str, Any]:
+    return _harness_latex(tla_source, module_name)
 
 
 def main() -> None:

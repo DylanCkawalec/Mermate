@@ -30,7 +30,13 @@ from mcp_service.server import (
     mermate_trace_append,
     mermate_trace_get,
     mermate_trace_stats,
+    tla_harness_info,
+    tla_harness_sany,
+    tla_harness_tlc,
+    tla_harness_pluscal,
+    tla_harness_latex,
 )
+from mcp_service.tla_harness import is_available as harness_is_available, JAR_PATH
 
 
 class StubHandler(BaseHTTPRequestHandler):
@@ -272,8 +278,71 @@ class StageMapTests(unittest.TestCase):
             self.assertIn(key, STAGE_MAP, f"STAGE_MAP missing key: {key}")
 
     def test_tool_route_map_includes_new_tools(self) -> None:
-        for key in ("mermate_status", "mermate_render_rust", "mermate_render_tsx", "mermate_render_ts_source", "mermate_agent_active", "mermate_agent_attach", "mermate_agent_stop", "mermate_list_runs", "mermate_get_run", "mermate_get_run_summary", "mermate_get_run_trace", "mermate_get_artifacts", "mermate_get_bundle", "mermate_rate_master_metrics", "mermate_specula_health", "mermate_specula_validate_tlc", "mermate_specula_skill", "mermate_guide_status", "mermate_guide_evaluate", "mermate_trace_append", "mermate_trace_get", "mermate_trace_stats"):
+        for key in ("mermate_status", "mermate_render_rust", "mermate_render_tsx", "mermate_render_ts_source", "mermate_agent_active", "mermate_agent_attach", "mermate_agent_stop", "mermate_list_runs", "mermate_get_run", "mermate_get_run_summary", "mermate_get_run_trace", "mermate_get_artifacts", "mermate_get_bundle", "mermate_rate_master_metrics", "mermate_specula_health", "mermate_specula_validate_tlc", "mermate_specula_skill", "mermate_guide_status", "mermate_guide_evaluate", "mermate_trace_append", "mermate_trace_get", "mermate_trace_stats", "tla_harness_info", "tla_harness_sany", "tla_harness_tlc", "tla_harness_pluscal", "tla_harness_latex"):
             self.assertIn(key, TOOL_ROUTE_MAP, f"TOOL_ROUTE_MAP missing key: {key}")
+
+
+class TlaHarnessTests(unittest.TestCase):
+    """Verify the TLA+ harness can locate the jar and run tools."""
+
+    def test_jar_exists(self) -> None:
+        self.assertTrue(JAR_PATH.exists(), f"tla2tools.jar not found at {JAR_PATH}")
+
+    def test_harness_info_returns_structure(self) -> None:
+        info = tla_harness_info()
+        self.assertIn("available", info)
+        self.assertIn("jar_path", info)
+        self.assertIn("tools", info)
+        for tool in ("sany", "tlc", "pluscal", "latex"):
+            self.assertIn(tool, info["tools"])
+
+    def test_sany_valid_spec(self) -> None:
+        if not harness_is_available():
+            self.skipTest("Java or tla2tools.jar not available")
+        result = tla_harness_sany(
+            "---- MODULE TestSpec ----\nEXTENDS Naturals\nVARIABLES x\nInit == x = 0\nNext == x' = x + 1\nSpec == Init /\\ [][Next]_x\n=============\n",
+            module_name="TestSpec",
+        )
+        self.assertTrue(result["valid"], f"SANY should accept valid spec: {result.get('errors')}")
+
+    def test_sany_invalid_spec(self) -> None:
+        if not harness_is_available():
+            self.skipTest("Java or tla2tools.jar not available")
+        result = tla_harness_sany(
+            "---- MODULE BadSpec ----\nEXTENDS Naturals\nVARIABLES x\nInit == x = 0\nNext == y' = x + 1\n=============\n",
+            module_name="BadSpec",
+        )
+        self.assertFalse(result["valid"])
+        self.assertTrue(len(result["errors"]) > 0)
+
+    def test_tlc_valid_spec(self) -> None:
+        if not harness_is_available():
+            self.skipTest("Java or tla2tools.jar not available")
+        result = tla_harness_tlc(
+            "---- MODULE Counter ----\nEXTENDS Naturals\nCONSTANTS Max\nVARIABLES x\nInit == x = 0\nNext == x < Max /\\ x' = x + 1\nSpec == Init /\\ [][Next]_x\nTypeInvariant == x \\in 0..Max\n=============\n",
+            cfg_source="SPECIFICATION Spec\nINVARIANT TypeInvariant\nCHECK_DEADLOCK FALSE\nCONSTANTS\nMax = 5\n",
+            module_name="Counter",
+        )
+        self.assertTrue(result["checked"])
+        self.assertTrue(result["success"], f"TLC should pass valid spec: {result.get('violations')}")
+
+    def test_pluscal_callable(self) -> None:
+        if not harness_is_available():
+            self.skipTest("Java or tla2tools.jar not available")
+        result = tla_harness_pluscal(
+            "---- MODULE PcalTest ----\n(* --algorithm TestAlgo\nbegin\n  skip;\nend algorithm; *)\n=============\n",
+            module_name="PcalTest",
+        )
+        self.assertIn("ok", result)
+
+    def test_latex_callable(self) -> None:
+        if not harness_is_available():
+            self.skipTest("Java or tla2tools.jar not available")
+        result = tla_harness_latex(
+            "---- MODULE TexTest ----\nEXTENDS Naturals\nVARIABLES x\nInit == x = 0\nNext == x' = x + 1\nSpec == Init /\\ [][Next]_x\n=============\n",
+            module_name="TexTest",
+        )
+        self.assertIn("ok", result)
 
 
 if __name__ == "__main__":
