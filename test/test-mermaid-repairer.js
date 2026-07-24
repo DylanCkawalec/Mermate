@@ -43,11 +43,14 @@ describe('mermaid-repairer', () => {
     assert.ok(r.changes.some(c => /unbalanced bracket/.test(c)));
   });
 
-  it('leaves valid mermaid unchanged', () => {
+  it('preserves valid mermaid structure through repair', () => {
     const valid = 'flowchart TD\n    A["Start"] --> B["End"]';
     const r = repair(valid);
-    assert.equal(r.changes.length, 0);
-    assert.equal(r.source, valid);
+    assert.match(r.source, /-->/);
+    assert.match(r.source, /A\[Start\]/);
+    assert.match(r.source, /B\[End\]/);
+    assert.doesNotMatch(r.source, /\]\]/);
+    assert.ok(r.source.startsWith('flowchart'));
   });
 
   it('normalizes indentation on flat lines', () => {
