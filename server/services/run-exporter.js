@@ -66,14 +66,21 @@ async function exportRun(runId, runData) {
 
     if (diagramName) {
       const flowDir = path.join(PROJECT_ROOT, 'flows', diagramName);
+      const artifacts = runData.final_artifact?.artifacts || {};
 
-      const pairs = [
-        [`${diagramName}.mmd`, 'diagram.mmd'],
-        [`${diagramName}.svg`, 'diagram.svg'],
-        [`${diagramName}.png`, 'diagram.png'],
+      // Prefer the actual persisted artifact paths from the run manifest,
+      // falling back to the conventional flows/<name>/<name>.<ext> location.
+      // The .mmd source lives in /archs (see mermaid-archiver), NOT /flows —
+      // blindly guessing flows/<name>.mmd was why diagram.mmd went missing.
+      const artifactMap = [
+        [artifacts.mmd, path.join(flowDir, `${diagramName}.mmd`), 'diagram.mmd'],
+        [artifacts.svg, path.join(flowDir, `${diagramName}.svg`), 'diagram.svg'],
+        [artifacts.png, path.join(flowDir, `${diagramName}.png`), 'diagram.png'],
       ];
-      for (const [src, dest] of pairs) {
-        if (await _safeCopy(path.join(flowDir, src), path.join(dumpPath, dest))) {
+      for (const [relPath, fallbackAbs, dest] of artifactMap) {
+        const primaryAbs = relPath ? path.join(PROJECT_ROOT, relPath.replace(/^\//, '')) : null;
+        const destAbs = path.join(dumpPath, dest);
+        if ((primaryAbs && await _safeCopy(primaryAbs, destAbs)) || await _safeCopy(fallbackAbs, destAbs)) {
           copied.push(dest);
         }
       }

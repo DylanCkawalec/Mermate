@@ -38,6 +38,26 @@ const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL
   || OPENAI_DIRECT_URL;
 const _useDirectFallback = OPENAI_BASE_URL !== OPENAI_DIRECT_URL;
 
+// When the primary gateway (Opseeq) fails, fall back to the real OpenAI API.
+// The Mermate model aliases (gpt-5.6-*) are not real OpenAI IDs, so map them
+// to a known working model and strip parameters that only reasoning models accept.
+const OPENAI_DIRECT_FALLBACK_MODEL = process.env.OPENAI_DIRECT_FALLBACK_MODEL || 'gpt-4o';
+
+function _isMermateAlias(model) {
+  return /^gpt-5\./i.test(model || '') || /\b(sol|terra|luna)\b/i.test(model || '');
+}
+
+function _normalizeDirectFallbackModel(model) {
+  if (OPENAI_DIRECT_FALLBACK_MODEL && _isMermateAlias(model)) {
+    return OPENAI_DIRECT_FALLBACK_MODEL;
+  }
+  return model;
+}
+
+function _isReasoningModel(model) {
+  return /^o[1-9]/i.test(model || '') || /^o3/i.test(model || '');
+}
+
 // Shared trace ID — set by input-router.js via setTraceId() so every
 // inference call correlates with the MERMATE run in Opseeq's trace.
 let _traceId = null;
@@ -118,6 +138,48 @@ function getDepthTier() { return _depthTier; }
 const _fallbackEvents = [];
 function getFallbackEvents() { return _fallbackEvents.slice(); }
 function clearFallbackEvents() { _fallbackEvents.length = 0; }
+
+// ---- Inference activity tracker --------------------------------------------
+// Let the Opseeq lifecycle manager know the server is actively using the
+// premium provider so it does not shut the gateway down during a run.
+let _lastInferenceAt = Date.now();
+let _activeInferenceCount = 0;
+function touchInferenceActivity() { _lastInferenceAt = Date.now(); }
+function getLastInferenceAt() { return _lastInferenceAt; }
+function getActiveInferenceCount() { return _activeInferenceCount; }
+
+// ---- Trace helpers --------------------------------------------------------
+// Emit a single compact inference.trace event for every provider attempt.
+// This lets the OODA universal tracer correlate calls, providers, models,
+// latencies, and failures without parsing verbose provider.* events.
+
+function _classifyInferenceError(error) {
+  if (!error) return 'ok';
+  const e = String(error).toLowerCase();
+  if (e.includes('timeout') || e.includes('abort')) return 'timeout';
+  if (e.includes('429') || e.includes('rate') || e.includes('too many')) return 'rate_limit';
+  if (e.includes('parse') || e.includes('json')) return 'parse';
+  if (e.includes('schema') || e.includes('contract')) return 'schema';
+  if (e.includes('exhausted') || e.includes('unavailable') || e.includes('enotfound')) return 'provider_exhausted';
+  if (e.includes('refus')) return 'model_refusal';
+  return 'unknown';
+}
+
+function _emitInferenceTrace({ stage, provider, model, result, latencyMs, error, outputLen, traceId }) {
+  const errorClass = _classifyInferenceError(error);
+  const payload = {
+    stage,
+    provider,
+    model: model || 'unknown',
+    result: result || (error ? 'error' : 'empty'),
+    latencyMs,
+    error_class: errorClass,
+  };
+  if (outputLen != null) payload.outputLen = outputLen;
+  if (error) payload.error = String(error).slice(0, 120);
+  if (traceId || _traceId) payload.traceId = traceId || _traceId;
+  logger.info('inference.trace', payload);
+}
 
 // Tiered model pool — each stage picks the right tier
 const MODELS = Object.freeze({
@@ -599,9 +661,9 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
           });
         }
 
-        if (res.status === 429 || res.status === 503) {
+        if (res.status === 429 || res.status === 503 || (res.status >= 500 && res.status < 600)) {
           const retryAfterMs = _parseRetryAfter(res);
-          const eventType = res.status === 429 ? '429_rate_limit' : '503_overloaded';
+          const eventType = res.status === 429 ? '429_rate_limit' : `${res.status}_server_error`;
 
           logger.warn(`${logPrefix}.rate_limited`, {
             model, status: res.status, retryAfterMs,
@@ -715,14 +777,34 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const finalBody = { ...body };
-      if (reasoningEffort) finalBody.reasoning_effort = reasoningEffort;
+      finalBody.model = _normalizeDirectFallbackModel(finalBody.model);
+      if (!_isReasoningModel(finalBody.model)) {
+        delete finalBody.reasoning_effort;
+        const tokenCap = finalBody.max_completion_tokens || finalBody.max_tokens || 4096;
+        finalBody.max_tokens = Math.min(tokenCap, 4096);
+        delete finalBody.max_completion_tokens;
+      }
+      if (reasoningEffort && _isReasoningModel(finalBody.model)) finalBody.reasoning_effort = reasoningEffort;
       if (responseFormat) finalBody.response_format = responseFormat;
+
+      // OpenAI's json_object mode requires the word 'json' to appear in the
+      // conversation. Append a lowercase reminder if the prompt only uses 'JSON'.
+      if (finalBody.response_format?.type === 'json_object' && Array.isArray(finalBody.messages)) {
+        const hasJson = finalBody.messages.some(m => typeof m.content === 'string' && /json/i.test(m.content));
+        if (!hasJson) {
+          finalBody.messages = finalBody.messages.concat({ role: 'user', content: 'Return valid json.' });
+        }
+      }
+
       const res = await fetch(directUrl, {
         method: 'POST', headers: traceHeaders,
         body: JSON.stringify(finalBody),
         signal: controller.signal,
       });
-      if (res.ok) {
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        logger.warn(`${logPrefix}.direct_fallback_http_error`, { model: finalBody.model, status: res.status, body: errText.slice(0, 200) });
+      } else {
         const data = await res.json();
         const content = extractContent(data);
         if (content) {
@@ -914,6 +996,9 @@ async function _callEnhancer(systemPrompt, userPrompt, stage, extra) {
  * render stages prefer premium first.
  */
 async function infer(stage, context = {}) {
+  _activeInferenceCount++;
+  touchInferenceActivity();
+  try {
   const promptConfig = context.systemPrompt
     ? { system: context.systemPrompt, temperature: 0 }
     : buildPrompt(stage);
@@ -969,7 +1054,10 @@ async function infer(stage, context = {}) {
       providers[2].ok = enhancerOk;
       if (!prov.ok) prov.ok = prov.name === 'ollama' ? ollamaOk : enhancerOk;
     }
-    if (!prov.ok) continue;
+    if (!prov.ok) {
+      _emitInferenceTrace({ stage, provider: prov.name, model: prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer'), result: 'skipped', latencyMs: 0, error: 'provider not available' });
+      continue;
+    }
 
     logger.info('provider.route', { provider: prov.name, stage, tier: prov.isPremium ? catalog.classifyTier(stageModel) : catalog.Tier.LOCAL });
     const callStart = Date.now();
@@ -981,6 +1069,7 @@ async function infer(stage, context = {}) {
 
     if (!output || !output.trim()) {
       logger.warn('provider.empty', { provider: prov.name, stage, ms: latencyMs });
+      _emitInferenceTrace({ stage, provider: prov.name, model: prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer'), result: 'empty', latencyMs });
       // On premium failure, trigger lazy local check for remaining chain items
       if (prov.isPremium && !_localChecked) {
         _localChecked = true;
@@ -993,16 +1082,19 @@ async function infer(stage, context = {}) {
 
     if (output.trim() === userPrompt.trim()) {
       logger.warn('provider.noop', { provider: prov.name, stage, ms: latencyMs });
+      _emitInferenceTrace({ stage, provider: prov.name, model: prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer'), result: 'noop', latencyMs, outputLen: output.length });
       continue;
     }
 
     const usedFallback = !!(prov.isPremium && callResult?.usedDirectFallback);
     logger.info('provider.ok', { provider: prov.name, stage, len: output.length, ms: latencyMs, model: prov.isPremium ? stageModel : undefined, tag: actionTag?.tag, usedDirectFallback: usedFallback || undefined });
+    const resolvedModel = prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer');
+    _emitInferenceTrace({ stage, provider: prov.name, model: resolvedModel, result: 'ok', latencyMs, outputLen: output.length });
     // Append to forward reasoning memory for downstream stages
-    appendReasoningMemory(stage, prov.isPremium ? stageModel : prov.name, output);
+    appendReasoningMemory(stage, resolvedModel, output);
     return {
       output: output.trim(), provider: prov.name, noOp: false, latencyMs,
-      model: prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer'),
+      model: resolvedModel,
       rateEvents: rateEvents.length ? rateEvents : undefined,
       actionTag,
       usedDirectFallback: usedFallback,
@@ -1010,7 +1102,12 @@ async function infer(stage, context = {}) {
   }
 
   logger.warn('provider.exhausted', { stage });
+  _emitInferenceTrace({ stage, provider: 'none', model: 'none', result: 'error', latencyMs: 0, error: 'provider chain exhausted' });
   return { output: null, provider: 'none', noOp: true, latencyMs: 0, model: 'none', rateEvents: rateEvents.length ? rateEvents : undefined };
+  } finally {
+    _activeInferenceCount--;
+    touchInferenceActivity();
+  }
 }
 
 /**
@@ -1018,6 +1115,9 @@ async function infer(stage, context = {}) {
  * Falls back to default premium, then Ollama, then local.
  */
 async function inferMax(stage, context = {}) {
+  _activeInferenceCount++;
+  touchInferenceActivity();
+  try {
   const maxModel = PREMIUM_MAX_MODEL || PREMIUM_MODEL;
   if (!PREMIUM_API_KEY) {
     logger.info('provider.max.no_api_key', { stage, fallback: 'infer' });
@@ -1048,6 +1148,7 @@ async function inferMax(stage, context = {}) {
   if (output && output.trim() && output.trim() !== userPrompt.trim()) {
     const usedFallback = !!callResult?.usedDirectFallback;
     logger.info('provider.max.success', { model: maxModel, stage, outputLen: output.length, latencyMs, rmTag: actionTag?.tag, usedDirectFallback: usedFallback || undefined });
+    _emitInferenceTrace({ stage, provider: `premium-max:${maxModel}`, model: maxModel, result: 'ok', latencyMs, outputLen: output.length });
     // Append to forward reasoning memory for downstream stages
     appendReasoningMemory(stage, maxModel, output);
     return {
@@ -1062,7 +1163,12 @@ async function inferMax(stage, context = {}) {
     logger.warn('provider.max.rate_limited_downgrade', { model: maxModel, stage, events: rateEvents.length });
   }
   logger.warn('provider.max.failed', { model: maxModel, stage, fallback: 'default_infer', latencyMs });
+  _emitInferenceTrace({ stage, provider: `premium-max:${maxModel}`, model: maxModel, result: 'error', latencyMs, error: 'max inference failed or returned unchanged input' });
   return infer(stage, context);
+  } finally {
+    _activeInferenceCount--;
+    touchInferenceActivity();
+  }
 }
 
 /**
@@ -1116,8 +1222,12 @@ const ROLE_ALLOWED_STAGES = new Set([
  * @returns {Promise<{output: string|null, provider: string, noOp: boolean}>}
  */
 async function inferWithRole(stage, context, roleName) {
+  _activeInferenceCount++;
+  touchInferenceActivity();
+  try {
   if (!ROLE_ALLOWED_STAGES.has(stage)) {
     logger.info('provider.role.stage_blocked', { stage, roleName, reason: 'stage not allowed for role inference' });
+    _emitInferenceTrace({ stage, provider: `role:${roleName}`, model: 'none', result: 'error', latencyMs: 0, error: `stage ${stage} not allowed for role inference` });
     return infer(stage, context);
   }
 
@@ -1126,12 +1236,14 @@ async function inferWithRole(stage, context, roleName) {
 
   if (!role || !role.enabled) {
     logger.info('provider.role.not_available', { roleName, found: !!role, enabled: role?.enabled });
+    _emitInferenceTrace({ stage, provider: `role:${roleName}`, model: 'none', result: 'error', latencyMs: 0, error: `role ${roleName} not found or disabled` });
     return infer(stage, context);
   }
 
   const apiKey = role.apiKey;
   if (!apiKey || apiKey.startsWith('{')) {
     logger.info('provider.role.no_valid_key', { roleName, reason: 'unresolved or empty key' });
+    _emitInferenceTrace({ stage, provider: `role:${roleName}`, model: role.model || 'unknown', result: 'error', latencyMs: 0, error: 'role has no valid api key' });
     return infer(stage, context);
   }
 
@@ -1156,15 +1268,18 @@ async function inferWithRole(stage, context, roleName) {
 
     if (!output || !output.trim()) {
       logger.warn('provider.role.empty_output', { roleName, stage, latencyMs });
+      _emitInferenceTrace({ stage, provider: `role:${roleName}`, model, result: 'empty', latencyMs });
       return infer(stage, context);
     }
 
     if (output.trim() === userPrompt.trim()) {
       logger.warn('provider.role.no_op', { roleName, stage, latencyMs });
+      _emitInferenceTrace({ stage, provider: `role:${roleName}`, model, result: 'noop', latencyMs, outputLen: output.length });
       return infer(stage, context);
     }
 
     logger.info('provider.role.success', { roleName, model, stage, outputLen: output.length, latencyMs, rmTag: actionTag?.tag });
+    _emitInferenceTrace({ stage, provider: `role:${roleName}`, model, result: 'ok', latencyMs, outputLen: output.length });
     return {
       output: output.trim(), provider: `role:${roleName}:${model}`, noOp: false, latencyMs, model,
       rateEvents: rateEvents.length ? rateEvents : undefined,
@@ -1173,7 +1288,12 @@ async function inferWithRole(stage, context, roleName) {
   } catch (err) {
     const latencyMs = Date.now() - callStart;
     logger.warn('provider.role.error', { roleName, stage, error: err.message, latencyMs });
+    _emitInferenceTrace({ stage, provider: `role:${roleName}`, model, result: 'error', latencyMs, error: err.message });
     return infer(stage, context);
+  }
+} finally {
+    _activeInferenceCount--;
+    touchInferenceActivity();
   }
 }
 
@@ -1196,6 +1316,7 @@ module.exports = {
   infer, inferMax, inferWithRole, checkProviders, isMaxAvailable,
   setTraceId, setDepthTier, getDepthTier,
   getFallbackEvents, clearFallbackEvents,
+  getLastInferenceAt, getActiveInferenceCount,
   clearReasoningMemory, getReasoningMemoryBlock, appendReasoningMemory,
   STAGE_JSON_SCHEMAS,
   createRealInferenceProvider,

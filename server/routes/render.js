@@ -25,6 +25,72 @@ const ENHANCER_TIMEOUT_MS = parseInt(process.env.MERMAID_ENHANCER_TIMEOUT || '15
 const router = Router();
 const COPILOT_STAGES = new Set(['copilot_suggest', 'copilot_enhance']);
 
+const _MERMAID_DIRECTIVE_RE = /^(flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie\b|mindmap|timeline|journey|C4Context|C4Container|C4Dynamic|quadrantChart|sankey-beta|xychart-beta|block-beta|gitgraph)\b/i;
+
+/**
+ * Post-processing safety net for Mermaid enhance output.
+ *
+ * When a weaker model (e.g. gpt-oss:20b) ignores the "output Mermaid only"
+ * instruction and returns prose with arrows, this function:
+ *   1. Extracts Mermaid from ```mermaid code blocks if present
+ *   2. If the output starts with a valid directive, keeps it as-is
+ *   3. If lines look like Mermaid edges (A --> B), prepends the original
+ *      diagram directive from the user's input
+ *   4. Otherwise falls back to the original input — better to return valid
+ *      Mermaid unchanged than replace it with an English description
+ */
+function _sanitizeMmdOutput(output, originalInput) {
+  const trimmedOutput = output.trim();
+  if (!trimmedOutput) return originalInput;
+
+  // Already valid — starts with a Mermaid directive
+  if (_MERMAID_DIRECTIVE_RE.test(trimmedOutput)) {
+    return trimmedOutput;
+  }
+
+  // Try to extract from ```mermaid ... ``` code block
+  const codeBlockMatch = trimmedOutput.match(/```(?:mermaid)?\s*\n([\s\S]*?)\n```/i);
+  if (codeBlockMatch) {
+    const extracted = codeBlockMatch[1].trim();
+    if (_MERMAID_DIRECTIVE_RE.test(extracted)) {
+      return extracted;
+    }
+  }
+
+  // Try to extract lines that look like Mermaid edges (A --> B, A -.-> B, etc.)
+  const lines = trimmedOutput.split('\n');
+  const edgeLines = lines.filter(l => /^\s*\w+.*(-->)|(-\.->)|(==>)|(--x)|(--o)|(\.-\.)\s*\w+/i.test(l.trim()));
+
+  if (edgeLines.length >= 2) {
+    // Try to get the directive from the original input
+    const origFirstLine = originalInput.split('\n').find(l => l.trim());
+    const directiveMatch = origFirstLine && origFirstLine.match(_MERMAID_DIRECTIVE_RE);
+    const directive = directiveMatch ? origFirstLine.trim() : 'flowchart TB';
+
+    // Filter to only keep lines that look like valid Mermaid (edges, nodes, subgraph, etc.)
+    const mermaidLines = lines.filter(l => {
+      const t = l.trim();
+      if (!t || t.startsWith('%%')) return true; // comments
+      if (_MERMAID_DIRECTIVE_RE.test(t)) return true; // directives
+      if (/^(subgraph|end|classDef|class|style|linkStyle)\b/i.test(t)) return true;
+      if (/^\w+.*(-->)|(-\.->)|(==>)|(--x)|(--o)|(\.-\.)\s*\w+/i.test(t)) return true;
+      if (/^\w+\[.*\]|^\w+\(.*\)|^\w+\{.*\}|^\w+>".*"/.test(t)) return true;
+      return false;
+    });
+
+    if (mermaidLines.length >= 2) {
+      return [directive, ...mermaidLines].join('\n');
+    }
+  }
+
+  // Fall back to original input — the model produced prose, not Mermaid
+  logger.warn('copilot.enhance.mmd_prose_fallback', {
+    outputLen: trimmedOutput.length,
+    outputPreview: trimmedOutput.slice(0, 100),
+  });
+  return originalInput;
+}
+
 // #region agent log
 function _dbgPipeline(hypothesisId, location, message, data) {
   if (process.env.MERMATE_DEBUG_PIPELINE !== '1') return;
@@ -175,6 +241,10 @@ router.post('/copilot/enhance', async (req, res) => {
           const inputText = (req.body?.selected_text || req.body?.full_text || req.body?.raw_source || '').trim();
           const outputText = (data.enhanced_source || '').trim();
           if (!inputText || !outputText || inputText !== outputText) {
+            // Sanitize Mermaid output if mode is mmd
+            if (req.body?.mode === 'mmd' && data.enhanced_source) {
+              data.enhanced_source = _sanitizeMmdOutput(data.enhanced_source, inputText);
+            }
             return res.json({ success: true, ...data });
           }
           logger.warn('copilot.enhance.no_op_enhancer', { stage });
@@ -251,6 +321,11 @@ router.post('/copilot/enhance', async (req, res) => {
     const sentenceCount = trimmed.split(/[.!?]\s+|\n+/).filter(s => s.trim().length > 3).length;
     const entityCount = shadowContext?.entities?.length || 0;
 
+    // The mode field from the client tells us which tab the user is on.
+    // Structured formats (mmd, md, tla, ts) must always return in that format.
+    const targetFormat = req.body?.mode || 'idea';
+    const isStructuredFormat = ['mmd', 'md', 'tla', 'ts'].includes(targetFormat);
+
     // Heavy-markup detection: LaTeX commands, markdown headers, fenced code
     // blocks, bibliographic entries. These are the "this is a dump, not an
     // idea" signals.
@@ -260,20 +335,21 @@ router.post('/copilot/enhance', async (req, res) => {
     const markupScore = latexHits + mdHeaderHits + Math.floor(fencedCodeHits / 2);
     const isHeavyMarkup = markupScore >= 6;
 
-    const isSparse = !isSelection
+    const isSparse = !isSelection && !isStructuredFormat
       && trimmed.length < 240
       && wordCount < 40
       && sentenceCount <= 1
       && entityCount < 3;
-    const isLargeDump = !isSelection && (trimmed.length >= 2000 || isHeavyMarkup);
+    const isLargeDump = !isSelection && !isStructuredFormat && (trimmed.length >= 2000 || isHeavyMarkup);
 
     let flavor;
     if (isSelection)        flavor = 'selection';
+    else if (isStructuredFormat) flavor = 'refine';  // structured formats always refine
     else if (isLargeDump)   flavor = 'distill';
     else if (isSparse)      flavor = 'expand';
     else                    flavor = 'refine';
 
-    const flavorPrompt = require('../services/axiom-prompts').buildCopilotEnhancePrompt(flavor);
+    const flavorPrompt = require('../services/axiom-prompts').buildCopilotEnhancePrompt(flavor, targetFormat);
 
     // Previous-text context: lets the user iterate on enhancements
     // (click → distill → tweak → click again to refine that distillation).
@@ -290,9 +366,16 @@ router.post('/copilot/enhance', async (req, res) => {
       ? sourceText.slice(0, sourceLimit) + `\n\n[…TRUNCATED ${sourceText.length - sourceLimit} chars…]`
       : sourceText;
 
+    const formatDirective = isStructuredFormat
+      ? targetFormat === 'mmd'
+        ? `Target format: MMD — The input below IS Mermaid source code. Your output MUST also be valid Mermaid source code. Start with the same diagram directive (e.g. flowchart TB, sequenceDiagram, etc.). Do NOT describe the diagram in prose. Do NOT explain what the diagram does. Output ONLY Mermaid syntax — no English sentences, no descriptions, no explanations outside %% comments.`
+        : `Target format: ${targetFormat.toUpperCase()} — the enhanced_source MUST be valid ${targetFormat === 'md' ? 'markdown' : targetFormat === 'tla' ? 'TLA+' : 'TypeScript'}. Do NOT convert to plain text or a different format.`
+      : '';
+
     const enhanceUserPrompt = [
       `Stage: copilot_enhance`,
       `Enhance flavor: ${flavor}`,
+      formatDirective,
       `Word count: ${wordCount}, sentences: ${sentenceCount}, named entities: ${entityCount}, markup score: ${markupScore}, raw chars: ${trimmed.length}`,
       previousBlock,
       `Full text: ${sourceForPrompt}`,
@@ -321,17 +404,30 @@ router.post('/copilot/enhance', async (req, res) => {
     });
 
     if (result.output && !result.noOp) {
+      let enhancedSource = null;
+      let parsedExtras = {};
       try {
         const parsed = JSON.parse(result.output);
-        if (parsed.enhanced_source) {
-          return res.json({ success: true, ...parsed, flavor, provider: result.provider });
-        }
+        enhancedSource = parsed.enhanced_source || null;
+        parsedExtras = parsed;
       } catch {
         // Not JSON — use raw text as enhanced source
+        enhancedSource = result.output.trim();
+      }
+
+      if (enhancedSource) {
+        // Post-processing safety net for Mermaid mode: if the model returned
+        // prose instead of Mermaid syntax, try to salvage it or fall back to
+        // the original input. Better to return the user's valid Mermaid
+        // unchanged than to replace it with an English description.
+        if (targetFormat === 'mmd') {
+          enhancedSource = _sanitizeMmdOutput(enhancedSource, trimmed);
+        }
+
         return res.json({
           success: true,
-          enhanced_source: result.output.trim(),
-          intent_preserved: true,
+          ...parsedExtras,
+          enhanced_source: enhancedSource,
           flavor,
           provider: result.provider,
         });
@@ -433,7 +529,12 @@ router.post('/render', async (req, res) => {
     // regardless of which pipeline (HPC-GoT, decompose, renderPrepare) runs.
     let routeResult;
     const isTextOrMd = profile.contentState === 'text' || profile.contentState === 'md';
-    const shouldUseProvider = isTextOrMd && enhance;
+    // Hybrid content (markdown prose with some Mermaid-like signals) should also
+    // use the provider-backed pipeline when enhance is requested — the agent's
+    // draft is often classified as hybrid because it contains arrows or node-like
+    // syntax in prose. Without this, hybrid falls through to route() which only
+    // uses the Python enhancer (often down) or bestEffortExtract (fails on prose).
+    const shouldUseProvider = (isTextOrMd || profile.contentState === 'hybrid') && enhance;
 
     if (shouldUseProvider && profile.shadow?.entities?.length >= 2) {
       const { buildFactExtractionUserPrompt } = require('../services/axiom-prompts');

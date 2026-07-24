@@ -2527,7 +2527,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           stage: 'copilot_enhance',
-          content_state: currentMode === 'mmd' ? 'mmd' : 'text',
+          content_state: ({ mmd: 'mmd', md: 'md', tla: 'tla', ts: 'ts' })[currentMode] || 'text',
           mode: currentMode,
           enhance_mode: 'full',
           full_text: trimmed.slice(0, 80000),
@@ -2667,6 +2667,19 @@
     agent = new window.MermaidAgent({
       input, panel: agentPanel, panelLog: agentPanelLog, panelMode: agentPanelMode,
       notesWrap: agentNotesWrap, notesInput: agentNotesInput, btnFinalize: btnAgentCommit,
+      onDraftUpdate: (event) => {
+        // Draft text is the working idea/markdown architecture — it belongs
+        // to the stage the agent was started from (idea or md), NEVER to
+        // whatever tab the user happens to be viewing. Route it to the
+        // owning artifact; only allow typing into the visible input when
+        // the user is actually on that stage's tab.
+        const draftStage = (currentMode === 'idea' || currentMode === 'md') ? currentMode : 'md';
+        orchestrator.setArtifact(draftStage, event.text);
+        if (currentMode === draftStage) return true;
+        _markTabHasNewContent(draftStage);
+        showToast(`Draft updated — see the ${_stageLabel(draftStage)} tab`, 'info', 2500);
+        return false;
+      },
       onPreviewRender: (event) => {
         _applyAgentArtifacts(event);
         _agenticallyReviewArtifacts(event);
@@ -2873,6 +2886,35 @@
   setMode(orchestrator.currentStage);
   _rebuildAgentDropdown();
   updateBadges();
+
+  // ---- Reattach to a live agent run after a page refresh ----
+  // The server keeps agent pipelines running when the browser disconnects;
+  // if we stored a session id and it's still live, reattach and replay
+  // instead of restarting the whole pipeline.
+  (async () => {
+    const saved = window.MermaidAgent?.readSavedSession?.();
+    if (!saved?.id) return;
+    try {
+      const res = await fetch('/api/agent/active');
+      const data = await res.json();
+      const live = (data.sessions || []).find(s => s.session_id === saved.id && s.status === 'running');
+      if (!live) {
+        window.MermaidAgent.clearSavedSession();
+        return;
+      }
+      selectedAgentMode = saved.mode || selectedAgentMode;
+      _createAgent();
+      agentModeActive = true;
+      btnAgentToggle?.classList.add('active');
+      btnRender.hidden = true;
+      btnAgentRun.hidden = false;
+      input.readOnly = true;
+      showToast('Agent still running — reattached to live progress', 'info', 4000);
+      agent.attach(saved.id, saved.mode);
+    } catch {
+      window.MermaidAgent?.clearSavedSession?.();
+    }
+  })();
 
   // Restore pending entry if it exists
   const pendingItem = sidebar.items.find(i => i._pending);

@@ -89,6 +89,39 @@ router.post('/render/ts', async (req, res) => {
     return res.status(404).json({ success: false, error: `Run ${run_id} not found` });
   }
 
+  // Fail fast: TLA+ artifacts are a hard precondition for TS compilation.
+  // Verify existence, path safety, and on-disk readability BEFORE the
+  // expensive on-demand fact-extraction LLM call — otherwise a run with no
+  // TLA+ spec burns minutes of inference only to 422 anyway.
+  if (!runData.tla_artifacts?.tla || !runData.tla_artifacts?.cfg) {
+    return res.status(422).json({
+      success: false,
+      error: 'TLA+ artifacts not found for this run. Execute /api/render/tla first.',
+    });
+  }
+
+  const tlaPath = _resolveArtifactPath(runData.tla_artifacts.tla);
+  const cfgPath = _resolveArtifactPath(runData.tla_artifacts.cfg);
+  if (!tlaPath || !cfgPath) {
+    return res.status(422).json({
+      success: false,
+      error: 'Invalid or unsafe TLA+ artifact path in run data',
+    });
+  }
+
+  let tlaSource = '';
+  let cfgSource = '';
+  try {
+    tlaSource = await fsp.readFile(tlaPath, 'utf8');
+    cfgSource = await fsp.readFile(cfgPath, 'utf8');
+  } catch (err) {
+    return res.status(422).json({
+      success: false,
+      error: 'Failed to load TLA+ artifacts from disk',
+      details: err.message,
+    });
+  }
+
   let { facts, plan } = _extractFactsAndPlan(runData);
 
   // On-demand fact extraction when HPC-GoT path wasn't used (e.g. decompose pipeline)
@@ -128,35 +161,6 @@ router.post('/render/ts', async (req, res) => {
         error: 'Could not extract typed facts from the original input.',
       });
     }
-  }
-
-  if (!runData.tla_artifacts?.tla || !runData.tla_artifacts?.cfg) {
-    return res.status(422).json({
-      success: false,
-      error: 'TLA+ artifacts not found for this run. Execute /api/render/tla first.',
-    });
-  }
-
-  const tlaPath = _resolveArtifactPath(runData.tla_artifacts.tla);
-  const cfgPath = _resolveArtifactPath(runData.tla_artifacts.cfg);
-  if (!tlaPath || !cfgPath) {
-    return res.status(422).json({
-      success: false,
-      error: 'Invalid or unsafe TLA+ artifact path in run data',
-    });
-  }
-
-  let tlaSource = '';
-  let cfgSource = '';
-  try {
-    tlaSource = await fsp.readFile(tlaPath, 'utf8');
-    cfgSource = await fsp.readFile(cfgPath, 'utf8');
-  } catch (err) {
-    return res.status(422).json({
-      success: false,
-      error: 'Failed to load TLA+ artifacts from disk',
-      details: err.message,
-    });
   }
 
   const name = (diagram_name && require('../utils/naming').slugify(diagram_name)) || runData.user_request?.diagram_name || runData.request?.user_diagram_name || 'runtime';
@@ -286,6 +290,20 @@ router.post('/render/ts', async (req, res) => {
     };
 
     await persistRunData(runPath, runData);
+
+    logger.info('toolchain.outcome', {
+      run_id: run_id.slice(0, 8),
+      tab: 'ts',
+      tool: 'ts',
+      tsc_ok: validation.compile.success,
+      tsc_repairs: validation.compile.repairs,
+      test_ok: validation.tests.success,
+      test_repairs: validation.tests.repairs,
+      coverage_percent: validation.coverage?.percent || null,
+      class_name: compiled.className,
+      success: validation.success,
+      traces: validation.traces.length,
+    });
 
     logger.info('ts.compile_complete', {
       runId: run_id.slice(0, 8),

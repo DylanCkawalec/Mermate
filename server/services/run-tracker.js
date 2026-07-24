@@ -802,6 +802,38 @@ function _computeSumCheck(m) {
   };
 }
 
+// Downstream artifact keys that external routes (TLA+, TS, TSX) persist
+// directly to runs/<id>.json via persistRunData, bypassing the in-memory
+// manifest. On finalize we merge these back so _atomicWrite does not clobber
+// them. Only keys ABSENT from the in-memory manifest are copied from disk.
+const _EXTERNAL_ARTIFACT_KEYS = [
+  'tla_artifacts', 'tla_metrics', 'tla_verification', 'tla_env',
+  'ts_artifacts', 'ts_metrics',
+  'tsx_artifacts', 'tsx_metrics',
+  'specula_artifacts', 'structural_signature',
+];
+
+/**
+ * Merge externally-persisted artifact keys from the on-disk run.json into the
+ * in-memory manifest `m`. Disk wins ONLY for keys the in-memory copy lacks;
+ * populated in-memory keys are never overwritten. Advisory — never throws.
+ * @param {object} m in-memory run manifest (mutated in place)
+ */
+async function _mergeExternalArtifacts(m) {
+  try {
+    const raw = await fsp.readFile(path.join(RUNS_DIR, `${m.run_id}.json`), 'utf8');
+    const disk = JSON.parse(raw);
+    for (const key of _EXTERNAL_ARTIFACT_KEYS) {
+      const memHas = m[key] && (typeof m[key] !== 'object' || Object.keys(m[key]).length > 0);
+      const diskHas = disk[key] && (typeof disk[key] !== 'object' || Object.keys(disk[key]).length > 0);
+      if (!memHas && diskHas) {
+        m[key] = disk[key];
+        logger.info('run_tracker.merged_external_artifact', { runId: m.run_id.slice(0, 8), key });
+      }
+    }
+  } catch { /* no on-disk run.json yet, or unreadable — nothing to merge */ }
+}
+
 /**
  * Finalize a run: mark complete, compute totals, run completeness check, persist.
  * @param {string} runId
@@ -817,6 +849,14 @@ async function finalize(runId, status = 'completed') {
   // Open the finalize phase (and close any prior in-flight phase) so the
   // lifecycle timeline is always closed-out, even on early exits.
   recordPhase(runId, 'finalize');
+
+  // Merge externally-persisted artifacts back into the in-memory manifest.
+  // The TLA+ and TS routes write directly to runs/<id>.json on disk via
+  // persistRunData — bypassing this in-memory manifest. Without this merge,
+  // the _atomicWrite below would clobber those artifacts with an in-memory
+  // copy that never saw them (the run.json clobber bug). Only copy keys the
+  // in-memory manifest lacks, so fresher in-memory data always wins.
+  await _mergeExternalArtifacts(m);
 
   // Refresh artifact-presence tags from whatever made it onto the manifest.
   // These tags are the cheapest possible filter for downstream tools.
@@ -950,6 +990,138 @@ async function loadRun(runId) {
   }
 }
 
+/**
+ * Flatten a run manifest into a deterministic tab-oriented trace.
+ *
+ * This is the canonical output for the OODA universal tracer:
+ * one JSON that captures the full idea → md → mmd → tla → ts lifecycle,
+ * every inference call, rate event, and toolchain outcome.
+ */
+function getTrace(runId, manifest = null) {
+  const m = manifest || _activeRuns.get(runId);
+  if (!m) return null;
+
+  const calls = (m.agent_calls || []).map(c => ({
+    call_id: c.call_id,
+    seq: c.seq,
+    stage: c.stage,
+    role: c.role,
+    model: c.model,
+    provider: c.provider,
+    latency_ms: c.latency_ms,
+    success: c.success,
+    error: c.error,
+    output_type: c.output_type,
+    prompt_tokens_est: c.prompt_tokens_est,
+    output_tokens_est: c.output_tokens_est,
+    cost_est: c.cost_est,
+    action_tag: c.action_tag,
+    context_est: c.context_est,
+  }));
+
+  const phases = (m.lifecycle?.phases || []).map(p => ({
+    phase: p.phase,
+    seq: p.seq,
+    started_at: p.started_at,
+    completed_at: p.completed_at,
+    ok: p.ok,
+  }));
+
+  const tabs = {};
+  const inputMode = m.settings?.input_mode || m.tags?.input_mode || null;
+  const tabMap = {
+    idea: inputMode === 'idea',
+    md: inputMode === 'md',
+    mmd: !!(m.final_artifact?.mmd_source || m.final_artifact?.mmd_source_hash),
+    tla: m.tags?.has_tla,
+    ts: m.tags?.has_typescript,
+  };
+  for (const [tab, present] of Object.entries(tabMap)) {
+    tabs[tab] = {
+      present: !!present,
+      artifact: null,
+      ok: null,
+      provider: null,
+      model: null,
+      latency_ms: null,
+    };
+  }
+
+  if (m.final_artifact) {
+    tabs.mmd = {
+      present: true,
+      artifact: m.final_artifact.mmd_source_hash || null,
+      ok: !!m.final_artifact.mmd_source,
+      provider: m.final_artifact.provider || null,
+      model: null,
+      latency_ms: null,
+    };
+  }
+
+  const failures = [];
+  for (const c of calls) {
+    if (!c.success) {
+      failures.push({
+        type: 'inference',
+        stage: c.stage,
+        tab: _stageToTab(c.stage),
+        error_class: _classifyError(c.error),
+        message: c.error,
+        call_id: c.call_id,
+      });
+    }
+  }
+  for (const w of (m.warnings || [])) {
+    failures.push({ type: 'completeness', stage: null, tab: null, error_class: 'completeness', message: w });
+  }
+
+  return {
+    run_id: m.run_id,
+    status: m.status,
+    created_at: m.created_at,
+    completed_at: m.completed_at,
+    tags: m.tags,
+    tabs,
+    phases,
+    calls,
+    branches: m.branches || [],
+    subviews: m.subviews || [],
+    rate_events: m.rate_events || [],
+    failures,
+    consistency: {
+      has_diagram: !!m.tags?.has_diagram,
+      has_tla: !!m.tags?.has_tla,
+      has_typescript: !!m.tags?.has_typescript,
+      entity_drift: [],
+      state_variable_drift: [],
+    },
+    totals: m.totals,
+    sum_check: m.sum_check,
+  };
+}
+
+function _stageToTab(stage) {
+  if (!stage) return null;
+  const s = String(stage);
+  if (/tla/i.test(s)) return 'tla';
+  if (/ts/i.test(s)) return 'ts';
+  if (/mmd|render|compose|plan|extract/i.test(s)) return 'mmd';
+  if (/md|markdown/i.test(s)) return 'md';
+  return 'idea';
+}
+
+function _classifyError(error) {
+  if (!error) return 'unknown';
+  const e = String(error).toLowerCase();
+  if (e.includes('timeout') || e.includes('abort')) return 'timeout';
+  if (e.includes('429') || e.includes('rate') || e.includes('too many')) return 'rate_limit';
+  if (e.includes('parse') || e.includes('json') || e.includes('syntax')) return 'parse';
+  if (e.includes('schema') || e.includes('contract')) return 'schema';
+  if (e.includes('exhausted') || e.includes('unavailable') || e.includes('enotfound')) return 'provider_exhausted';
+  if (e.includes('refus')) return 'model_refusal';
+  return 'unknown';
+}
+
 module.exports = {
   create,
   getManifest,
@@ -975,6 +1147,7 @@ module.exports = {
   cleanup,
   listRuns,
   loadRun,
+  getTrace,
   LIFECYCLE_PHASES,
   get RUNS_DIR() { return RUNS_DIR; },
   _setRunsDir,

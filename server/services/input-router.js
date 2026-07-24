@@ -21,6 +21,22 @@ const { Phase, createPhaseTracker } = require('./compiler-phases');
 const structuralSig = require('./structural-signature');
 const logger = require('../utils/logger');
 
+// ---- Pipeline phase trace helper -------------------------------------------
+// Emits a single compact `pipeline.phase` event for every major routing and
+// rendering step. This gives the OODA universal tracer a high-level timeline
+// aligned with the run-tracker lifecycle without parsing verbose internals.
+function _emitPipelinePhase(phase, data = {}) {
+  logger.info('pipeline.phase', {
+    phase,
+    runId: data.runId || data.run_id || null,
+    tab: data.tab || null,
+    stage: data.stage || null,
+    pipeline: data.pipeline || null,
+    content_state: data.content_state || null,
+    ...data,
+  });
+}
+
 // ---- Local text-to-mmd fallback (no enhancer required) ----------------------
 
 const FLOW_VERB_RE = /\b(sends?\s+(?:request\s+)?to|calls?|connects?\s+to|routes?\s+to|triggers?|requests?|reads?\s+from|writes?\s+to|stores?\s+in|queries?|goes?\s+to|flows?\s+to|talks?\s+to|uses?|emits?\s+(?:event\s+)?to|publishes?\s+to|subscribes?\s+to|forwards?\s+to|fetches?\s+from|posts?\s+to|logs?\s+(?:in\s+)?to|redirects?\s+to|proxies?\s+to|delegates?\s+to|dispatches?\s+to|passes?\s+to)\b/i;
@@ -338,6 +354,7 @@ async function renderPrepare(source, profile, ports = null, useMax = false) {
   const rt = p.runTracker || _rt();
   const phases = createPhaseTracker(_auditEmit, _activeRunId);
   phases.enter(Phase.ANALYZE);
+  _emitPipelinePhase('pipeline.render_prepare.start', { runId: _activeRunId, tab: 'mmd', useMax: actualUseMax });
 
   const inferFn = actualUseMax ? (stage, ctx) => p.inference.inferMax(stage, ctx) : (stage, ctx) => p.inference.infer(stage, ctx);
   const callStart = Date.now();
@@ -524,11 +541,13 @@ async function renderHPCGoT(source, profile, ports = null, useMax = false) {
 
   let stateCount = 1;
   _audit('got:root_init', { stateBudget: gotCfg.stateBudget, depth: gotCfg.maxDepth });
+  _emitPipelinePhase('pipeline.hpc.start', { runId: _activeRunId, tab: 'mmd', useMax });
 
   // ════════════════════════════════════════════════════════════════════════
   // Phase: ANALYZE — extract facts, build diagram plan
   // ════════════════════════════════════════════════════════════════════════
   phases.enter(Phase.ANALYZE, { useMax });
+  _emitPipelinePhase('pipeline.hpc.analyze', { runId: _activeRunId, stage: 'fact_extraction', useMax });
   _audit('render:hpc_stage1', { stage: 'fact_extraction', useMax });
   if (rt) rt.addStage(_activeRunId, 'fact_extraction');
   const factUserPrompt = buildFactExtractionUserPrompt(source, profile);
@@ -588,6 +607,7 @@ async function renderHPCGoT(source, profile, ports = null, useMax = false) {
   });
 
   // ---- Stage 2: Diagram Plan ---
+  _emitPipelinePhase('pipeline.hpc.plan', { runId: _activeRunId, stage: 'diagram_plan', entities: facts?.entities?.length });
   _audit('render:hpc_stage2', { stage: 'diagram_plan', entities: facts.entities.length });
   if (rt) rt.addStage(_activeRunId, 'diagram_plan');
   const planUserPrompt = buildDiagramPlanUserPrompt(facts, profile);
@@ -625,6 +645,7 @@ async function renderHPCGoT(source, profile, ports = null, useMax = false) {
   });
 
   // ---- Stage 3: 2-Branch Composition (GoT branching at composition level) ---
+  _emitPipelinePhase('pipeline.hpc.compose', { runId: _activeRunId, stage: 'composition', nodes: plan?.nodes?.length, edges: plan?.edges?.length, branches: 2 });
   _audit('render:hpc_stage3', { stage: 'composition', nodes: plan.nodes.length, edges: plan.edges.length, branches: 2 });
   const compUserPrompt = buildCompositionUserPrompt(plan, facts);
 
@@ -693,6 +714,7 @@ async function renderHPCGoT(source, profile, ports = null, useMax = false) {
   // Phase: VALIDATE — score branches via HPC (structural + invariant)
   // ════════════════════════════════════════════════════════════════════════
   phases.enter(Phase.VALIDATE);
+  _emitPipelinePhase('pipeline.hpc.validate', { runId: _activeRunId, stage: 'validate' });
 
   const scoreA = candidateA ? computeHPCScore(candidateA, facts) : { score: 0, sv: 0, ic: 0 };
   const scoreB = candidateB ? computeHPCScore(candidateB, facts) : { score: 0, sv: 0, ic: 0 };
@@ -725,6 +747,7 @@ async function renderHPCGoT(source, profile, ports = null, useMax = false) {
   const survivors = [];
   if (candidateA && scoreA.score >= softTau) survivors.push({ mmd: candidateA, score: scoreA, provider: compResultA.provider, label: 'A' });
   if (candidateB && scoreB.score >= softTau) survivors.push({ mmd: candidateB, score: scoreB, provider: compResultB.provider, label: 'B' });
+  _emitPipelinePhase('pipeline.hpc.select', { runId: _activeRunId, stage: 'select', survivors: survivors.length });
   _audit('got:prune', { kept: survivors.length, total: 2, tau: softTau });
 
   if (survivors.length === 0) {
@@ -741,6 +764,7 @@ async function renderHPCGoT(source, profile, ports = null, useMax = false) {
   // Phase: MERGE — terminal merge of surviving branches
   // ════════════════════════════════════════════════════════════════════════
   phases.enter(Phase.MERGE, { survivorCount: survivors.length });
+  _emitPipelinePhase('pipeline.hpc.merge', { runId: _activeRunId, stage: 'merge', survivors: survivors?.length });
 
   if (survivors.length >= 2 && gotCfg.mergeEnabled) {
     _audit('got:merge_eval', { candidateCount: survivors.length });
@@ -853,6 +877,7 @@ async function renderHPCGoT(source, profile, ports = null, useMax = false) {
   // Phase: OUTPUT — compute structural signature, assemble protocol result
   // ════════════════════════════════════════════════════════════════════════
   phases.enter(Phase.OUTPUT);
+  _emitPipelinePhase('pipeline.hpc.output', { runId: _activeRunId, stage: 'output' });
 
   // Structural signature: first-class compiler artifact
   let signature = null;
@@ -1462,6 +1487,8 @@ async function route(source, options = {}) {
   let enhanceMeta = null;
   let enhancerUp = false;
 
+  _emitPipelinePhase('route.start', { content_state: state, enhance, runId: _activeRunId });
+
   if (enhance) {
     enhancerUp = await enhancerBridge.isAvailable();
   }
@@ -1598,11 +1625,15 @@ async function route(source, options = {}) {
         mmdSource = extracted;
         stagesExecuted.push('best_effort_extract');
       } else {
-        throw new RouterError(
-          'extraction_failed',
-          'Could not extract a valid Mermaid diagram from the mixed input. ' +
-          'Enable Enhance for intelligent repair, or paste cleaner Mermaid source.',
-        );
+        // Fall back to local text-to-Mermaid conversion instead of throwing.
+        // The agent's draft is often markdown prose that gets classified as
+        // hybrid because it contains arrows or node-like syntax in sentences.
+        // Throwing here kills the entire preview render — better to produce
+        // a basic Mermaid diagram and let the user refine it.
+        logger.warn('route.hybrid_fallback', { reason: 'bestEffortExtract returned null, using localTextToMmd' });
+        const shadow = extractShadow(source);
+        mmdSource = localTextToMmd(source, shadow);
+        stagesExecuted.push('hybrid_local_fallback');
       }
     }
     return buildResult(mmdSource, state, enhanced, enhanceMeta, stagesExecuted, startMs, source);

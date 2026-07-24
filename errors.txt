@@ -1,0 +1,150 @@
+I started a process that was called Operational Edge Activity. 
+I entered, and found that the SImple Idea, Markdown and some bad mermaid syntax were in their specific fields in the UI. 
+so i then ran the agent full build because the TLA+ script was not there. 
+So I chose the full build agent, since on the markdown section, it states there for me to use full build if i hope to transition form the geenrated mermaid preview and mermaid, into the tla+. so I then pressed that. 
+
+the agent's began, slowly reviewing the simple idea, markdown, mermaid and preview I believe, but there is not a whole lot of evidense they display or show in thinking like AI fashion in the UI that show's if their current collective job is to make the TLA+ or if it's so focus on updating the other tab's document.... it randomly decided to update the markdown first, and then 
+
+
+
+```
+Agent
+full-build
+×
+Idea
+→
+Markdown
+→
+Mermaid
+→
+TLA+
+→
+TypeScript
+Level
+2
+/ 3
+Score
+0.00
+Branches
+4
+Tokens
+45,104
+Cost
+$1.76
+Time
+186.5s
+Starting agent...
+Reading mmd input and preparing full-build mode...
+▸ Reading architecture input
+Configured full-build mode for mmd stage
+▸ Planning — analyzing structure and constraints
+Analyzing architecture and generating plan...
+Dr. ALAN TURING
+Dr. ALAN TURING — analyzing architecture structure for formal reasoning [deep depth] · auth
+Dr. GRACE HOPPER
+Dr. GRACE HOPPER — analyzing architecture structure for systems compilers [deep depth] · auth
+Dr. LINA BO BARDI
+Dr. LINA BO BARDI — analyzing architecture structure for human centric systems [deep depth] · auth
+Dr. LUDWIG MIES
+Dr. LUDWIG MIES — analyzing architecture structure for structural precision [deep depth] · auth
+⤷ Dr.ALAN TURING / formal reasoning · planning
+⤷ Dr.GRACE HOPPER / systems compilers · planning
+⤷ Dr.LINA BO BARDI / human centric systems · planning
+⤷ Dr.LUDWIG MIES / structural precision · planning
+oss
+{ "status": "Planning", "experts": 3, "channels": "opening" }
+✓ Dr.ALAN TURING complete (47.8s)
+⚡ [RM:1:copilot:enhance] (~4326 tok, 0.4% ctx)
+✓ Dr.GRACE HOPPER complete (61.9s)
+⚡ [RM:2:copilot:enhance] (~4326 tok, 0.4% ctx)
+✓ Dr.LINA BO BARDI complete (124.0s)
+⚡ [RM:3:copilot:enhance] (~4326 tok, 0.4% ctx)
+✓ Dr.LUDWIG MIES complete (69.2s)
+⚡ [RM:4:copilot:enhance] (~4326 tok, 0.4% ctx)
+◆ Architecture updated (1903 words)
+▸ Refining — strengthening boundaries and flows
+▸ Validation render — building structural preview
+◈ Render pipeline initializing
+oss
+{"status": "Planning complete", "experts": 3, "precision": "structural"}
+✗ Render failed — Error: Lexical error on line 66. Unrecog
+Preview compile issue — you can still finalize
+⬤ Converging · 60% confidence
+Preview ready — add notes or finalize
+
+```
+
+
+I was forced to click the button `render as is`. 
+
+And then it continued forever, in final render mode from markdown to the tla+ 
+
+```
+
+Running final Max render...
+→ No review notes — proceeding to final render
+▸ Final synthesis — converging on max-quality output
+◈ Render pipeline initializing
+⬤ Converging · 85% confidence
+oss
+{ "status": "Final render initializing", "confidence": 85 }
+▹ Phase 2/7 — Extract facts, plan diagram, compute structural signature
+oss
+{ "phase": 2, "tasks": ["extract facts", "plan diagram", "compute signature"] }
+```
+
+
+
+Stuck on this phase, it was unclear what was occuring, and why, and how rapidly and if there were problems. 
+
+
+```
+
+Starting agent...
+Reading mmd input and preparing full-build mode...
+▸ Reading architecture input
+Configured full-build mode for mmd stage
+▸ Planning — analyzing structure and constraints
+Analyzing architecture and generating plan...
+Dr. ALAN TURING
+Dr. ALAN TURING — analyzing architecture structure for formal reasoning [deep depth] · auth
+Dr. GRACE HOPPER
+Dr. GRACE HOPPER — analyzing architecture structure for systems compilers [deep depth] · auth
+Dr. LINA BO BARDI
+Dr. LINA BO BARDI — analyzing architecture structure for human centric systems [deep depth] · auth
+Dr. LUDWIG MIES
+Dr. LUDWIG MIES — analyzing architecture structure for structural precision [deep depth] · auth
+⤷ Dr.ALAN TURING / formal reasoning · planning
+⤷ Dr.GRACE HOPPER / systems compilers · planning
+⤷ Dr.LINA BO BARDI / human centric systems · planning
+⤷ Dr.LUDWIG MIES / structural precision · planning
+oss
+{ "status": "Planning", "experts": 3, "channels": "opening" }
+✓ Dr.ALAN TURING complete (47.8s)
+⚡ [RM:1:copilot:enhance] (~4326 tok, 0.4% ctx)
+✓ Dr.GRACE HOPPER complete (61.9s)
+⚡ [RM:2:copilot:enhance] (~4326 tok, 0.4% ctx)
+✓ Dr.LINA BO BARDI complete (124.0s)
+⚡ [RM:3:copilot:enhance] (~4326 tok, 0.4% ctx)
+✓ Dr.LUDWIG MIES complete (69.2s)
+⚡ [RM:4:copilot:enhance] (~4326 tok, 0.4% ctx)
+◆ Architecture updated (1903 words)
+▸ Refining — strengthening boundaries and flows
+▸ Validation render — building structural preview
+◈ Render pipeline initializing
+Running final Max render...
+→ No review notes — proceeding to final render
+▸ Final synthesis — converging on max-quality output
+◈ Render pipeline initializing
+⬤ Converging · 85% confidence
+oss
+{ "status": "Final render initializing", "confidence": 85 }
+▹ Phase 2/7 — Extract facts, plan diagram, compute structural signature
+oss
+{ "phase": 2, "tasks": ["extract facts", "plan diagram", "compute signature"] }
+✓ Render complete — 50 nodes, 54 edges
+⬤ Converging · 100% confidence
+Final render complete — 50 nodes, 13 subgraphs
+oss
+{"status": "Render complete", "nodes": 50, "edges": 54, "confidence": 100}
+```

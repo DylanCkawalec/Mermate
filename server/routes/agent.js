@@ -18,6 +18,8 @@
 const { Router } = require('express');
 const path = require('node:path');
 const fsp = require('node:fs/promises');
+const http = require('node:http');
+const { randomUUID } = require('node:crypto');
 const { analyze } = require('../services/input-analyzer');
 const provider = require('../services/inference-provider');
 const roleRegistry = require('../services/role-registry');
@@ -158,30 +160,121 @@ function _buildAgentRoleHeader(role, stage, modePromptSkeleton) {
 }
 
 /**
- * Internal fetch to the render endpoint.
+ * Internal POST to the render endpoint over node:http.
  *
- * Uses a dedicated AbortController with RENDER_TIMEOUT_MS so long HPC-GoT
- * pipelines don't hit undici's default 300s headersTimeout.  The parent
- * abort (client disconnect) is also wired in so a tab-close still cancels.
+ * Node's global fetch (undici) enforces a hard 300s headersTimeout that an
+ * AbortController CANNOT extend — deep-spec renders exceeding 300s die with
+ * a generic "fetch failed". node:http has no implicit timeout, so the only
+ * limits are RENDER_TIMEOUT_MS and the parent abort (client stop).
  */
-async function _fetchRender(urlPath, body, parentAbort) {
-  const renderAbort = new AbortController();
-  const timer = setTimeout(() => renderAbort.abort(new Error('render_timeout')), RENDER_TIMEOUT_MS);
-  const parentListener = () => renderAbort.abort();
-  parentAbort.signal.addEventListener('abort', parentListener, { once: true });
-  try {
+function _fetchRender(urlPath, body, parentAbort) {
+  return new Promise((resolve, reject) => {
     const PORT = process.env.PORT || 3333;
-    const resp = await fetch(`http://localhost:${PORT}${urlPath}`, {
+    const payload = JSON.stringify(body);
+    const req = http.request({
+      host: 'localhost',
+      port: PORT,
+      path: urlPath,
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: renderAbort.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        cleanup();
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8'))); }
+        catch (e) { reject(new Error(`render_response_parse_failed: ${e.message}`)); }
+      });
+      res.on('error', (e) => { cleanup(); reject(e); });
     });
-    return await resp.json();
-  } finally {
-    clearTimeout(timer);
-    parentAbort.signal.removeEventListener('abort', parentListener);
+
+    const timer = setTimeout(() => {
+      req.destroy(new Error(`render_timeout after ${RENDER_TIMEOUT_MS}ms`));
+    }, RENDER_TIMEOUT_MS);
+    const parentListener = () => req.destroy(new Error('aborted'));
+    parentAbort.signal.addEventListener('abort', parentListener, { once: true });
+
+    function cleanup() {
+      clearTimeout(timer);
+      parentAbort.signal.removeEventListener('abort', parentListener);
+    }
+
+    req.on('error', (e) => { cleanup(); reject(e); });
+    req.write(payload);
+    req.end();
+  });
+}
+
+// ---------------------------------------------------------------------------
+//  Detached agent sessions — an agent run survives browser refresh.
+//
+//  The run executes server-side against a session-owned AbortController.
+//  Every SSE event is buffered in the session AND broadcast to attached
+//  listeners. If the browser disconnects (refresh / tab close), the run
+//  keeps going for AGENT_SESSION_GRACE_MS; a reattaching client replays the
+//  buffered events and continues live. Explicit stop is a separate route.
+// ---------------------------------------------------------------------------
+
+const AGENT_SESSION_GRACE_MS = parseInt(process.env.MERMATE_AGENT_GRACE || '300000', 10);
+const AGENT_SESSION_RETAIN_MS = 10 * 60_000;
+const _agentSessions = new Map();
+
+function _createAgentSession(kind, mode) {
+  const session = {
+    id: randomUUID(),
+    kind,                     // 'run' | 'finalize'
+    mode: mode || null,
+    status: 'running',        // running | done | error | stopped
+    startedAt: Date.now(),
+    events: [],               // buffered SSE frames for replay
+    listeners: new Set(),     // attached http responses
+    abort: new AbortController(),
+    graceTimer: null,
+  };
+  _agentSessions.set(session.id, session);
+  return session;
+}
+
+function _sessionSend(session, type, data) {
+  const frame = `data: ${JSON.stringify({ type, ..._withArtifactsEnvelope(data) })}\n\n`;
+  if (type !== 'heartbeat') {
+    session.events.push(frame);
+    if (session.events.length > 3000) session.events.splice(0, session.events.length - 3000);
   }
+  for (const res of session.listeners) {
+    try { res.write(frame); } catch {}
+  }
+}
+
+function _sessionAttach(session, res) {
+  if (session.graceTimer) { clearTimeout(session.graceTimer); session.graceTimer = null; }
+  session.listeners.add(res);
+  res.on('close', () => {
+    session.listeners.delete(res);
+    if (session.status !== 'running' || session.listeners.size > 0) return;
+    logger.info('agent.session.detached', { session: session.id.slice(0, 8), graceMs: AGENT_SESSION_GRACE_MS });
+    session.graceTimer = setTimeout(() => {
+      if (session.status === 'running' && session.listeners.size === 0) {
+        logger.info('agent.session.grace_expired', { session: session.id.slice(0, 8) });
+        session.status = 'stopped';
+        session.abort.abort();
+      }
+    }, AGENT_SESSION_GRACE_MS);
+  });
+}
+
+function _sessionEnd(session, status) {
+  if (session.status === 'running') session.status = status;
+  if (session.graceTimer) { clearTimeout(session.graceTimer); session.graceTimer = null; }
+  for (const res of session.listeners) {
+    try { res.end(); } catch {}
+  }
+  session.listeners.clear();
+  const t = setTimeout(() => _agentSessions.delete(session.id), AGENT_SESSION_RETAIN_MS);
+  if (t.unref) t.unref();
 }
 
 function _extractText(output) {
@@ -264,26 +357,22 @@ router.post('/agent/run', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  // Abort controller — cancelled when the client disconnects (browser
-  // refresh, tab close, or frontend stop). Propagated into all fetch calls
-  // so in-flight LLM requests are torn down immediately.
-  //
-  // IMPORTANT: must use res.on('close'), NOT req.on('close').
-  // req 'close' fires as soon as the request body is consumed (immediately
-  // after JSON parsing), which would abort the pipeline before it starts.
-  // res 'close' fires when the SSE connection actually drops.
-  const abort = new AbortController();
-  res.on('close', () => {
-    if (!res.writableFinished && !abort.signal.aborted) {
-      logger.info('agent.run.client_disconnected');
-      abort.abort();
-    }
-  });
+  // Detached session — the run is owned by the session, NOT the SSE
+  // connection. A browser refresh detaches the listener but the pipeline
+  // keeps running; the client reattaches via GET /agent/attach/:id.
+  // Explicit stop is POST /agent/stop/:id (used by the Pause button).
+  const session = _createAgentSession('run', mode);
+  const abort = session.abort;
+  _sessionAttach(session, res);
 
   function sendEvent(type, data) {
     if (abort.signal.aborted) return;
-    try { res.write(`data: ${JSON.stringify({ type, ..._withArtifactsEnvelope(data) })}\n\n`); } catch {}
+    _sessionSend(session, type, data);
   }
+
+  // First frame: hand the session id to the client so it can reattach
+  // after a refresh instead of restarting the whole pipeline.
+  sendEvent('agent_session', { session_id: session.id, mode, kind: 'run' });
 
   // Immediate feedback: emit ingest stage event BEFORE slow setup so the
   // client sees progression even if runTracker.create or analyze take 1-2s.
@@ -424,6 +513,23 @@ router.post('/agent/run', async (req, res) => {
       return;
     }
 
+    // Preservation policy — when the input is already a mature, data-rich
+    // specification (high quality/completeness, or a large structured doc),
+    // the user's data is the source of truth. Planning may reorganize and
+    // fill gaps but must NOT summarize or replace it with a simplification.
+    const isMatureInput =
+      (profile.qualityScore >= 0.7 && profile.completenessScore >= 0.7)
+      || startText.length >= 6000;
+
+    const planningDirective = isMatureInput
+      ? [
+          'The user input is already a rich, detailed specification. PRESERVE IT.',
+          'Keep every entity, section, table, constraint, protocol, and named component from the input.',
+          'Do NOT summarize, simplify, or drop data. Reorganize for clarity and fill genuine gaps only.',
+          'The user\'s data is the source of truth — your output must contain at least as much information as the input.',
+        ].join('\n')
+      : 'Produce a stronger architecture description. Be specific about services, data stores, flows, and failure handling.';
+
     const planningUserPrompt = [
       `[CURRENT ARTIFACT STAGE] ${currentStage}`,
       '[USER PROMPT]', prompt, '',
@@ -432,7 +538,7 @@ router.post('/agent/run', async (req, res) => {
       `Maturity: ${profile.maturity}`, `Quality: ${profile.qualityScore}`,
       `Entities: ${profile.shadow?.entities?.length || 0}`,
       `Gaps: ${(profile.shadow?.gaps || []).join('; ') || 'none'}`, '',
-      'Produce a stronger architecture description. Be specific about services, data stores, flows, and failure handling.',
+      planningDirective,
     ].filter(Boolean).join('\n');
 
     if (abort.signal.aborted) return;
@@ -509,6 +615,20 @@ router.post('/agent/run', async (req, res) => {
       if (result.output && result.output.trim() !== startText.trim()) {
         const extracted = _extractText(result.output);
         if (extracted) {
+          // Shrinkage guard — a plan that loses more than 40% of a mature
+          // input is a simplification, not an improvement. Reject it so the
+          // user's data survives to the preview render.
+          if (isMatureInput && extracted.length < startText.length * 0.6) {
+            logger.info('agent.plan_rejected_shrinkage', {
+              role: roleName,
+              inputLen: startText.length,
+              planLen: extracted.length,
+            });
+            auditTracker.emit(auditId, 'agent:plan_rejected', {
+              role: roleName, reason: 'shrinkage', inputLen: startText.length, planLen: extracted.length,
+            });
+            continue;
+          }
           const planProfile = analyze(extracted, 'idea');
           scoredPlans.push({
             text: extracted,
@@ -794,16 +914,75 @@ router.post('/agent/run', async (req, res) => {
     });
 
   } catch (err) {
-    if (abort.signal.aborted) return;
-    auditTracker.emit(auditId, 'sys:error', { message: err.message, stage: 'run' });
-    logger.error('agent.run.error', { error: err.message });
-    sendEvent('error', { message: err.message });
-    if (parentRunId) await runTracker.finalize(parentRunId, 'failed').catch(() => {});
-  } finally {
+    if (!abort.signal.aborted) {
+      auditTracker.emit(auditId, 'sys:error', { message: err.message, stage: 'run' });
+      logger.error('agent.run.error', { error: err.message });
+      sendEvent('error', { message: err.message });
+      if (parentRunId) await runTracker.finalize(parentRunId, 'failed').catch(() => {});
+    }
     stopNarrator();
     auditTracker.closeRun(auditId);
-    res.end();
+    _sessionEnd(session, abort.signal.aborted ? 'stopped' : 'error');
+    return;
   }
+  stopNarrator();
+  auditTracker.closeRun(auditId);
+  _sessionEnd(session, 'done');
+});
+
+// ---- Session reattach / stop / discovery ----
+
+router.get('/agent/active', (_req, res) => {
+  const sessions = [];
+  for (const s of _agentSessions.values()) {
+    sessions.push({
+      session_id: s.id,
+      kind: s.kind,
+      mode: s.mode,
+      status: s.status,
+      started_at: s.startedAt,
+      events: s.events.length,
+    });
+  }
+  return res.json({ success: true, sessions });
+});
+
+router.get('/agent/attach/:sessionId', (req, res) => {
+  const session = _agentSessions.get(req.params.sessionId);
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'session_not_found' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  // Replay everything the client missed, then continue live.
+  for (const frame of session.events) {
+    try { res.write(frame); } catch {}
+  }
+
+  if (session.status !== 'running') {
+    try { res.end(); } catch {}
+    return;
+  }
+
+  logger.info('agent.session.reattached', { session: session.id.slice(0, 8), buffered: session.events.length });
+  _sessionAttach(session, res);
+});
+
+router.post('/agent/stop/:sessionId', (req, res) => {
+  const session = _agentSessions.get(req.params.sessionId);
+  if (!session) {
+    return res.json({ success: true, status: 'gone' });
+  }
+  if (session.status === 'running') {
+    session.status = 'stopped';
+    session.abort.abort();
+    logger.info('agent.session.stopped', { session: session.id.slice(0, 8) });
+  }
+  return res.json({ success: true, status: session.status });
 });
 
 // ---- Phase 2: Finalize with Max render (after user notes) ----
@@ -820,18 +999,18 @@ router.post('/agent/finalize', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  const abort = new AbortController();
-  res.on('close', () => {
-    if (!res.writableFinished && !abort.signal.aborted) {
-      logger.info('agent.finalize.client_disconnected');
-      abort.abort();
-    }
-  });
+  // Detached session — the final Max render is the longest step in the
+  // pipeline; it must survive a browser refresh exactly like /agent/run.
+  const session = _createAgentSession('finalize', mode);
+  const abort = session.abort;
+  _sessionAttach(session, res);
 
   function sendEvent(type, data) {
     if (abort.signal.aborted) return;
-    try { res.write(`data: ${JSON.stringify({ type, ..._withArtifactsEnvelope(data) })}\n\n`); } catch {}
+    _sessionSend(session, type, data);
   }
+
+  sendEvent('agent_session', { session_id: session.id, mode, kind: 'finalize' });
 
   const finalizeAuditId = auditTracker.createRun(null, 'agent:finalize');
   const stopNarrator = narrator.watchRun(finalizeAuditId, null, sendEvent, auditTracker);
@@ -1052,7 +1231,7 @@ router.post('/agent/finalize', async (req, res) => {
   } finally {
     stopNarrator();
     auditTracker.closeRun(finalizeAuditId);
-    res.end();
+    _sessionEnd(session, abort.signal.aborted ? 'stopped' : 'done');
   }
 });
 

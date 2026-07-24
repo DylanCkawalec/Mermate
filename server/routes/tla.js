@@ -488,6 +488,21 @@ router.post('/render/tla', async (req, res) => {
       logger.warn('tla.run_update_failed', { error: err.message });
     }
 
+    logger.info('toolchain.outcome', {
+      run_id: run_id.slice(0, 8),
+      tab: 'tla',
+      tool: 'tla',
+      sany_valid: validation.sany.valid,
+      sany_repair_attempts: validation.sany.repairAttempts,
+      tlc_checked: validation.tlc.checked,
+      tlc_success: validation.tlc.success,
+      tlc_violations: validation.tlc.violations.length,
+      tlc_states_explored: validation.tlc.statesExplored,
+      tlc_wall_ms: validation.tlc.wallClockMs,
+      split_mode: useSplit,
+      module_name: moduleName,
+    });
+
     logger.info('tla.compile_complete', {
       moduleName,
       splitMode: useSplit,

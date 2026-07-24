@@ -201,6 +201,7 @@ app.get('/api/rate-master/metrics', (_req, res) => {
 // On first heartbeat, Mermate ensures the Opseeq Docker container is running.
 // When no heartbeat arrives for >60s, Mermate stops the container.
 const opseeqBridge = require('./services/opseeq-bridge');
+const inferenceProvider = require('./services/inference-provider');
 const { execSync } = require('child_process');
 let _opseeqLastHeartbeat = Date.now();
 let _opseeqContainerStarted = false;
@@ -250,7 +251,16 @@ async function _opseeqBootGate(maxWaitMs = 30_000, intervalMs = 2000) {
 }
 
 function _opseeqStopIfIdle() {
-  const idleMs = Date.now() - _opseeqLastHeartbeat;
+  const active = inferenceProvider.getActiveInferenceCount
+    ? inferenceProvider.getActiveInferenceCount()
+    : 0;
+  if (active > 0) return;
+
+  const lastActivity = Math.max(
+    _opseeqLastHeartbeat,
+    inferenceProvider.getLastInferenceAt ? inferenceProvider.getLastInferenceAt() : 0,
+  );
+  const idleMs = Date.now() - lastActivity;
   if (idleMs < _OPSEEQ_HEARTBEAT_TIMEOUT_MS) return;
   if (!_opseeqContainerStarted) return;
   const composeFile = path.resolve(__dirname, '..', _OPSEEQ_DOCKER_COMPOSE);

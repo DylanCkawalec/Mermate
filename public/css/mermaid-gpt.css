@@ -585,10 +585,17 @@ textarea:focus-visible,
   display: none !important;
 }
 
-/* Static dot indicator — appears when the agent populates a tab with new
-   content while the user is on a different tab. Cleared on first visit. */
+/* New-content indicator — when the agent populates a tab the user is not
+   viewing, the tab flashes briefly to announce the handoff, then keeps a
+   persistent dot until the user visits it. Cleared on first visit. */
 .mode-btn.has-new-content {
   position: relative;
+  animation: tab-content-flash 0.8s ease-in-out 3;
+}
+
+@keyframes tab-content-flash {
+  0%, 100% { box-shadow: none; }
+  50% { box-shadow: 0 0 0 2px var(--warning), 0 0 12px 2px rgba(232, 130, 12, 0.35); }
 }
 
 .mode-btn.has-new-content::before {
