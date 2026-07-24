@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Literal
@@ -15,6 +16,8 @@ except ImportError as exc:  # pragma: no cover - exercised only when dependency 
 
 from .client import MermateClient, MermateHttpError, summarize_sse_events, get_shared_client, get_shared_openclaw_client
 from .tla_harness import is_available as _harness_available, get_info as _harness_info, sany_check as _harness_sany, tlc_check as _harness_tlc, pluscal_compile as _harness_pluscal, tla_to_latex as _harness_latex
+from .runtime_logger import log_event as _log_event, get_recent as _log_recent, get_stats as _log_stats, clear as _log_clear
+from .context_memory import observe as _ctx_observe, snapshot as _ctx_snapshot, clear as _ctx_clear, get_context_summary as _ctx_summary, remember as _ctx_remember, recall as _ctx_recall, set_session as _ctx_set_session, get_session as _ctx_get_session, list_sessions as _ctx_list_sessions, clear_session as _ctx_clear_session, get_preview as _ctx_get_preview, get_all_previews as _ctx_get_all_previews, clear_previews as _ctx_clear_previews, clear_all as _ctx_clear_all
 
 
 SERVER_NAME = "mermate-openclaw-mcp"
@@ -123,6 +126,10 @@ STAGE_MAP = {
         "route": "direct:vendor/tla2tools.jar",
         "description": "Direct TLA+ tools harness: SANY syntax check, TLC model check, PlusCal compilation, LaTeX pretty-print — bypasses Express for low-latency jar access.",
     },
+    "mcp_controller": {
+        "route": "internal:mcp-controller",
+        "description": "MCP controller observer: context memory, runtime JSON log, aggregate stats, and step-by-step harness control. JSON-in, JSON-out static window.",
+    },
 }
 
 TOOL_ROUTE_MAP = {
@@ -200,12 +207,29 @@ TOOL_ROUTE_MAP = {
     "tla_harness_tlc": ["direct:vendor/tla2tools.jar:tlc2.TLC"],
     "tla_harness_pluscal": ["direct:vendor/tla2tools.jar:pcal.trans"],
     "tla_harness_latex": ["direct:vendor/tla2tools.jar:tla2tex.TLA"],
+    "mcp_context_get": ["internal:context-memory"],
+    "mcp_context_clear": ["internal:context-memory"],
+    "mcp_context_remember": ["internal:context-memory"],
+    "mcp_context_recall": ["internal:context-memory"],
+    "mcp_runtime_log": ["internal:runtime-logger"],
+    "mcp_runtime_stats": ["internal:runtime-logger"],
+    "mcp_runtime_log_clear": ["internal:runtime-logger"],
+    "mcp_controller_observe": ["internal:mcp-controller"],
+    "mcp_session_set": ["internal:context-memory"],
+    "mcp_session_get": ["internal:context-memory"],
+    "mcp_session_list": ["internal:context-memory"],
+    "mcp_session_clear": ["internal:context-memory"],
+    "mcp_preview_get": ["internal:context-memory"],
+    "mcp_preview_all": ["internal:context-memory"],
+    "mcp_preview_clear": ["internal:context-memory"],
 }
 
 INSTRUCTIONS = (
     "Use this server to drive the local Mermate pipeline and the colocated OpenClaw wrapper from one MCP endpoint. "
     "Prefer the stage-specific tools for render, TLA+, TypeScript, agent flows, and the OpenClaw application-builder protocol. "
-    "Treat the underlying Express routes as the source of truth."
+    "Treat the underlying Express routes as the source of truth. "
+    "Use mcp_controller_observe for a single-call dashboard of context, runtime log, and stats. "
+    "Use mcp_context_get/recall to avoid re-fetching state across tool calls."
 )
 
 
@@ -259,13 +283,22 @@ def _call_json(
     body: dict[str, Any] | None = None,
     query: dict[str, Any] | None = None,
     timeout_s: int | None = None,
+    tool: str = "",
 ) -> dict[str, Any]:
     client = create_client()
+    t0 = time.monotonic()
     try:
         payload = client.request_json(method, path, body=body, query=query, timeout_s=timeout_s)
-        return payload if isinstance(payload, dict) else {"success": True, "data": payload}
+        result = payload if isinstance(payload, dict) else {"success": True, "data": payload}
+        status = "ok" if result.get("success", True) else "error"
+        _log_event(tool or "_call_json", "mermate", method=method, path=path, args=body, status=status, duration_ms=(time.monotonic() - t0) * 1000, result=result)
+        _ctx_observe(tool or "_call_json", body or {}, result, gateway="mermate")
+        return result
     except Exception as exc:
-        return _normalize_api_error(exc, path)
+        result = _normalize_api_error(exc, path)
+        _log_event(tool or "_call_json", "mermate", method=method, path=path, args=body, status="error", duration_ms=(time.monotonic() - t0) * 1000, result=result, error=str(exc))
+        _ctx_observe(tool or "_call_json", body or {}, result, gateway="mermate")
+        return result
 
 
 def _call_openclaw_json(
@@ -275,29 +308,46 @@ def _call_openclaw_json(
     body: dict[str, Any] | None = None,
     query: dict[str, Any] | None = None,
     timeout_s: int | None = None,
+    tool: str = "",
 ) -> dict[str, Any]:
     client = create_openclaw_client()
+    t0 = time.monotonic()
     try:
         payload = client.request_json(method, path, body=body, query=query, timeout_s=timeout_s)
         if isinstance(payload, dict):
-            return {"base_url": DEFAULT_OPENCLAW_URL, **payload}
-        return {"success": True, "base_url": DEFAULT_OPENCLAW_URL, "data": payload}
+            result = {"base_url": DEFAULT_OPENCLAW_URL, **payload}
+        else:
+            result = {"success": True, "base_url": DEFAULT_OPENCLAW_URL, "data": payload}
+        status = "ok" if result.get("success", True) else "error"
+        _log_event(tool or "_call_openclaw", "openclaw", method=method, path=path, args=body, status=status, duration_ms=(time.monotonic() - t0) * 1000, result=result)
+        _ctx_observe(tool or "_call_openclaw", body or {}, result, gateway="openclaw")
+        return result
     except Exception as exc:
         normalized = _normalize_api_error(exc, path)
-        return {"base_url": DEFAULT_OPENCLAW_URL, **normalized}
+        result = {"base_url": DEFAULT_OPENCLAW_URL, **normalized}
+        _log_event(tool or "_call_openclaw", "openclaw", method=method, path=path, args=body, status="error", duration_ms=(time.monotonic() - t0) * 1000, result=result, error=str(exc))
+        _ctx_observe(tool or "_call_openclaw", body or {}, result, gateway="openclaw")
+        return result
 
 
-def _call_sse(path: str, *, body: dict[str, Any], timeout_s: int | None = None, include_events: bool = False) -> dict[str, Any]:
+def _call_sse(path: str, *, body: dict[str, Any], timeout_s: int | None = None, include_events: bool = False, tool: str = "") -> dict[str, Any]:
     client = create_client()
+    t0 = time.monotonic()
     try:
         events = client.stream_sse(path, body=body, timeout_s=timeout_s)
         summary = summarize_sse_events(events)
         if include_events:
             summary["events"] = events
         summary["success"] = not summary["errors"]
+        status = "ok" if summary["success"] else "error"
+        _log_event(tool or "_call_sse", "mermate", method="SSE", path=path, args=body, status=status, duration_ms=(time.monotonic() - t0) * 1000, result=summary)
+        _ctx_observe(tool or "_call_sse", body, summary, gateway="mermate")
         return summary
     except Exception as exc:
-        return _normalize_api_error(exc, path)
+        result = _normalize_api_error(exc, path)
+        _log_event(tool or "_call_sse", "mermate", method="SSE", path=path, args=body, status="error", duration_ms=(time.monotonic() - t0) * 1000, result=result, error=str(exc))
+        _ctx_observe(tool or "_call_sse", body, result, gateway="mermate")
+        return result
 
 
 @mcp.resource(
@@ -1037,9 +1087,25 @@ def mermate_trace_stats() -> dict[str, Any]:
 
 # ---- TLA+ Harness (direct jar access) ----------------------------------------
 
+def _tracked_harness(tool: str, fn, *args, **kwargs) -> dict[str, Any]:
+    """Wrap a harness call with runtime logging + context observation."""
+    t0 = time.monotonic()
+    try:
+        result = fn(*args, **kwargs)
+        status = "ok" if result.get("ok", result.get("valid", result.get("success", True))) else "error"
+        _log_event(tool, "harness", method="java", path=tool, args=kwargs, status=status, duration_ms=(time.monotonic() - t0) * 1000, result=result)
+        _ctx_observe(tool, kwargs, result, gateway="harness")
+        return result
+    except Exception as exc:
+        result = {"ok": False, "error": str(exc)}
+        _log_event(tool, "harness", method="java", path=tool, args=kwargs, status="error", duration_ms=(time.monotonic() - t0) * 1000, result=result, error=str(exc))
+        _ctx_observe(tool, kwargs, result, gateway="harness")
+        return result
+
+
 @mcp.tool(description="Check TLA+ harness availability: Java version, jar path, and available tools (SANY, TLC, PlusCal, LaTeX).")
 def tla_harness_info() -> dict[str, Any]:
-    return _harness_info()
+    return _tracked_harness("tla_harness_info", _harness_info)
 
 
 @mcp.tool(description="Run SANY syntax check directly on TLA+ source via tla2tools.jar. Bypasses Express for low-latency validation.")
@@ -1047,7 +1113,7 @@ def tla_harness_sany(
     tla_source: str,
     module_name: str = "Spec",
 ) -> dict[str, Any]:
-    return _harness_sany(tla_source, module_name)
+    return _tracked_harness("tla_harness_sany", _harness_sany, tla_source, module_name=module_name)
 
 
 @mcp.tool(description="Run TLC model checker directly on TLA+ source via tla2tools.jar. Returns violations, states explored, and counterexample trace.")
@@ -1056,7 +1122,7 @@ def tla_harness_tlc(
     cfg_source: str | None = None,
     module_name: str = "Spec",
 ) -> dict[str, Any]:
-    return _harness_tlc(tla_source, cfg_source, module_name)
+    return _tracked_harness("tla_harness_tlc", _harness_tlc, tla_source, cfg_source, module_name=module_name)
 
 
 @mcp.tool(description="Compile PlusCal algorithm to TLA+ source directly via tla2tools.jar (pcal.trans). Not available through the Express API.")
@@ -1064,7 +1130,7 @@ def tla_harness_pluscal(
     tla_source: str,
     module_name: str = "Spec",
 ) -> dict[str, Any]:
-    return _harness_pluscal(tla_source, module_name)
+    return _tracked_harness("tla_harness_pluscal", _harness_pluscal, tla_source, module_name=module_name)
 
 
 @mcp.tool(description="Pretty-print TLA+ source to LaTeX directly via tla2tools.jar (tla2tex.TLA). Not available through the Express API.")
@@ -1072,7 +1138,122 @@ def tla_harness_latex(
     tla_source: str,
     module_name: str = "Spec",
 ) -> dict[str, Any]:
-    return _harness_latex(tla_source, module_name)
+    return _tracked_harness("tla_harness_latex", _harness_latex, tla_source, module_name=module_name)
+
+
+# ---- MCP Controller: context memory + runtime log + observer ------------------
+
+@mcp.tool(description="Get the current agent context memory snapshot — auto-extracted run_ids, diagram names, stage history, and call counts from all prior MCP tool calls. Use this to recall state without re-calling the backend.")
+def mcp_context_get() -> dict[str, Any]:
+    return _ctx_summary()
+
+
+@mcp.tool(description="Clear the agent context memory. Useful when starting a new pipeline run or switching tasks.")
+def mcp_context_clear() -> dict[str, Any]:
+    _ctx_clear()
+    return {"success": True, "message": "Context memory cleared"}
+
+
+@mcp.tool(description="Manually store a key-value pair in agent context memory for later recall across tool calls.")
+def mcp_context_remember(
+    key: str,
+    value: Any,
+) -> dict[str, Any]:
+    _ctx_remember(key, value)
+    return {"success": True, "key": key}
+
+
+@mcp.tool(description="Recall a previously stored context value by key. Returns null if key not found.")
+def mcp_context_recall(key: str) -> dict[str, Any]:
+    value = _ctx_recall(key)
+    return {"key": key, "value": value, "found": value is not None}
+
+
+@mcp.tool(description="Query the MCP runtime log — structured NDJSON records of every tool call with timing, gateway, status, and result summaries. Filter by tool name, gateway (mermate/openclaw/harness), or status (ok/error).")
+def mcp_runtime_log(
+    limit: int = 50,
+    tool: str | None = None,
+    gateway: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    entries = _log_recent(limit=limit, tool=tool, gateway=gateway, status=status)
+    return {"count": len(entries), "entries": entries}
+
+
+@mcp.tool(description="Get aggregate runtime statistics: total calls per tool, per gateway, error rates, and latency percentiles. Useful for monitoring MCP health and identifying slow tools.")
+def mcp_runtime_stats() -> dict[str, Any]:
+    return _log_stats()
+
+
+@mcp.tool(description="Clear the MCP runtime log file. Returns count of entries removed.")
+def mcp_runtime_log_clear() -> dict[str, Any]:
+    count = _log_clear()
+    return {"success": True, "removed": count}
+
+
+@mcp.tool(description="Static MCP controller observer — JSON-in, JSON-out. Returns a complete snapshot of MCP state: context memory, recent runtime log entries, aggregate stats, stage map, and tool route map. Use this as the single-call dashboard for step-by-step harness control and feedback loop observation.")
+def mcp_controller_observe(
+    log_limit: int = 20,
+) -> dict[str, Any]:
+    return {
+        "context": _ctx_summary(),
+        "recent_log": _log_recent(limit=log_limit),
+        "stats": _log_stats(),
+        "stage_map": STAGE_MAP,
+        "tool_route_map": TOOL_ROUTE_MAP,
+        "server": {"name": SERVER_NAME, "version": SERVER_VERSION},
+    }
+
+
+# ---- MCP Session management ---------------------------------------------------
+
+@mcp.tool(description="Set or create the active MCP session. Pass a session_id to switch to an existing session, or omit to create a new one. Each session isolates context memory, stage previews, and history.")
+def mcp_session_set(
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    sid = _ctx_set_session(session_id)
+    return {"success": True, "session_id": sid}
+
+
+@mcp.tool(description="Get the active session ID.")
+def mcp_session_get() -> dict[str, Any]:
+    return {"session_id": _ctx_get_session()}
+
+
+@mcp.tool(description="List all MCP sessions with metadata: context keys, preview stages, history count, and active status.")
+def mcp_session_list() -> dict[str, Any]:
+    return {"sessions": _ctx_list_sessions()}
+
+
+@mcp.tool(description="Clear a specific session and all its context, previews, and history. Omit session_id to clear the active session.")
+def mcp_session_clear(
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    removed = _ctx_clear_session(session_id)
+    return {"success": removed}
+
+
+# ---- MCP Stage previews -------------------------------------------------------
+
+@mcp.tool(description="Get the captured source text preview for a specific pipeline stage (render, tla, ts, rust, tsx). Returns the mermaid_source, tla_source, ts_source, etc. that was produced by the last call to that stage's tool.")
+def mcp_preview_get(
+    stage: str,
+) -> dict[str, Any]:
+    preview = _ctx_get_preview(stage)
+    if preview is None:
+        return {"success": False, "error": f"No preview captured for stage '{stage}'"}
+    return {"success": True, "stage": stage, "preview": preview}
+
+
+@mcp.tool(description="Get all captured stage previews for the active session. Returns a dict mapping each stage (render, tla, ts, rust, tsx) to its source text fields.")
+def mcp_preview_all() -> dict[str, Any]:
+    return {"success": True, "previews": _ctx_get_all_previews()}
+
+
+@mcp.tool(description="Clear all stage previews for the active session. Context memory and history are preserved.")
+def mcp_preview_clear() -> dict[str, Any]:
+    _ctx_clear_previews()
+    return {"success": True, "message": "Stage previews cleared"}
 
 
 def main() -> None:
