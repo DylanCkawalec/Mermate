@@ -666,6 +666,9 @@ window.MermaidAgent = class MermaidAgent {
         this._running = false;
         this._narratorActive = false;
         this._hideRepairBudget();
+        if (event.mmd_source || event.md_source || event.tla_source || event.ts_source) {
+          this.onRenderResult(event);
+        }
         this._clearSession();
         this.onComplete(event.final_text);
         this.onStateChange('idle');

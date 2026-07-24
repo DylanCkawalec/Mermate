@@ -1197,6 +1197,7 @@ router.post('/agent/finalize', async (req, res) => {
                   stages_completed: ['mmd', 'tla', 'ts'],
                   tla_valid: tlaData.sany?.valid,
                   ts_compiled: tsData.compile?.success,
+                  mmd_source: finalData.compiled_source || '',
                   tla_source: tlaSrc,
                   cfg_source: cfgSrc,
                   ts_source: tsSrc,
@@ -1211,6 +1212,7 @@ router.post('/agent/finalize', async (req, res) => {
                   stages_completed: ['mmd', 'tla'],
                   tla_valid: tlaData.sany?.valid,
                   ts_compiled: false,
+                  mmd_source: finalData.compiled_source || '',
                   tla_source: tlaSrc,
                   cfg_source: cfgSrc,
                 });
@@ -1224,6 +1226,7 @@ router.post('/agent/finalize', async (req, res) => {
                 stages_completed: ['mmd'],
                 tla_valid: tlaData.sany?.valid || false,
                 ts_compiled: false,
+                mmd_source: finalData.compiled_source || '',
                 tla_source: tlaSrc,
                 cfg_source: cfgSrc,
               });
@@ -1239,6 +1242,7 @@ router.post('/agent/finalize', async (req, res) => {
               stages_completed: ['mmd'],
               tla_valid: false,
               ts_compiled: false,
+              mmd_source: finalData.compiled_source || '',
               tla_source: persisted.tla,
               cfg_source: persisted.cfg,
             });
@@ -1278,7 +1282,7 @@ router.post('/agent/finalize', async (req, res) => {
 
     auditTracker.emit(finalizeAuditId, 'agent:stage_enter', { stage: 'complete' });
     sendEvent('stage', { stage: 'complete', message: 'Agent workflow complete' });
-    sendEvent('done', { final_text: draftText, run_id: agentParentRunId || finalData.run_id });
+    sendEvent('done', { final_text: draftText, mmd_source: finalData.compiled_source || '', run_id: agentParentRunId || finalData.run_id });
 
   } catch (err) {
     if (abort.signal.aborted) return;

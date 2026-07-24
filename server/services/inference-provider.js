@@ -44,7 +44,7 @@ const _useDirectFallback = OPENAI_BASE_URL !== OPENAI_DIRECT_URL;
 const OPENAI_DIRECT_FALLBACK_MODEL = process.env.OPENAI_DIRECT_FALLBACK_MODEL || 'gpt-4o';
 
 function _isMermateAlias(model) {
-  return /^gpt-5\./i.test(model || '') || /\b(sol|terra|luna)\b/i.test(model || '');
+  return /^gpt-5\.6-(sol|terra|luna)/i.test(model || '');
 }
 
 function _normalizeDirectFallbackModel(model) {
@@ -408,19 +408,26 @@ const STAGE_JSON_SCHEMAS = {
   },
 
   decompose: {
-    type: 'array',
-    items: {
-      type: 'object',
-      properties: {
-        viewName: { type: 'string' },
-        viewDescription: { type: 'string' },
-        suggestedType: { type: 'string' },
-        entities: { type: 'array', items: { type: 'string' } },
-        relationships: { type: 'array', items: { type: 'string' } },
+    type: 'object',
+    properties: {
+      views: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            viewName: { type: 'string' },
+            viewDescription: { type: 'string' },
+            suggestedType: { type: 'string' },
+            entities: { type: 'array', items: { type: 'string' } },
+            relationships: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['viewName', 'viewDescription', 'suggestedType', 'entities', 'relationships'],
+          additionalProperties: false,
+        },
       },
-      required: ['viewName', 'viewDescription', 'suggestedType', 'entities', 'relationships'],
-      additionalProperties: false,
     },
+    required: ['views'],
+    additionalProperties: false,
   },
 
   validate_ts: {
