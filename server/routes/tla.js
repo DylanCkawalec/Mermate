@@ -28,7 +28,10 @@ const {
   readTextArtifact,
 } = require('../services/run-artifact-loader');
 const opseeq = require('../services/opseeq-bridge');
+const auditTracker = require('../services/audit-tracker');
 const logger = require('../utils/logger');
+
+const MAX_REPAIR_CALLS = parseInt(process.env.MERMATE_MAX_REPAIR_CALLS || '5', 10);
 
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const FLOWS_DIR = path.join(PROJECT_ROOT, 'flows');
@@ -66,7 +69,7 @@ router.get('/render/tla/status', async (_req, res) => {
 // ---- Main TLA+ compilation endpoint ----------------------------------------
 
 router.post('/render/tla', async (req, res) => {
-  const { diagram_name, run_id } = req.body || {};
+  const { diagram_name, run_id, audit_run_id } = req.body || {};
 
   if (!run_id) {
     return res.status(400).json({ success: false, error: 'run_id is required' });
@@ -177,7 +180,15 @@ router.post('/render/tla', async (req, res) => {
 
     logger.info('tla.compile_start', { moduleName, run_id: run_id.slice(0, 8), entities: facts.entities.length });
 
+    let _repairCallCount = 0;
     const repairFn = async (source, errors) => {
+      if (_repairCallCount >= MAX_REPAIR_CALLS) {
+        logger.warn('tla.repair_budget_exhausted', { calls: _repairCallCount, budget: MAX_REPAIR_CALLS });
+        if (audit_run_id) auditTracker.emit(audit_run_id, 'sys:error', { stage: 'tla_repair', message: `Repair budget exhausted (${MAX_REPAIR_CALLS} calls)` });
+        return null;
+      }
+      _repairCallCount++;
+      if (audit_run_id) auditTracker.emit(audit_run_id, 'render:repair', { stage: 'tla', attempt: _repairCallCount, budget: MAX_REPAIR_CALLS });
       const { system } = buildTlaRepairPrompt();
       const userPrompt = buildTlaRepairUserPrompt(source, errors);
       const _repairStart = Date.now();
@@ -189,6 +200,7 @@ router.post('/render/tla', async (req, res) => {
         available: result.available,
         error: result.error || null,
       });
+      if (audit_run_id) auditTracker.emit(audit_run_id, 'agent:role_end', { role: 'repair_tla', success: !!result.output, latencyMs: Date.now() - _repairStart });
       if (result.output) {
         let repaired = result.output.trim();
         if (repaired.startsWith('```')) {
@@ -232,12 +244,15 @@ router.post('/render/tla', async (req, res) => {
       let masterTlaSource = master.tlaSource;
       if (speculaLlm.isAvailable()) {
         logger.info('tla.claude_primary', { moduleName, seedLen: masterTlaSource.length });
+        if (audit_run_id) auditTracker.emit(audit_run_id, 'agent:role_start', { role: 'tla_generator', stage: 'tla' });
         generatorResult = await speculaLlm.generateTlaSpec(facts, plan, moduleName, masterTlaSource);
         if (generatorResult.tlaSource) {
           masterTlaSource = generatorResult.tlaSource;
           logger.info('tla.claude_spec_accepted', { moduleName, len: masterTlaSource.length, ms: generatorResult.latencyMs });
+          if (audit_run_id) auditTracker.emit(audit_run_id, 'agent:role_end', { role: 'tla_generator', success: true, latencyMs: generatorResult.latencyMs });
         } else {
           logger.info('tla.claude_unavailable_fallback', { error: generatorResult.error });
+          if (audit_run_id) auditTracker.emit(audit_run_id, 'sys:fallback', { from: 'specula_llm', to: 'deterministic_seed', stage: 'tla' });
         }
       }
 
@@ -261,12 +276,15 @@ router.post('/render/tla', async (req, res) => {
 
       if (speculaLlm.isAvailable()) {
         logger.info('tla.claude_primary', { moduleName, seedLen: tlaSource.length });
+        if (audit_run_id) auditTracker.emit(audit_run_id, 'agent:role_start', { role: 'tla_generator', stage: 'tla' });
         generatorResult = await speculaLlm.generateTlaSpec(facts, plan, moduleName, tlaSource);
         if (generatorResult.tlaSource) {
           tlaSource = generatorResult.tlaSource;
           logger.info('tla.claude_spec_accepted', { moduleName, len: tlaSource.length, ms: generatorResult.latencyMs });
+          if (audit_run_id) auditTracker.emit(audit_run_id, 'agent:role_end', { role: 'tla_generator', success: true, latencyMs: generatorResult.latencyMs });
         } else {
           logger.info('tla.claude_unavailable_fallback', { error: generatorResult.error });
+          if (audit_run_id) auditTracker.emit(audit_run_id, 'sys:fallback', { from: 'specula_llm', to: 'deterministic_seed', stage: 'tla' });
         }
       }
 
@@ -484,6 +502,10 @@ router.post('/render/tla', async (req, res) => {
         specula_engine: speculaBridge.getConfig(),
       };
       await persistRunData(runPath, runData);
+      // Re-export the dump now that TLA+ artifacts exist. The dump was first
+      // written when the Mermaid render finalized — before this stage — so it
+      // would otherwise never contain spec.tla/spec.cfg. Fire-and-forget.
+      require('../services/run-exporter').exportRun(run_id, runData).catch(() => {});
     } catch (err) {
       logger.warn('tla.run_update_failed', { error: err.message });
     }
@@ -528,6 +550,8 @@ router.post('/render/tla', async (req, res) => {
       wall_clock_ms: validation.tlc.wallClockMs,
       confidence: tlaConfidence,
     });
+
+    if (audit_run_id) auditTracker.emit(audit_run_id, 'render:complete', { stage: 'tla', sanyValid: validation.sany.valid, tlcSuccess: validation.tlc.success, repairCalls: _repairCallCount });
 
     // Phase: OUTPUT — structured response
     res.json({
@@ -605,6 +629,7 @@ router.post('/render/tla', async (req, res) => {
     });
   } catch (err) {
     logger.error('tla.compile_error', { error: err.message, stack: err.stack });
+    if (audit_run_id) auditTracker.emit(audit_run_id, 'render:failed', { stage: 'tla', error: err.message });
     opseeq.reportStage(run_id, { stage: 'tla_failed', error: err.message });
     res.status(500).json({ success: false, error: err.message });
   } finally {

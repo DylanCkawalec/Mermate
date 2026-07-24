@@ -129,14 +129,25 @@ const EVENT_TEMPLATES = {
     const v = e.valid ? '✓ Structure valid' : '↯ Validation failed';
     return `  ${v}`;
   },
-  'render:repair':   (e) => `  ↺ Repairing structure  (attempt ${e.attempt || 1})`,
+  'render:repair':   (e) => {
+    const stage = e.stage ? `${e.stage} ` : '';
+    const budget = e.budget ? `/${e.budget}` : '';
+    return `  ↺ Repairing ${stage}structure  (attempt ${e.attempt || 1}${budget})`;
+  },
   'render:complete': (e) => {
+    if (e.stage === 'tla' || e.stage === 'ts') {
+      const repairs = e.repairCalls != null ? `  —  ${e.repairCalls} repairs` : '';
+      return `  ✓ ${e.stage.toUpperCase()} complete${repairs}`;
+    }
     const nodes = e.nodeCount != null ? `${e.nodeCount} nodes` : '';
     const edges = e.edgeCount != null ? `${e.edgeCount} edges` : '';
     const parts = [nodes, edges].filter(Boolean).join(', ');
     return `  ✓ Render complete${parts ? '  —  ' + parts : ''}`;
   },
-  'render:failed':   (e) => `  ✗ Render failed  —  ${(e.error || '').slice(0, 40)}`,
+  'render:failed':   (e) => {
+    const stage = e.stage ? `${e.stage} ` : '';
+    return `  ✗ ${stage}Render failed  —  ${(e.error || '').slice(0, 40)}`;
+  },
   'render:fallback': () => '  ↓ Falling back to local structural conversion',
 
   'sys:timeout':    (e) => `  ⌛ Timeout in ${e.stage || 'stage'}  —  retrying`,

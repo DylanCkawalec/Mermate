@@ -202,22 +202,28 @@ router.get('/runs/:runId/bundle', async (req, res) => {
   }
 
   try {
-    let result = null;
-
+    // Build from BOTH sources and merge, with live winning. The dump is
+    // written the moment the Mermaid render finalizes — before TLA+/TS exist —
+    // so preferring it (the old behavior) shipped bundles missing spec.tla /
+    // runtime.ts. Live reads runs/<id>.json + the current flows/ tree, so it
+    // always reflects the freshest artifact set. The dump only fills gaps.
     const dumpPath = path.join(DUMP_DIR, runId);
-    if (await _dirExists(dumpPath)) {
-      result = await _bundleFromDump(dumpPath);
-    }
+    const dumpResult = (await _dirExists(dumpPath)) ? await _bundleFromDump(dumpPath).catch(() => null) : null;
+    const liveResult = await _bundleFromLive(runId).catch(() => null);
 
-    if (!result || Object.keys(result.files).length === 0) {
-      result = await _bundleFromLive(runId);
-    }
-
-    if (!result || Object.keys(result.files).length === 0) {
+    const dumpHas = dumpResult && Object.keys(dumpResult.files).length > 0;
+    const liveHas = liveResult && Object.keys(liveResult.files).length > 0;
+    if (!dumpHas && !liveHas) {
       return res.status(404).json({ success: false, error: 'no artifacts found for this run' });
     }
 
-    const { diagramName, files, manifest } = result;
+    // Live is authoritative for the diagram name and overlays the dump files
+    // by zip path (same artifact layout on both sides), so newer artifacts
+    // replace any stale copy from the first dump.
+    const diagramName = liveResult?.diagramName || dumpResult?.diagramName || 'diagram';
+    const files = { ...(dumpResult?.files || {}), ...(liveResult?.files || {}) };
+    const manifest = { ...(dumpResult?.manifest || {}), ...(liveResult?.manifest || {}) };
+
     files[`${diagramName}/README.md`] = Buffer.from(_generateReadme(diagramName, manifest)).toString('base64');
 
     return res.json({ success: true, diagram_name: diagramName, files, manifest });

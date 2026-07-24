@@ -933,6 +933,43 @@
   // initial page load (when the textarea hasn't yet been populated).
   let _inputLoaded = false;
 
+  // Populate a TLA+/TS tab from artifacts already persisted on disk for the
+  // current run — avoids launching a fresh (and costly) compile when the
+  // spec/runtime already exists. Returns true when the tab was populated.
+  async function _hydratePersistedArtifact(mode) {
+    if (!currentRunId || (mode !== 'tla' && mode !== 'ts')) return false;
+    const runId = currentRunId;
+    try {
+      const url = mode === 'tla'
+        ? `/api/render/tla/errors/${runId}`
+        : `/api/render/ts/source/${runId}`;
+      const resp = await fetch(url);
+      if (!resp.ok) return false;
+      const data = await resp.json();
+      const src = mode === 'tla' ? data.tla_source : data.ts_source;
+      if (!src || !src.trim()) return false;
+
+      orchestrator.setArtifact(mode, src);
+      const confidence = mode === 'tla'
+        ? (data.metrics?.sany_valid ? CONFIDENCE.PASS : CONFIDENCE.FAILED)
+        : (data.compile_ok ? CONFIDENCE.PASS : CONFIDENCE.WEAK);
+      orchestrator.updateFromBackend({ stage: mode, unlockedStages: unlockedThrough('ts'), confidence });
+
+      // Only type into the visible textarea when the user is still viewing
+      // this tab; otherwise just stash the artifact + flag the tab.
+      if (currentMode === mode) {
+        input.value = src;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      } else {
+        _markTabHasNewContent(mode);
+      }
+      showToast(`${_stageLabel(mode)} loaded from run ${runId.slice(0, 8)} — no recompile needed`, 'success', 3000);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function setMode(mode) {
     if (!orchestrator.isUnlocked(mode)) return;
 
@@ -1009,17 +1046,30 @@
     if ((mode === 'tla' || mode === 'ts') && currentRunId && currentDiagramName) {
       const artifact = orchestrator.getArtifact(mode);
       if (!artifact || !artifact.trim()) {
-        // Real pending state: the textarea stays EMPTY (data never fakes UI).
-        // The placeholder carries the generating message + expected wait,
-        // and syncUiGuidance's hasRun branch shows the auto-start hint.
-        input.placeholder = mode === 'tla'
-          ? `Generating TLA+ specification from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)} (the mastered run)\nExpected wait: ${cfg.duration.label} — Specula → SANY → TLC\nPress Render or wait for auto-start.`
-          : `Generating TypeScript runtime from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)} (the mastered run)\nExpected wait: ${cfg.duration.label} — compile → tsc → harness → coverage\nPress Render or wait for auto-start.`;
-        // The user can paste their own content before auto-start fires —
-        // render() only proceeds when it still targets this mode.
-        setTimeout(() => {
-          if (currentMode === mode && !isLoading) render();
-        }, 600);
+        // The agent's own pipeline may still be generating this stage
+        // server-side. Auto-starting a render here spawned a SECOND, competing
+        // compile — doubled API calls and the runaway "Compiling TypeScript…"
+        // loader. While the agent is active, wait for its artifact instead.
+        if (agentState === 'running' || (agent && agent.running)) {
+          input.placeholder = mode === 'tla'
+            ? `The agent is generating the TLA+ specification…\n\nThis tab fills in automatically when the agent's pipeline reaches it — no need to press Render.`
+            : `The agent is compiling the TypeScript runtime…\n\nThis tab fills in automatically when the agent's pipeline reaches it — no need to press Render.`;
+        } else {
+          // Hydrate from disk FIRST — if this run already produced the
+          // artifact, show it instead of paying to regenerate it. Only when
+          // nothing is persisted do we fall back to auto-starting generation.
+          input.placeholder = mode === 'tla'
+            ? `Loading TLA+ specification for "${currentDiagramName}"…`
+            : `Loading TypeScript runtime for "${currentDiagramName}"…`;
+          _hydratePersistedArtifact(mode).then((hydrated) => {
+            if (hydrated || currentMode !== mode) return;
+            // Real pending state: the textarea stays EMPTY (data never fakes UI).
+            input.placeholder = mode === 'tla'
+              ? `Generating TLA+ specification from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)} (the mastered run)\nExpected wait: ${cfg.duration.label} — Specula → SANY → TLC\nPress Render or wait for auto-start.`
+              : `Generating TypeScript runtime from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)} (the mastered run)\nExpected wait: ${cfg.duration.label} — compile → tsc → harness → coverage\nPress Render or wait for auto-start.`;
+            if (currentMode === mode && !isLoading) render();
+          });
+        }
       }
     }
   }
@@ -1345,10 +1395,16 @@
     _stopLoadingTicker();
     _loadingStartedAt = Date.now();
     const suffix = durationLabel ? ` · expected ${durationLabel}` : '';
+    const expectedMs = STAGE_REGISTRY[currentMode]?.duration?.ms || 0;
     loadingText.textContent = `${baseMessage}${suffix}`;
     _loadingTicker = setInterval(() => {
       const elapsed = Math.round((Date.now() - _loadingStartedAt) / 1000);
-      loadingText.textContent = `${baseMessage} — ${elapsed}s${suffix}`;
+      const overEstimate = expectedMs > 0 && (Date.now() - _loadingStartedAt) > expectedMs;
+      if (overEstimate) {
+        loadingText.textContent = `${baseMessage} — ${elapsed}s · taking longer than expected`;
+      } else {
+        loadingText.textContent = `${baseMessage} — ${elapsed}s${suffix}`;
+      }
     }, 1000);
   }
 

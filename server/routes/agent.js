@@ -208,6 +208,31 @@ function _fetchRender(urlPath, body, parentAbort) {
   });
 }
 
+const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
+
+/**
+ * Read the persisted TLA+/TS artifact sources for a run from disk. Used as a
+ * fallback so pipeline/bundle SSE events always carry artifact text even when
+ * a downstream fetch failed or returned partial data — the user should never
+ * lose a spec that already exists on disk. Advisory — never throws.
+ */
+async function _readPersistedSources(runId) {
+  const out = { tla: null, cfg: null, ts: null };
+  if (!runId) return out;
+  try {
+    const runData = JSON.parse(await fsp.readFile(path.join(PROJECT_ROOT, 'runs', `${runId}.json`), 'utf-8'));
+    const read = async (rel) => {
+      if (!rel || typeof rel !== 'string') return null;
+      try { return await fsp.readFile(path.join(PROJECT_ROOT, rel.replace(/^\//, '')), 'utf-8'); }
+      catch { return null; }
+    };
+    out.tla = await read(runData.tla_artifacts?.tla);
+    out.cfg = await read(runData.tla_artifacts?.cfg);
+    out.ts = await read(runData.ts_artifacts?.source);
+  } catch { /* run.json missing/unreadable — nothing to recover */ }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 //  Detached agent sessions — an agent run survives browser refresh.
 //
@@ -1116,11 +1141,24 @@ router.post('/agent/finalize', async (req, res) => {
 
         if (!abort.signal.aborted) {
           sendEvent('stage', { stage: 'tla_build', message: 'Generating TLA+ specification via Specula...' });
+          auditTracker.emit(finalizeAuditId, 'agent:stage_enter', { stage: 'tla' });
           try {
             const tlaData = await _fetchRender('/api/render/tla', {
               diagram_name: fbName,
               run_id: fbRunId,
+              audit_run_id: finalizeAuditId,
             }, abort);
+
+            // Guarantee artifact text on every downstream event: if the render
+            // response didn't echo the source, read it back from disk so the
+            // TLA+ tab always populates — even on partial/failed validation.
+            let tlaSrc = tlaData.tla_source || null;
+            let cfgSrc = tlaData.cfg_source || null;
+            if (!tlaSrc) {
+              const persisted = await _readPersistedSources(fbRunId);
+              tlaSrc = persisted.tla;
+              cfgSrc = cfgSrc || persisted.cfg;
+            }
 
             sendEvent('pipeline_stage', {
               stage: 'tla',
@@ -1128,24 +1166,29 @@ router.post('/agent/finalize', async (req, res) => {
               sany_valid: tlaData.sany?.valid,
               tlc_checked: tlaData.tlc?.checked,
               violations: tlaData.tlc?.violations?.length || 0,
-              tla_source: tlaData.tla_source || null,
-              cfg_source: tlaData.cfg_source || null,
+              tla_source: tlaSrc,
+              cfg_source: cfgSrc,
             });
 
             if (tlaData.success && tlaData.sany?.valid && !abort.signal.aborted) {
               sendEvent('stage', { stage: 'ts_build', message: 'Compiling TypeScript runtime from TLA+ spec...' });
+              auditTracker.emit(finalizeAuditId, 'agent:stage_enter', { stage: 'ts' });
               try {
                 const tsData = await _fetchRender('/api/render/ts', {
                   diagram_name: fbName,
                   run_id: fbRunId,
+                  audit_run_id: finalizeAuditId,
                 }, abort);
+
+                let tsSrc = tsData.ts_source || null;
+                if (!tsSrc) tsSrc = (await _readPersistedSources(fbRunId)).ts;
 
                 sendEvent('pipeline_stage', {
                   stage: 'ts',
                   success: tsData.success,
                   compile_ok: tsData.compile?.success,
                   tests_ok: tsData.tests?.success,
-                  ts_source: tsData.ts_source || null,
+                  ts_source: tsSrc,
                 });
 
                 sendEvent('bundle_ready', {
@@ -1154,36 +1197,50 @@ router.post('/agent/finalize', async (req, res) => {
                   stages_completed: ['mmd', 'tla', 'ts'],
                   tla_valid: tlaData.sany?.valid,
                   ts_compiled: tsData.compile?.success,
-                  tla_source: tlaData.tla_source || null,
-                  ts_source: tsData.ts_source || null,
+                  tla_source: tlaSrc,
+                  cfg_source: cfgSrc,
+                  ts_source: tsSrc,
                 });
               } catch (tsErr) {
                 sendEvent('pipeline_stage', { stage: 'ts', success: false, error: tsErr.message });
+                // TS failed, but TLA+ succeeded — still ship the verified spec
+                // so the user keeps the artifact they already paid for.
                 sendEvent('bundle_ready', {
                   diagram_name: fbName,
                   run_id: fbRunId,
                   stages_completed: ['mmd', 'tla'],
                   tla_valid: tlaData.sany?.valid,
                   ts_compiled: false,
+                  tla_source: tlaSrc,
+                  cfg_source: cfgSrc,
                 });
               }
             } else {
+              // TLA+ ran but didn't fully validate — still ship whatever spec
+              // was generated so the TLA+ tab populates for manual repair.
               sendEvent('bundle_ready', {
                 diagram_name: fbName,
                 run_id: fbRunId,
                 stages_completed: ['mmd'],
                 tla_valid: tlaData.sany?.valid || false,
                 ts_compiled: false,
+                tla_source: tlaSrc,
+                cfg_source: cfgSrc,
               });
             }
           } catch (tlaErr) {
             sendEvent('pipeline_stage', { stage: 'tla', success: false, error: tlaErr.message });
+            // Even if the TLA+ fetch threw, a prior partial spec may exist on
+            // disk — recover it so the user isn't left with an empty tab.
+            const persisted = await _readPersistedSources(fbRunId);
             sendEvent('bundle_ready', {
               diagram_name: fbName,
               run_id: fbRunId,
               stages_completed: ['mmd'],
               tla_valid: false,
               ts_compiled: false,
+              tla_source: persisted.tla,
+              cfg_source: persisted.cfg,
             });
           }
         }
