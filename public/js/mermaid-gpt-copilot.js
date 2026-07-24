@@ -117,7 +117,19 @@ window.MermaidCopilot = class MermaidCopilot {
     window.addEventListener('online', this._onOnline);
     window.addEventListener('offline', this._onOffline);
 
-    void this._checkHealth({ force: true });
+    // Initial health check is deferred to the boot sequence in mermaid-gpt-app.js
+    // which calls setHealthState() after fetching /api/copilot/health.
+    // This avoids a redundant API call on page load.
+  }
+
+  /**
+   * Set health state externally (from boot sequence or other coordinator).
+   * Avoids redundant /api/copilot/health fetches when another caller already
+   * has the result.
+   */
+  setHealthState(healthy) {
+    this._enhancerHealthy = !!healthy;
+    this._lastHealthCheck = Date.now();
   }
 
   // ---- Teardown -------------------------------------------------------------

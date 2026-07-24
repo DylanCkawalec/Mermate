@@ -8,9 +8,12 @@
     "opseeq:status": "curl -sf http://localhost:9090/api/status | python3 -m json.tool",
     "opseeq:docker:build": "docker build -f ../opseeq/Dockerfile.service -t opseeq:v5 ../opseeq",
     "test": "node --test test/test-*.js",
+    "test:regression": "node --test test/test-regression-pipeline.js test/test-perf-regression.js",
+    "test:contract": "node --test test/test-contract-*.js",
+    "test:record": "MERMATE_RECORD_FIXTURES=1 node --test test/test-regression-pipeline.js",
     "test:fast": "node --test test/test-agent-api.js test/test-classifier.js test/test-enhanced-validation.js test/test-enhancer-bridge.js test/test-image-validation.js test/test-input-analyzer.js test/test-mermaid-repairer.js test/test-rate-master-bridge.js test/test-run-tracker.js test/test-structural-signature.js test/test-tla-compiler.js test/test-ts-compiler.js test/test-ts-validator.js test/test-perf-optimizations.js",
     "test:compile": "node --test --test-concurrency=2 test/test-compiler.js test/test-compile-retry.js test/test-all-fixtures.js test/test-render-api.js",
-    "test:ci": "npm run test:fast && npm run test:compile"
+    "test:ci": "npm run test:regression && npm run test:contract && npm run test:fast && npm run test:compile"
   },
   "dependencies": {
     "@mermaid-js/mermaid-cli": "^11.4.0",

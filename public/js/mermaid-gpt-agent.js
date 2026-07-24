@@ -50,6 +50,10 @@ window.MermaidAgent = class MermaidAgent {
     this.onAgentFocus = opts.onAgentFocus || (() => {});
     this.onPipelineStage = opts.onPipelineStage || (() => {});
     this.onBundleReady = opts.onBundleReady || (() => {});
+    // Routing decision for draft updates — returns true when the draft may
+    // be typed into the visible input, false when it was routed to a
+    // background tab instead. Default preserves legacy behavior.
+    this.onDraftUpdate = opts.onDraftUpdate || (() => true);
 
     this._abortController = null;
     this._running = false;
@@ -73,9 +77,86 @@ window.MermaidAgent = class MermaidAgent {
     this._metricEls = {};
     this._metricValues = {};
     this._scroller = typeof NumberScroller !== 'undefined' ? new NumberScroller() : null;
+    this.sessionId = null;
   }
 
   get running() { return this._running; }
+
+  // ---- Detached-session persistence ----
+  // The server owns the running pipeline; we record the session id so a
+  // page refresh reattaches to the live run instead of restarting it.
+
+  static SESSION_KEY = 'mermate_agent_session';
+
+  _saveSession(kind) {
+    if (!this.sessionId) return;
+    try {
+      localStorage.setItem(MermaidAgent.SESSION_KEY, JSON.stringify({
+        id: this.sessionId,
+        mode: this._mode,
+        stage: this._currentStage || 'idea',
+        kind: kind || 'run',
+        ts: Date.now(),
+      }));
+    } catch {}
+  }
+
+  _clearSession() {
+    this.sessionId = null;
+    try { localStorage.removeItem(MermaidAgent.SESSION_KEY); } catch {}
+  }
+
+  static readSavedSession() {
+    try { return JSON.parse(localStorage.getItem(MermaidAgent.SESSION_KEY) || 'null'); } catch { return null; }
+  }
+
+  static clearSavedSession() {
+    try { localStorage.removeItem(MermaidAgent.SESSION_KEY); } catch {}
+  }
+
+  _stopServerSession() {
+    if (!this.sessionId) return;
+    const id = this.sessionId;
+    this._clearSession();
+    fetch(`/api/agent/stop/${id}`, { method: 'POST' }).catch(() => {});
+  }
+
+  // ---- Reattach to a live server-side run after a page refresh ----
+
+  async attach(sessionId, mode) {
+    if (this._running) return;
+    this._running = true;
+    this._mode = mode || this._mode;
+    this.sessionId = sessionId;
+
+    this.panel.hidden = false;
+    this.panelMode.textContent = this._mode || 'agent';
+    this.panelLog.innerHTML = '';
+    this.panelLog.classList.add('is-loading');
+    this.notesWrap.hidden = true;
+    this._currentPhaseGroup = null;
+    this._currentPhaseBody = null;
+    this._currentPhaseName = null;
+
+    this._buildMetricsBar();
+    this._openPhase('ingest');
+    this._addNarrationLog('Reattached to running agent — replaying progress...', 'system', 'agent:reattached');
+    this.onStateChange('running');
+
+    this._abortController = new AbortController();
+
+    try {
+      await this._streamSSE(`/api/agent/attach/${sessionId}`, null, 'GET');
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        this._addLog(`Error: ${err.message}`, 'done');
+        this.onError(err.message);
+      }
+    } finally {
+      this._running = false;
+      this.panelLog.classList.remove('is-loading');
+    }
+  }
 
   // ---- Phase 1: Run through planning, refinement, preview ----
 
@@ -178,6 +259,7 @@ window.MermaidAgent = class MermaidAgent {
 
   stop() {
     if (this._abortController) this._abortController.abort();
+    this._stopServerSession();
     this._teardownThinkingEffect();
     this._running = false;
     this.notesWrap.hidden = true;
@@ -195,9 +277,11 @@ window.MermaidAgent = class MermaidAgent {
 
   stopAndPause() {
     if (this._abortController) this._abortController.abort();
+    this._stopServerSession();
     this._teardownThinkingEffect();
     this._running = false;
     this.notesWrap.hidden = true;
+    this._hideRepairBudget();
     this._addNarrationLog('Agent paused — current artifact and tabs preserved. Edit any tab, then run again to continue from that context.', 'system', 'agent:paused');
     this._paused = true;
     this.onStateChange('idle');
@@ -278,6 +362,30 @@ window.MermaidAgent = class MermaidAgent {
     }
   }
 
+  // ---- Repair budget indicator ----
+
+  _updateRepairBudget(attempt, budget) {
+    const bar = document.getElementById('repair-budget-bar');
+    const fill = document.getElementById('repair-budget-fill');
+    const count = document.getElementById('repair-budget-count');
+    if (!bar || !fill || !count) return;
+    bar.hidden = false;
+    const pct = Math.min(100, (attempt / budget) * 100);
+    fill.style.width = `${pct}%`;
+    count.textContent = `${attempt}/${budget}`;
+    fill.classList.remove('is-warn', 'is-exhausted');
+    if (attempt >= budget) {
+      fill.classList.add('is-exhausted');
+    } else if (attempt >= budget * 0.6) {
+      fill.classList.add('is-warn');
+    }
+  }
+
+  _hideRepairBudget() {
+    const bar = document.getElementById('repair-budget-bar');
+    if (bar) bar.hidden = true;
+  }
+
   // ---- Phase accordion ----
 
   _openPhase(phaseName) {
@@ -352,13 +460,13 @@ window.MermaidAgent = class MermaidAgent {
 
   // ---- SSE streaming ----
 
-  async _streamSSE(url, body) {
+  async _streamSSE(url, body, method = 'POST') {
     let resp;
     try {
       resp = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        method,
+        headers: method === 'POST' ? { 'Content-Type': 'application/json' } : undefined,
+        body: method === 'POST' ? JSON.stringify(body) : undefined,
         signal: this._abortController.signal,
       });
     } catch (err) {
@@ -396,9 +504,20 @@ window.MermaidAgent = class MermaidAgent {
 
   async _handleEvent(event) {
     switch (event.type) {
+      case 'agent_session':
+        this.sessionId = event.session_id;
+        this._saveSession(event.kind);
+        break;
+
       case 'narration':
         this._phaseStepCount++;
         this._addNarrationLog(event.message, event.source, event.eventType);
+        if (event.eventType === 'render:repair' && event.attempt != null) {
+          this._updateRepairBudget(event.attempt, event.budget || 5);
+        }
+        if (event.eventType === 'render:complete' || event.eventType === 'render:failed') {
+          this._hideRepairBudget();
+        }
         if (event.elapsed) {
           this._updateMetric('elapsed', event.elapsed / 1000);
         }
@@ -456,13 +575,21 @@ window.MermaidAgent = class MermaidAgent {
         }
         break;
 
-      case 'draft_update':
-        await this._animateDraftUpdate(event.original || this.input.value, event.text);
+      case 'draft_update': {
         this._draftText = event.text;
+        // Route the draft through the app FIRST — it decides which stage
+        // artifact owns this text. Only type into the visible input when
+        // the user is actually viewing that stage; otherwise the app
+        // highlights the owning tab and we just log the update here.
+        const mayType = this.onDraftUpdate(event) !== false;
+        if (mayType) {
+          await this._animateDraftUpdate(event.original || this.input.value, event.text);
+        }
         if (!this._narratorActive) {
           this._addLog(event.reason || 'Architecture updated', 'done');
         }
         break;
+      }
 
       case 'preview_render':
         this._phaseStepCount++;
@@ -482,6 +609,7 @@ window.MermaidAgent = class MermaidAgent {
         this._addNarrationLog('Preview ready  —  add notes or finalize', 'system', 'preview_ready');
         this._draftText = event.draft_text || this.input.value;
         this._previewDiagramName = event.diagram_name || null;
+        this._clearSession(); // run phase complete — nothing live to reattach to
         this._showNotesUI();
         this.onStateChange('awaiting_notes');
         break;
@@ -537,14 +665,21 @@ window.MermaidAgent = class MermaidAgent {
         this._addNarrationLog('Agent workflow complete', 'system', 'done');
         this._running = false;
         this._narratorActive = false;
+        this._hideRepairBudget();
+        this._clearSession();
         this.onComplete(event.final_text);
         this.onStateChange('idle');
+        break;
+
+      case 'preview_ready_session_pause':
         break;
 
       case 'error':
         this._markPreviousLogDone();
         this._closeCurrentPhase('error');
         this._addNarrationLog(`${event.message}`, 'system', 'sys:error');
+        this._hideRepairBudget();
+        this._clearSession();
         this.onError(event.message);
         break;
     }

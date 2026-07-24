@@ -100,4 +100,34 @@ router.get('/runs/:run_id/summary', async (req, res) => {
   return res.json({ success: true, summary });
 });
 
+router.get('/runs/:run_id/trace', async (req, res) => {
+  const { run_id } = req.params;
+  if (!run_id) return res.status(400).json({ success: false, error: 'run_id required' });
+
+  let manifest = runTracker.getManifest(run_id);
+  if (!manifest) manifest = await runTracker.loadRun(run_id);
+  if (!manifest) return res.status(404).json({ success: false, error: `Run ${run_id} not found` });
+
+  let trace = runTracker.getTrace(run_id, manifest);
+  if (!trace) {
+    // Fallback: build a best-effort trace from loaded manifest fields
+    trace = {
+      run_id: manifest.run_id,
+      status: manifest.status,
+      created_at: manifest.created_at,
+      completed_at: manifest.completed_at,
+      tags: manifest.tags || null,
+      phases: manifest.lifecycle?.phases || [],
+      calls: manifest.agent_calls || [],
+      rate_events: manifest.rate_events || [],
+      totals: manifest.totals || null,
+      sum_check: manifest.sum_check || null,
+      note: 'trace computed from archived manifest; tab enrichment unavailable',
+    };
+  }
+  if (!trace) return res.status(404).json({ success: false, error: `Trace for ${run_id} not available` });
+
+  return res.json({ success: true, trace });
+});
+
 module.exports = router;

@@ -87,4 +87,16 @@ function summarize(text, maxWords) {
   return slug.length >= 3 && slug.length <= 60 ? slug : '';
 }
 
-module.exports = { slugify, dateStamp, deriveDiagramName };
+/**
+ * Validate a user-supplied value used as a single path segment
+ * (run_id, diagram name). Rejects traversal ('..'), separators, and
+ * anything outside [a-zA-Z0-9._-]. Returns the value or null.
+ * @param {string} s
+ * @returns {string|null}
+ */
+function safeSegment(s) {
+  if (typeof s !== 'string' || !s || s === '.' || s === '..') return null;
+  return /^[a-zA-Z0-9._-]+$/.test(s) ? s : null;
+}
+
+module.exports = { slugify, dateStamp, deriveDiagramName, safeSegment };

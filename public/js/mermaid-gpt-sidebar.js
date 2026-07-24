@@ -19,6 +19,16 @@ window.MermaidSidebar = class MermaidSidebar {
     return this.items.find(i => i.run_id && i.name);
   }
 
+  /**
+   * Mark the entry whose run_id matches as the active lineage anchor —
+   * the mastered run that TLA+/TypeScript stages derive from. Only one
+   * entry carries the anchor at a time.
+   */
+  markActiveLineage(runId) {
+    this._lineageRunId = runId || null;
+    this.render();
+  }
+
   _load() {
     try {
       const raw = localStorage.getItem(this.STORAGE_KEY);
@@ -203,10 +213,12 @@ window.MermaidSidebar = class MermaidSidebar {
     }
     this.items.forEach((item, idx) => {
       const btn = document.createElement('button');
-      btn.className = 'sidebar-item' + (idx === this.activeIndex ? ' active' : '') + (item._pending ? ' pending' : '');
+      const isLineage = !!(this._lineageRunId && item.run_id === this._lineageRunId);
+      btn.className = 'sidebar-item' + (idx === this.activeIndex ? ' active' : '') + (item._pending ? ' pending' : '') + (isLineage ? ' lineage-anchor' : '');
       const displayName = this._humanize(item.name);
+      const lineageTag = isLineage ? '<span class="sidebar-lineage-tag" title="Mastered run — TLA+ &amp; TypeScript build from this diagram">★</span> ' : '';
       btn.innerHTML = `
-        <span class="sidebar-item-name" title="${this._esc(item.name)}">${this._esc(displayName)}</span>
+        <span class="sidebar-item-name" title="${this._esc(item.name)}">${lineageTag}${this._esc(displayName)}</span>
         <span class="sidebar-item-meta">${item._pending ? 'new · awaiting content' : (item.type ? item.type + ' · ' : '') + (item.timestamp || '')}</span>
         <span class="sidebar-item-actions">
           <button class="btn-rename" aria-label="Rename ${this._esc(item.name)}" title="Rename">

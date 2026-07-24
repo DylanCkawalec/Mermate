@@ -83,7 +83,8 @@ function _getInstance() {
     });
 
     _instance.on('ooda:decision', (d) => {
-      logger.info('rm.ooda', {
+      if (d.previousLimit === d.newLimit) return;
+      logger.debug('rm.ooda', {
         endpoint: d.endpoint,
         prev: d.previousLimit,
         next: d.newLimit,
@@ -162,15 +163,18 @@ async function execute(stage, model, inputText, fn) {
     return { result, actionTag };
   }
 
+  let execStart = 0;
+  const wrappedFn = () => { execStart = Date.now(); return fn(); };
+
   try {
-    const result = await rm.execute(endpoint, fn, {
+    const result = await rm.execute(endpoint, wrappedFn, {
       priority,
       traceId: `mermate-${actionTag.seq}`,
-      timeoutMs: priority === catalog.Priority.CRITICAL ? 180_000 : 120_000,
+      timeoutMs: parseInt(process.env.MERMATE_INFER_TIMEOUT_MS || process.env.MERMATE_INFER_TIMEOUT || '180000', 10),
     });
 
-    actionTag.queueWaitMs = 0;
-    actionTag.executionMs = Date.now() - actionTag.enqueuedAt;
+    actionTag.queueWaitMs = execStart > 0 ? execStart - actionTag.enqueuedAt : 0;
+    actionTag.executionMs = execStart > 0 ? Date.now() - execStart : Date.now() - actionTag.enqueuedAt;
 
     logger.info('rm.done', {
       tag: actionTag.tag,
@@ -208,7 +212,9 @@ function feedback(model, fb) {
 function getMetrics() {
   const rm = _getInstance();
   if (!rm) return null;
-  return rm.getMetrics();
+  const metrics = rm.getMetrics();
+  metrics.recentDecisions = rm.memory.decisions.slice(-10);
+  return metrics;
 }
 
 /**
@@ -221,8 +227,8 @@ function getPriority(stage) {
 /**
  * Estimate context window for a stage (delegates to catalog).
  */
-function estimateContextSize(stage, inputText) {
-  return catalog.estimateContext(stage, inputText);
+function estimateContextSize(stage, inputText, model) {
+  return catalog.estimateContext(stage, inputText, model);
 }
 
 /**

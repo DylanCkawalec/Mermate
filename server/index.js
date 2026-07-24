@@ -86,6 +86,7 @@ const artifactsRouter = require('./routes/artifacts');
 const rustRouter = require('./routes/rust');
 const traceRouter = require('./routes/trace');
 const runsRouter = require('./routes/runs');
+const speculaRouter = require('./routes/specula');
 app.use('/api', renderRouter);
 app.use('/api', agentRouter);
 app.use('/api', transcribeRouter);
@@ -100,12 +101,86 @@ app.use('/api', artifactsRouter);
 app.use('/api', rustRouter);
 app.use('/api', traceRouter);
 app.use('/api', runsRouter);
+app.use('/api', speculaRouter);
 
 // Run retention cleanup on startup (non-blocking)
 const runTracker = require('./services/run-tracker');
 const runExporter = require('./services/run-exporter');
 runTracker.cleanup().catch(() => {});
 runExporter.cleanup().catch(() => {});
+
+// ---- Health endpoint (boot verification) -----------------------------------
+// Returns comprehensive server health: provider availability, model config,
+// and critical service status. Used by mermaid.sh to verify boot readiness.
+app.get('/api/health', async (_req, res) => {
+  try {
+    const inferenceProvider = require('./services/inference-provider');
+    const providers = await inferenceProvider.checkProviders();
+    const maxAvailable = inferenceProvider.isMaxAvailable();
+    const roles = roleRegistry.getRoles();
+    const activeRoles = roles.filter(r => r.enabled).length;
+
+    const health = {
+      success: true,
+      status: 'ok',
+      // Payload-contract version: bump when the canonical envelope shape
+      // (artifacts / progressionUpdate) changes incompatibly. The frontend
+      // boot sequence reads this to detect contract mismatches.
+      schema_version: 1,
+      uptime: process.uptime(),
+      port: PORT,
+      models: {
+        orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || 'gpt-5.6-sol',
+        worker: process.env.MERMATE_WORKER_MODEL || 'gpt-5.6-terra',
+        fast: process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-5.6-luna',
+      },
+      providers: {
+        premium: providers.premium,
+        ollama: providers.ollama,
+        enhancer: providers.enhancer,
+        maxAvailable,
+      },
+      agents: {
+        total: roles.length,
+        active: activeRoles,
+      },
+      got: {
+        enabled: gotConfig.getConfig()?.controllerEnabled || false,
+        mode: gotConfig.getConfig()?.mode || 'unknown',
+      },
+    };
+
+    const anyProvider = providers.premium || providers.ollama || providers.enhancer;
+    health.status = anyProvider ? 'ok' : 'degraded';
+
+    // Opseeq gateway health — AI features depend on this being ready
+    try {
+      const opseeq = require('./services/opseeq-bridge');
+      const opseeqHealth = await opseeq.health();
+      health.opseeq = {
+        url: opseeq.getUrl(),
+        healthy: opseeqHealth.healthy,
+        warming: !opseeqHealth.healthy && _opseeqContainerStarted,
+        version: opseeqHealth.version || null,
+        providers: opseeqHealth.providers || null,
+      };
+      if (!opseeqHealth.healthy && !anyProvider) {
+        health.status = 'degraded';
+      }
+    } catch {
+      health.opseeq = { url: null, healthy: false, warming: false };
+    }
+
+    return res.status(200).json(health);
+  } catch (err) {
+    logger.error('health.error', { error: err.message });
+    return res.status(503).json({
+      success: false,
+      status: 'error',
+      error: err.message,
+    });
+  }
+});
 
 // Agent definitions endpoint
 app.get('/api/agents', async (_req, res) => {
@@ -119,6 +194,114 @@ app.get('/api/rate-master/metrics', (_req, res) => {
   const metrics = rmBridge.getMetrics();
   if (!metrics) return res.json({ success: true, available: false, message: 'rate-master not initialized' });
   return res.json({ success: true, available: true, metrics });
+});
+
+// ---- Opseeq gateway lifecycle (browser-window management) -----------------
+// The frontend pings /api/opseeq/heartbeat while the tab is open.
+// On first heartbeat, Mermate ensures the Opseeq Docker container is running.
+// When no heartbeat arrives for >60s, Mermate stops the container.
+const opseeqBridge = require('./services/opseeq-bridge');
+const inferenceProvider = require('./services/inference-provider');
+const { execSync } = require('child_process');
+let _opseeqLastHeartbeat = Date.now();
+let _opseeqContainerStarted = false;
+const _OPSEEQ_HEARTBEAT_TIMEOUT_MS = 60_000;
+const _OPSEEQ_DOCKER_COMPOSE = process.env.OPSEEQ_DOCKER_COMPOSE
+  || '../opseeq/docker-compose.yml';
+
+function _opseeqExec(cmd) {
+  try {
+    return execSync(cmd, { timeout: 15000, stdio: 'pipe' }).toString().trim();
+  } catch {
+    return null;
+  }
+}
+
+function _opseeqEnsureRunning() {
+  if (_opseeqContainerStarted) return true;
+  const status = _opseeqExec(`docker inspect -f '{{.State.Running}}' opseeq 2>/dev/null`);
+  if (status === 'true') {
+    _opseeqContainerStarted = true;
+    return true;
+  }
+  const composeFile = path.resolve(__dirname, '..', _OPSEEQ_DOCKER_COMPOSE);
+  _opseeqExec(`docker compose -f ${composeFile} up -d opseeq 2>/dev/null`);
+  _opseeqContainerStarted = true;
+  logger.info('opseeq.lifecycle.start', { composeFile });
+  return true;
+}
+
+// Boot-time health gate: poll Opseeq until healthy or timeout.
+// This ensures the first user request gets a ready gateway, not a cold-start.
+async function _opseeqBootGate(maxWaitMs = 30_000, intervalMs = 2000) {
+  const deadline = Date.now() + maxWaitMs;
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    attempt++;
+    const h = await opseeqBridge.health();
+    if (h.healthy) {
+      logger.info('opseeq.boot_gate.ready', { attempts: attempt, ms: Date.now() - (deadline - maxWaitMs) });
+      return true;
+    }
+    logger.info('opseeq.boot_gate.poll', { attempt, error: h.error });
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+  logger.warn('opseeq.boot_gate.timeout', { attempts: attempt, maxWaitMs });
+  return false;
+}
+
+function _opseeqStopIfIdle() {
+  const active = inferenceProvider.getActiveInferenceCount
+    ? inferenceProvider.getActiveInferenceCount()
+    : 0;
+  if (active > 0) return;
+
+  const lastActivity = Math.max(
+    _opseeqLastHeartbeat,
+    inferenceProvider.getLastInferenceAt ? inferenceProvider.getLastInferenceAt() : 0,
+  );
+  const idleMs = Date.now() - lastActivity;
+  if (idleMs < _OPSEEQ_HEARTBEAT_TIMEOUT_MS) return;
+  if (!_opseeqContainerStarted) return;
+  const composeFile = path.resolve(__dirname, '..', _OPSEEQ_DOCKER_COMPOSE);
+  _opseeqExec(`docker compose -f ${composeFile} stop opseeq 2>/dev/null`);
+  _opseeqContainerStarted = false;
+  logger.info('opseeq.lifecycle.stop', { idleMs, reason: 'heartbeat_timeout' });
+}
+
+// Check every 15s for idle timeout
+setInterval(_opseeqStopIfIdle, 15_000).unref?.();
+
+app.post('/api/opseeq/heartbeat', (_req, res) => {
+  _opseeqLastHeartbeat = Date.now();
+  _opseeqEnsureRunning();
+  res.json({ success: true, ts: _opseeqLastHeartbeat });
+});
+
+app.get('/api/opseeq/status', async (_req, res) => {
+  const h = await opseeqBridge.health();
+  res.json({
+    success: true,
+    healthy: h.healthy,
+    url: opseeqBridge.getUrl(),
+    containerStarted: _opseeqContainerStarted,
+    lastHeartbeat: _opseeqLastHeartbeat,
+    idleMs: Date.now() - _opseeqLastHeartbeat,
+    ...h,
+  });
+});
+
+app.post('/api/opseeq/start', (_req, res) => {
+  _opseeqEnsureRunning();
+  res.json({ success: true, message: 'Opseeq gateway start requested' });
+});
+
+app.post('/api/opseeq/stop', (_req, res) => {
+  const composeFile = path.resolve(__dirname, '..', _OPSEEQ_DOCKER_COMPOSE);
+  _opseeqExec(`docker compose -f ${composeFile} stop opseeq 2>/dev/null`);
+  _opseeqContainerStarted = false;
+  logger.info('opseeq.lifecycle.stop', { reason: 'manual' });
+  res.json({ success: true, message: 'Opseeq gateway stopped' });
 });
 
 // Meta-cognition gateway endpoints + CRON
@@ -145,9 +328,29 @@ app.post('/api/meta/cron', async (_req, res) => {
 if (require.main === module) {
   const server = http.createServer(app);
 
-  server.once('listening', () => {
+  server.once('listening', async () => {
     logger.info('server.started', { port: PORT });
     console.log(`\n  Mermaid-GPT running at http://localhost:${PORT}\n`);
+    // TLA+ toolbox warm-up: cache Java version + jar presence now so the
+    // first /api/render/tla request skips the probe entirely.
+    try { require('./services/tla-validator').warmUp(); } catch { /* non-fatal */ }
+    // Specula engine warm-up: pre-probe the pinned submodule and cache skill
+    // prompts so boot-time discovery never blocks a render request.
+    try { require('./services/specula-engine-bridge').warmUp(); } catch { /* non-fatal */ }
+    // Opseeq gateway: ensure container is running, then poll until healthy.
+    // This blocks boot briefly so the first user request gets a ready gateway.
+    // If the container isn't running yet, the heartbeat will start it — but we
+    // also proactively start it here for a warm boot.
+    try {
+      _opseeqEnsureRunning();
+      const ready = await _opseeqBootGate(30_000, 2000);
+      if (ready) {
+        const h = await opseeqBridge.health();
+        logger.info('opseeq.boot_ready', { url: opseeqBridge.getUrl(), version: h.version });
+      } else {
+        logger.warn('opseeq.boot_unhealthy', { url: opseeqBridge.getUrl(), reason: 'boot_gate_timeout' });
+      }
+    } catch { /* non-fatal — gateway may start later via heartbeat */ }
   });
 
   server.once('error', (err) => {
@@ -178,6 +381,9 @@ if (require.main === module) {
     if (_metaCronTimer) clearInterval(_metaCronTimer);
     try { rmBridge.destroy(); } catch {}
     try { opseeqWsBridge.close(); } catch {}
+    // Note: Opseeq container lifecycle is managed by the browser heartbeat,
+    // not by server shutdown. The idle timeout (60s after last heartbeat)
+    // handles cleanup when the user actually closes the tab.
     server.close(() => process.exit(0));
   };
   process.on('SIGTERM', _shutdown);

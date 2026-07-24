@@ -21,6 +21,22 @@ const { Phase, createPhaseTracker } = require('./compiler-phases');
 const structuralSig = require('./structural-signature');
 const logger = require('../utils/logger');
 
+// ---- Pipeline phase trace helper -------------------------------------------
+// Emits a single compact `pipeline.phase` event for every major routing and
+// rendering step. This gives the OODA universal tracer a high-level timeline
+// aligned with the run-tracker lifecycle without parsing verbose internals.
+function _emitPipelinePhase(phase, data = {}) {
+  logger.info('pipeline.phase', {
+    phase,
+    runId: data.runId || data.run_id || null,
+    tab: data.tab || null,
+    stage: data.stage || null,
+    pipeline: data.pipeline || null,
+    content_state: data.content_state || null,
+    ...data,
+  });
+}
+
 // ---- Local text-to-mmd fallback (no enhancer required) ----------------------
 
 const FLOW_VERB_RE = /\b(sends?\s+(?:request\s+)?to|calls?|connects?\s+to|routes?\s+to|triggers?|requests?|reads?\s+from|writes?\s+to|stores?\s+in|queries?|goes?\s+to|flows?\s+to|talks?\s+to|uses?|emits?\s+(?:event\s+)?to|publishes?\s+to|subscribes?\s+to|forwards?\s+to|fetches?\s+from|posts?\s+to|logs?\s+(?:in\s+)?to|redirects?\s+to|proxies?\s+to|delegates?\s+to|dispatches?\s+to|passes?\s+to)\b/i;
@@ -272,11 +288,12 @@ function _sanitizeCompileError(raw) {
  * @param {string} baseName
  * @returns {Promise<{result: object, mmdSource: string, attempts: number, repairChanges: string[]}>}
  */
-async function compileWithRetry(mmdSource, outputDir, baseName) {
+async function compileWithRetry(mmdSource, outputDir, baseName, ports = null) {
+  const p = _resolvePorts(ports);
   const repairChanges = [];
 
   // Attempt 1: compile as-is
-  let result = await compile(mmdSource, outputDir, baseName);
+  let result = await p.compiler.compile(mmdSource, outputDir, baseName);
   if (result.ok) return { result, mmdSource, attempts: 1, repairChanges };
 
   const attempt1Error = _sanitizeCompileError(result.error);
@@ -287,7 +304,7 @@ async function compileWithRetry(mmdSource, outputDir, baseName) {
   if (repaired.changes.length > 0) {
     repairChanges.push(...repaired.changes);
     logger.info('compile.deterministic_repair', { changes: repaired.changes });
-    result = await compile(repaired.source, outputDir, baseName);
+    result = await p.compiler.compile(repaired.source, outputDir, baseName);
     if (result.ok) return { result, mmdSource: repaired.source, attempts: 2, repairChanges };
   }
 
@@ -305,7 +322,7 @@ async function compileWithRetry(mmdSource, outputDir, baseName) {
       repairChanges.push(`model-assisted repair via ${modelResult.provider}`);
       const reRepaired = deterministicRepair(modelResult.output);
       if (reRepaired.changes.length > 0) repairChanges.push(...reRepaired.changes);
-      result = await compile(reRepaired.source, outputDir, baseName);
+      result = await p.compiler.compile(reRepaired.source, outputDir, baseName);
       if (result.ok) return { result, mmdSource: reRepaired.source, attempts: 3, repairChanges };
     }
   }
@@ -324,14 +341,22 @@ async function compileWithRetry(mmdSource, outputDir, baseName) {
  * @param {object} profile - InputProfile from input-analyzer
  * @returns {Promise<{mmdSource: string, enhanced: boolean, provider: string, stagesExecuted: string[]}>}
  */
-async function renderPrepare(source, profile, useMax = false) {
+async function renderPrepare(source, profile, ports = null, useMax = false) {
+  let actualPorts = ports;
+  let actualUseMax = useMax;
+  if (typeof ports === 'boolean') {
+    actualUseMax = ports;
+    actualPorts = null;
+  }
+  const p = _resolvePorts(actualPorts);
   const stagesExecuted = [];
   const userPrompt = buildRenderPrepareUserPrompt(source, profile);
-  const rt = _rt();
+  const rt = p.runTracker || _rt();
   const phases = createPhaseTracker(_auditEmit, _activeRunId);
   phases.enter(Phase.ANALYZE);
+  _emitPipelinePhase('pipeline.render_prepare.start', { runId: _activeRunId, tab: 'mmd', useMax: actualUseMax });
 
-  const inferFn = useMax ? provider.inferMax : provider.infer;
+  const inferFn = actualUseMax ? (stage, ctx) => p.inference.inferMax(stage, ctx) : (stage, ctx) => p.inference.infer(stage, ctx);
   const callStart = Date.now();
   const result = await inferFn('render_prepare', { userPrompt });
   stagesExecuted.push(useMax ? 'render_prepare_max' : 'render_prepare');
@@ -339,7 +364,7 @@ async function renderPrepare(source, profile, useMax = false) {
   if (rt) {
     const stageLabel = useMax ? 'render_prepare_max' : 'render_prepare';
     rt.addStage(_activeRunId, stageLabel);
-    const contextEst = rmBridge.estimateContextSize('render_prepare', userPrompt);
+    const contextEst = rmBridge.estimateContextSize('render_prepare', userPrompt, result.model);
     rt.recordAgentCall(_activeRunId, {
       stage: 'render_prepare', model: result.model, provider: result.provider,
       promptText: userPrompt, outputText: result.output || '',
@@ -485,20 +510,44 @@ function _rt() {
   return _runTrackerRef;
 }
 
-async function renderHPCGoT(source, profile, useMax = false) {
+function _resolvePorts(ports) {
+  if (ports && typeof ports === 'object' && (ports.inference || ports.compiler)) {
+    return ports;
+  }
+  try {
+    return require('./ports').createProductionPorts();
+  } catch {
+    return {
+      inference: provider,
+      compiler: { compile, validate: require('./mermaid-validator').validate },
+      runTracker: _rt(),
+    };
+  }
+}
+
+async function renderHPCGoT(source, profile, ports = null, useMax = false) {
+  let actualPorts = ports;
+  let actualUseMax = useMax;
+  if (typeof ports === 'boolean') {
+    actualUseMax = ports;
+    actualPorts = null;
+  }
+  const p = _resolvePorts(actualPorts);
   const stagesExecuted = [];
-  const inferFn = useMax ? provider.inferMax : provider.infer;
+  const inferFn = actualUseMax ? (stage, ctx) => p.inference.inferMax(stage, ctx) : (stage, ctx) => p.inference.infer(stage, ctx);
   const gotCfg = getGotConfig();
-  const rt = _rt();
+  const rt = p.runTracker || _rt();
   const phases = createPhaseTracker(_auditEmit, _activeRunId);
 
   let stateCount = 1;
   _audit('got:root_init', { stateBudget: gotCfg.stateBudget, depth: gotCfg.maxDepth });
+  _emitPipelinePhase('pipeline.hpc.start', { runId: _activeRunId, tab: 'mmd', useMax });
 
   // ════════════════════════════════════════════════════════════════════════
   // Phase: ANALYZE — extract facts, build diagram plan
   // ════════════════════════════════════════════════════════════════════════
   phases.enter(Phase.ANALYZE, { useMax });
+  _emitPipelinePhase('pipeline.hpc.analyze', { runId: _activeRunId, stage: 'fact_extraction', useMax });
   _audit('render:hpc_stage1', { stage: 'fact_extraction', useMax });
   if (rt) rt.addStage(_activeRunId, 'fact_extraction');
   const factUserPrompt = buildFactExtractionUserPrompt(source, profile);
@@ -507,7 +556,7 @@ async function renderHPCGoT(source, profile, useMax = false) {
   stagesExecuted.push('fact_extraction');
 
   if (rt) {
-    const factContextEst = rmBridge.estimateContextSize('fact_extraction', factUserPrompt);
+    const factContextEst = rmBridge.estimateContextSize('fact_extraction', factUserPrompt, factResult.model);
     rt.recordAgentCall(_activeRunId, {
       stage: 'fact_extraction', model: factResult.model, provider: factResult.provider,
       promptText: factUserPrompt, outputText: factResult.output || '',
@@ -558,6 +607,7 @@ async function renderHPCGoT(source, profile, useMax = false) {
   });
 
   // ---- Stage 2: Diagram Plan ---
+  _emitPipelinePhase('pipeline.hpc.plan', { runId: _activeRunId, stage: 'diagram_plan', entities: facts?.entities?.length });
   _audit('render:hpc_stage2', { stage: 'diagram_plan', entities: facts.entities.length });
   if (rt) rt.addStage(_activeRunId, 'diagram_plan');
   const planUserPrompt = buildDiagramPlanUserPrompt(facts, profile);
@@ -566,7 +616,7 @@ async function renderHPCGoT(source, profile, useMax = false) {
   stagesExecuted.push('diagram_plan');
 
   if (rt) {
-    const planContextEst = rmBridge.estimateContextSize('diagram_plan', planUserPrompt);
+    const planContextEst = rmBridge.estimateContextSize('diagram_plan', planUserPrompt, planResult.model);
     rt.recordAgentCall(_activeRunId, {
       stage: 'diagram_plan', model: planResult.model, provider: planResult.provider,
       promptText: planUserPrompt, outputText: planResult.output || '',
@@ -595,6 +645,7 @@ async function renderHPCGoT(source, profile, useMax = false) {
   });
 
   // ---- Stage 3: 2-Branch Composition (GoT branching at composition level) ---
+  _emitPipelinePhase('pipeline.hpc.compose', { runId: _activeRunId, stage: 'composition', nodes: plan?.nodes?.length, edges: plan?.edges?.length, branches: 2 });
   _audit('render:hpc_stage3', { stage: 'composition', nodes: plan.nodes.length, edges: plan.edges.length, branches: 2 });
   const compUserPrompt = buildCompositionUserPrompt(plan, facts);
 
@@ -622,8 +673,8 @@ async function renderHPCGoT(source, profile, useMax = false) {
 
   if (rt) {
     const compLatency = Date.now() - compCallStart;
-    const compContextEstA = rmBridge.estimateContextSize('composition', compUserPrompt);
-    const compContextEstB = rmBridge.estimateContextSize('composition', compUserPrompt + branchBDirective);
+    const compContextEstA = rmBridge.estimateContextSize('composition', compUserPrompt, compResultA.model);
+    const compContextEstB = rmBridge.estimateContextSize('composition', compUserPrompt + branchBDirective, compResultB.model);
     rt.recordAgentCall(_activeRunId, {
       stage: 'composition', role: 'branch_a', model: compResultA.model, provider: compResultA.provider,
       promptText: compUserPrompt, outputText: compResultA.output || '',
@@ -663,6 +714,7 @@ async function renderHPCGoT(source, profile, useMax = false) {
   // Phase: VALIDATE — score branches via HPC (structural + invariant)
   // ════════════════════════════════════════════════════════════════════════
   phases.enter(Phase.VALIDATE);
+  _emitPipelinePhase('pipeline.hpc.validate', { runId: _activeRunId, stage: 'validate' });
 
   const scoreA = candidateA ? computeHPCScore(candidateA, facts) : { score: 0, sv: 0, ic: 0 };
   const scoreB = candidateB ? computeHPCScore(candidateB, facts) : { score: 0, sv: 0, ic: 0 };
@@ -695,6 +747,7 @@ async function renderHPCGoT(source, profile, useMax = false) {
   const survivors = [];
   if (candidateA && scoreA.score >= softTau) survivors.push({ mmd: candidateA, score: scoreA, provider: compResultA.provider, label: 'A' });
   if (candidateB && scoreB.score >= softTau) survivors.push({ mmd: candidateB, score: scoreB, provider: compResultB.provider, label: 'B' });
+  _emitPipelinePhase('pipeline.hpc.select', { runId: _activeRunId, stage: 'select', survivors: survivors.length });
   _audit('got:prune', { kept: survivors.length, total: 2, tau: softTau });
 
   if (survivors.length === 0) {
@@ -711,6 +764,7 @@ async function renderHPCGoT(source, profile, useMax = false) {
   // Phase: MERGE — terminal merge of surviving branches
   // ════════════════════════════════════════════════════════════════════════
   phases.enter(Phase.MERGE, { survivorCount: survivors.length });
+  _emitPipelinePhase('pipeline.hpc.merge', { runId: _activeRunId, stage: 'merge', survivors: survivors?.length });
 
   if (survivors.length >= 2 && gotCfg.mergeEnabled) {
     _audit('got:merge_eval', { candidateCount: survivors.length });
@@ -775,7 +829,7 @@ async function renderHPCGoT(source, profile, useMax = false) {
 
     if (rt) {
       rt.addStage(_activeRunId, `semantic_repair_${repairAttempt}`);
-      const repairContextEst = rmBridge.estimateContextSize('semantic_repair', repairUserPrompt);
+      const repairContextEst = rmBridge.estimateContextSize('semantic_repair', repairUserPrompt, repairResult.model);
       rt.recordAgentCall(_activeRunId, {
         stage: 'semantic_repair', model: repairResult.model, provider: repairResult.provider,
         promptText: repairUserPrompt, outputText: repairResult.output || '',
@@ -823,6 +877,7 @@ async function renderHPCGoT(source, profile, useMax = false) {
   // Phase: OUTPUT — compute structural signature, assemble protocol result
   // ════════════════════════════════════════════════════════════════════════
   phases.enter(Phase.OUTPUT);
+  _emitPipelinePhase('pipeline.hpc.output', { runId: _activeRunId, stage: 'output' });
 
   // Structural signature: first-class compiler artifact
   let signature = null;
@@ -938,7 +993,7 @@ async function renderMaxUpgrade(source, profile) {
   const stagesExecuted = [...baselineStages, 'max_composition'];
 
   if (rt) {
-    const maxContextEst = rmBridge.estimateContextSize('max_composition', maxUserPrompt);
+    const maxContextEst = rmBridge.estimateContextSize('max_composition', maxUserPrompt, maxResult.model);
     rt.recordAgentCall(_activeRunId, {
       stage: 'max_composition', model: maxResult.model, provider: maxResult.provider,
       promptText: maxUserPrompt, outputText: maxResult.output || '',
@@ -1101,7 +1156,14 @@ function _extractLineNumber(errorStr) {
   return m ? parseInt(m[1], 10) : null;
 }
 
-async function decomposeAndRender(source, profile, useMax = false) {
+async function decomposeAndRender(source, profile, ports = null, useMax = false) {
+  let actualPorts = ports;
+  let actualUseMax = useMax;
+  if (typeof ports === 'boolean') {
+    actualUseMax = ports;
+    actualPorts = null;
+  }
+  const p = _resolvePorts(actualPorts);
   const stagesExecuted = [];
   const fsp = require('node:fs/promises');
   const nodePath = require('node:path');
@@ -1110,19 +1172,19 @@ async function decomposeAndRender(source, profile, useMax = false) {
     buildDecomposeUserPrompt, buildRepairFromTraceUserPrompt,
     buildMergeCompositionUserPrompt,
   } = require('./axiom-prompts');
-  const inferFn = useMax ? provider.inferMax : provider.infer;
-  const rt = _rt();
+  const inferFn = actualUseMax ? (stage, ctx) => p.inference.inferMax(stage, ctx) : (stage, ctx) => p.inference.infer(stage, ctx);
+  const rt = p.runTracker || _rt();
 
   _audit('decompose:start', { useMax });
   if (rt) rt.addStage(_activeRunId, 'decompose');
 
   const decomposePrompt = buildDecomposeUserPrompt(source, profile);
   const decompCallStart = Date.now();
-  const decomposeResult = await provider.infer('decompose', { userPrompt: decomposePrompt });
+  const decomposeResult = await inferFn('decompose', { userPrompt: decomposePrompt });
   stagesExecuted.push('decompose');
 
   if (rt) {
-    const decompContextEst = rmBridge.estimateContextSize('decompose', decomposePrompt);
+    const decompContextEst = rmBridge.estimateContextSize('decompose', decomposePrompt, decomposeResult.model);
     rt.recordAgentCall(_activeRunId, {
       stage: 'decompose', model: decomposeResult.model, provider: decomposeResult.provider,
       promptText: decomposePrompt, outputText: decomposeResult.output || '',
@@ -1173,19 +1235,19 @@ async function decomposeAndRender(source, profile, useMax = false) {
         prep.mmdSource, errorStr, viewShadow, viewDesc,
         { lineNumber, priorAttempts: compileOut.attempts, deterministicChanges: compileOut.repairChanges },
       );
-      const repairResult = await provider.infer('repair_from_trace', { userPrompt: tracePrompt });
+      const repairResult = await inferFn('repair_from_trace', { userPrompt: tracePrompt });
 
       if (repairResult.output) {
         const repairedCompile = await compileWithRetry(repairResult.output, outputDir, 'subview');
         if (repairedCompile.result.ok) {
-          const repairedScore = _scoreSubView(repairedCompile.mmdSource, profile.shadow);
+          const repairedScore = _scoreSubView(repairedCompile.mmdSource, profile?.shadow);
           return { mmdSource: repairedCompile.mmdSource, score: repairedScore.composite, scoreFactors: repairedScore, viewName: view.viewName, viewSlug, outputDir, compileResult: repairedCompile.result, stages: [`render_subview:${view.viewName || 'unnamed'}`, 'repair_from_trace'] };
         }
       }
       return { mmdSource: prep.mmdSource, score: 0.0, scoreFactors: null, viewName: view.viewName, viewSlug, outputDir, compileResult: compileOut.result, stages: [`render_subview:${view.viewName || 'unnamed'}`] };
     }
 
-    const viewScore = _scoreSubView(compileOut.mmdSource, profile.shadow);
+    const viewScore = _scoreSubView(compileOut.mmdSource, profile?.shadow);
     return { mmdSource: compileOut.mmdSource, score: viewScore.composite, scoreFactors: viewScore, viewName: view.viewName, viewSlug, outputDir, compileResult: compileOut.result, stages: [`render_subview:${view.viewName || 'unnamed'}`] };
   }
 
@@ -1248,7 +1310,7 @@ async function decomposeAndRender(source, profile, useMax = false) {
 
     let mergeCallId = null;
     if (rt) {
-      const mergeContextEst = rmBridge.estimateContextSize('merge_composition', mergePrompt);
+      const mergeContextEst = rmBridge.estimateContextSize('merge_composition', mergePrompt, mergeResult.model);
       mergeCallId = rt.recordAgentCall(_activeRunId, {
         stage: 'merge_composition', model: mergeResult.model, provider: mergeResult.provider,
         promptText: mergePrompt, outputText: mergeResult.output || '',
@@ -1263,7 +1325,7 @@ async function decomposeAndRender(source, profile, useMax = false) {
     if (mergeResult.output) {
       const contract = _enforceMmdContract(mergeResult.output);
       if (contract.mmd) {
-        const mergeScore = _scoreSubView(contract.mmd, profile.shadow);
+        const mergeScore = _scoreSubView(contract.mmd, profile?.shadow);
         const bestSingleScore = results[0].score;
 
         logger.info('decompose.merge_scored', {
@@ -1425,6 +1487,8 @@ async function route(source, options = {}) {
   let enhanceMeta = null;
   let enhancerUp = false;
 
+  _emitPipelinePhase('route.start', { content_state: state, enhance, runId: _activeRunId });
+
   if (enhance) {
     enhancerUp = await enhancerBridge.isAvailable();
   }
@@ -1561,11 +1625,15 @@ async function route(source, options = {}) {
         mmdSource = extracted;
         stagesExecuted.push('best_effort_extract');
       } else {
-        throw new RouterError(
-          'extraction_failed',
-          'Could not extract a valid Mermaid diagram from the mixed input. ' +
-          'Enable Enhance for intelligent repair, or paste cleaner Mermaid source.',
-        );
+        // Fall back to local text-to-Mermaid conversion instead of throwing.
+        // The agent's draft is often markdown prose that gets classified as
+        // hybrid because it contains arrows or node-like syntax in sentences.
+        // Throwing here kills the entire preview render — better to produce
+        // a basic Mermaid diagram and let the user refine it.
+        logger.warn('route.hybrid_fallback', { reason: 'bestEffortExtract returned null, using localTextToMmd' });
+        const shadow = extractShadow(source);
+        mmdSource = localTextToMmd(source, shadow);
+        stagesExecuted.push('hybrid_local_fallback');
       }
     }
     return buildResult(mmdSource, state, enhanced, enhanceMeta, stagesExecuted, startMs, source);

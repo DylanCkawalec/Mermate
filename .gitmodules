@@ -1,3 +1,6 @@
 [submodule "vendor/warp-engine"]
 	path = vendor/warp-engine
 	url = https://github.com/DylanCkawalec/warp-engine.git
+[submodule "specula-engine"]
+	path = specula-engine
+	url = https://github.com/DylanCkawalec/Specula.git

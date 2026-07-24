@@ -45,7 +45,7 @@ function _load() {
     const legacyKey = e[`ARCHITECT_AI_${i}_API_KEY`] || '';
     const apiKey = (legacyKey && !legacyKey.startsWith('{')) ? legacyKey : sharedApiKey;
 
-    const model   = e[`ARCHITECT_AI_${i}_MODEL`] || 'gpt-4o';
+    const model   = e[`ARCHITECT_AI_${i}_MODEL`] || 'gpt-5.6-terra';
     const domain  = e[`ARCHITECT_AI_${i}_DOMAIN`] || 'general';
     const tier    = e[`ARCHITECT_AI_${i}_TIER`] || 'worker';
     const enabled = ['true', '1', 'yes'].includes(

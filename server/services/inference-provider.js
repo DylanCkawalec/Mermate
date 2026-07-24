@@ -38,10 +38,91 @@ const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL
   || OPENAI_DIRECT_URL;
 const _useDirectFallback = OPENAI_BASE_URL !== OPENAI_DIRECT_URL;
 
+// When the primary gateway (Opseeq) fails, fall back to the real OpenAI API.
+// The Mermate model aliases (gpt-5.6-*) are not real OpenAI IDs, so map them
+// to a known working model and strip parameters that only reasoning models accept.
+const OPENAI_DIRECT_FALLBACK_MODEL = process.env.OPENAI_DIRECT_FALLBACK_MODEL || 'gpt-4o';
+
+function _isMermateAlias(model) {
+  return /^gpt-5\./i.test(model || '') || /\b(sol|terra|luna)\b/i.test(model || '');
+}
+
+function _normalizeDirectFallbackModel(model) {
+  if (OPENAI_DIRECT_FALLBACK_MODEL && _isMermateAlias(model)) {
+    return OPENAI_DIRECT_FALLBACK_MODEL;
+  }
+  return model;
+}
+
+function _isReasoningModel(model) {
+  return /^o[1-9]/i.test(model || '') || /^o3/i.test(model || '');
+}
+
 // Shared trace ID — set by input-router.js via setTraceId() so every
 // inference call correlates with the MERMATE run in Opseeq's trace.
 let _traceId = null;
 function setTraceId(id) { _traceId = id; _fallbackEvents.length = 0; }
+
+// Forward Reasoning Memory — per-run accumulator of agent insights.
+// Each stage appends a compact reasoning summary that downstream stages
+// receive as part of their system prompt. This creates the shared
+// "reasoning log" that lets GoT agents communicate across the pipeline.
+//
+// Structure: [{ stage, model, insight, timestamp }]
+// The insight is a 1-3 sentence summary of what the agent determined
+// (entities found, decisions made, invariants checked, failures detected).
+const _reasoningMemory = [];
+const REASONING_MEMORY_MAX_ENTRIES = 8;
+const REASONING_MEMORY_MAX_CHARS = 4000;
+
+function clearReasoningMemory() { _reasoningMemory.length = 0; }
+
+function appendReasoningMemory(stage, model, output) {
+  if (!output || output.length < 50) return;
+  // Extract a compact insight from the output
+  let insight = '';
+  // For JSON outputs, extract key structural facts
+  if (output.trim().startsWith('{') || output.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(output.trim().replace(/^```json\s*|\s*```$/g, ''));
+      if (parsed.entities) insight = `Found ${parsed.entities.length} entities, ${(parsed.relationships || []).length} relationships`;
+      else if (parsed.nodes) insight = `Planned ${parsed.nodes.length} nodes, ${(parsed.edges || []).length} edges, ${(parsed.subgraphs || []).length} subgraphs`;
+      else if (parsed.viewName) insight = `Decomposed view: ${parsed.viewName}`;
+      else insight = output.slice(0, 200).replace(/\n/g, ' ');
+    } catch {
+      insight = output.slice(0, 200).replace(/\n/g, ' ');
+    }
+  } else {
+    // For text outputs (Mermaid, TLA+), extract structural summary
+    const lines = output.split('\n').filter(l => l.trim() && !l.trim().startsWith('%%') && !l.trim().startsWith('---'));
+    const nodeCount = (output.match(/\[[\w"' ]+\]|\([\w"' ]+\)|\{[\w"' ]+\}/g) || []).length;
+    const edgeCount = (output.match(/-->|-.->|==>/g) || []).length;
+    if (nodeCount > 0 || edgeCount > 0) {
+      insight = `Generated ${nodeCount} nodes, ${edgeCount} edges`;
+    } else {
+      insight = lines.slice(0, 3).join(' ').slice(0, 200);
+    }
+  }
+
+  _reasoningMemory.push({ stage, model, insight, timestamp: Date.now() });
+  // Trim to max entries, keeping most recent
+  while (_reasoningMemory.length > REASONING_MEMORY_MAX_ENTRIES) {
+    _reasoningMemory.shift();
+  }
+}
+
+function getReasoningMemoryBlock() {
+  if (_reasoningMemory.length === 0) return '';
+  const lines = _reasoningMemory.map(e =>
+    `[${e.stage}|${e.model}] ${e.insight}`
+  );
+  const block = lines.join('\n');
+  // Truncate to max chars, keeping most recent
+  if (block.length > REASONING_MEMORY_MAX_CHARS) {
+    return block.slice(-REASONING_MEMORY_MAX_CHARS);
+  }
+  return block;
+}
 
 // Architecture depth tier for the active run — `shallow` | `medium` | `deep`.
 // Set by render.js before the pipeline starts; cleared in `finally`.
@@ -58,16 +139,58 @@ const _fallbackEvents = [];
 function getFallbackEvents() { return _fallbackEvents.slice(); }
 function clearFallbackEvents() { _fallbackEvents.length = 0; }
 
+// ---- Inference activity tracker --------------------------------------------
+// Let the Opseeq lifecycle manager know the server is actively using the
+// premium provider so it does not shut the gateway down during a run.
+let _lastInferenceAt = Date.now();
+let _activeInferenceCount = 0;
+function touchInferenceActivity() { _lastInferenceAt = Date.now(); }
+function getLastInferenceAt() { return _lastInferenceAt; }
+function getActiveInferenceCount() { return _activeInferenceCount; }
+
+// ---- Trace helpers --------------------------------------------------------
+// Emit a single compact inference.trace event for every provider attempt.
+// This lets the OODA universal tracer correlate calls, providers, models,
+// latencies, and failures without parsing verbose provider.* events.
+
+function _classifyInferenceError(error) {
+  if (!error) return 'ok';
+  const e = String(error).toLowerCase();
+  if (e.includes('timeout') || e.includes('abort')) return 'timeout';
+  if (e.includes('429') || e.includes('rate') || e.includes('too many')) return 'rate_limit';
+  if (e.includes('parse') || e.includes('json')) return 'parse';
+  if (e.includes('schema') || e.includes('contract')) return 'schema';
+  if (e.includes('exhausted') || e.includes('unavailable') || e.includes('enotfound')) return 'provider_exhausted';
+  if (e.includes('refus')) return 'model_refusal';
+  return 'unknown';
+}
+
+function _emitInferenceTrace({ stage, provider, model, result, latencyMs, error, outputLen, traceId }) {
+  const errorClass = _classifyInferenceError(error);
+  const payload = {
+    stage,
+    provider,
+    model: model || 'unknown',
+    result: result || (error ? 'error' : 'empty'),
+    latencyMs,
+    error_class: errorClass,
+  };
+  if (outputLen != null) payload.outputLen = outputLen;
+  if (error) payload.error = String(error).slice(0, 120);
+  if (traceId || _traceId) payload.traceId = traceId || _traceId;
+  logger.info('inference.trace', payload);
+}
+
 // Tiered model pool — each stage picks the right tier
 const MODELS = Object.freeze({
   // Orchestrator / final synthesis — most capable, slowest
-  orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || process.env.MERMATE_AI_MAX_MODEL || 'gpt-4o',
+  orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || process.env.MERMATE_AI_MAX_MODEL || 'gpt-5.6-sol',
   // Worker — primary reasoning, branch exploration, enhance
-  worker:       process.env.MERMATE_WORKER_MODEL       || process.env.MERMATE_AI_MODEL       || 'gpt-4o',
+  worker:       process.env.MERMATE_WORKER_MODEL       || process.env.MERMATE_AI_MODEL       || 'gpt-5.6-terra',
   // Fast structured — JSON extraction, routing, repair, narration
-  fast:         process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-4o-mini',
+  fast:         process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-5.6-luna',
   // Validator / router — cheap scoring, suggestions
-  nano:         process.env.MERMATE_ROUTER_MODEL       || 'gpt-4o-mini',
+  nano:         process.env.MERMATE_ROUTER_MODEL       || 'gpt-5.6-luna',
   // Image generation
   image:        process.env.MERMATE_IMAGE_MODEL        || 'gpt-image-1',
 });
@@ -88,24 +211,241 @@ const MAX_RETRIES          = parseInt(process.env.MERMATE_MAX_RETRIES || '2', 10
 
 // P3: Per-stage model routing — each stage gets the optimal model tier
 const STAGE_MODEL_MAP = Object.freeze({
-  fact_extraction:     MODELS.worker,       // MAX-preferred: richer fact extraction via gpt-5.2
-  diagram_plan:        MODELS.worker,       // MAX-preferred: better plan structure via gpt-5.2
-  composition:         MODELS.worker,       // creative Mermaid — gpt-5.2
-  semantic_repair:     MODELS.fast,         // targeted JSON fix — gpt-4.1-mini
-  copilot_suggest:     MODELS.nano,         // short completion — gpt-4.1-nano
-  copilot_enhance:     MODELS.worker,       // full enhancement — gpt-5.2
-  decompose:           MODELS.worker,       // multi-view reasoning — gpt-5.2
-  render_prepare:      MODELS.worker,       // one-shot Mermaid — gpt-5.2
-  model_repair:        MODELS.fast,         // targeted fix — gpt-4.1-mini
-  max_composition:     MODELS.orchestrator, // final quality — gpt-5.4
-  merge_composition:   MODELS.orchestrator, // merge all subviews into mega-diagram — gpt-5.4
-  repair_from_trace:   MODELS.fast,         // error-trace repair — gpt-4.1-mini
-  compose_ts:          MODELS.worker,       // runtime synthesis — gpt-5.2
-  repair_ts:           MODELS.fast,         // compile/test repair — gpt-4.1-mini
-  validate_ts:         MODELS.fast,         // validator commentary — gpt-4.1-mini
-  compose_rust:        MODELS.worker,       // Rust codegen — gpt-5.2
-  repair_rust:         MODELS.fast,         // cargo error repair — gpt-4.1-mini
+  fact_extraction:     MODELS.worker,       // richer fact extraction — gpt-5.6-terra
+  diagram_plan:        MODELS.worker,       // better plan structure — gpt-5.6-terra
+  composition:         MODELS.worker,       // creative Mermaid — gpt-5.6-terra
+  semantic_repair:     MODELS.fast,         // targeted JSON fix — gpt-5.6-luna
+  copilot_suggest:     MODELS.nano,         // short completion — gpt-5.6-luna
+  copilot_enhance:     MODELS.worker,       // full enhancement — gpt-5.6-terra
+  decompose:           MODELS.worker,       // multi-view reasoning — gpt-5.6-terra
+  render_prepare:      MODELS.worker,       // one-shot Mermaid — gpt-5.6-terra
+  model_repair:        MODELS.fast,         // targeted fix — gpt-5.6-luna
+  max_composition:     MODELS.orchestrator, // final quality — gpt-5.6-sol
+  merge_composition:   MODELS.orchestrator, // merge all subviews — gpt-5.6-sol
+  repair_from_trace:   MODELS.fast,         // error-trace repair — gpt-5.6-luna
+  compose_ts:          MODELS.worker,       // runtime synthesis — gpt-5.6-terra
+  repair_ts:           MODELS.fast,         // compile/test repair — gpt-5.6-luna
+  validate_ts:         MODELS.fast,         // validator commentary — gpt-5.6-luna
+  compose_rust:        MODELS.worker,       // Rust codegen — gpt-5.6-terra
+  repair_rust:         MODELS.fast,         // cargo error repair — gpt-5.6-luna
+  compose_tla:         MODELS.orchestrator, // formal spec synthesis — gpt-5.6-sol
+  repair_tla:          MODELS.fast,         // SANY error repair — gpt-5.6-luna
 });
+
+// Per-stage reasoning effort for GPT-5.6 models.
+// Supports: none, low, medium, high, xhigh, max.
+// Lower effort = lower latency + cost; higher effort = deeper reasoning.
+const STAGE_REASONING_MAP = Object.freeze({
+  fact_extraction:     'low',       // simple extraction, low latency
+  diagram_plan:        'medium',    // structural reasoning needed
+  composition:         'high',      // creative Mermaid generation
+  max_composition:     'high',      // final quality synthesis
+  merge_composition:   'high',      // complex merge of subviews
+  copilot_enhance:     'medium',    // balanced enhancement
+  copilot_suggest:     'low',       // fast autocomplete
+  semantic_repair:     'low',       // targeted fix
+  render_prepare:      'high',      // one-shot render quality
+  decompose:           'medium',    // multi-view reasoning
+  model_repair:        'low',       // targeted fix
+  repair_from_trace:   'medium',    // error-trace analysis
+  compose_ts:          'high',      // code generation
+  repair_ts:           'medium',    // compile error fixing
+  validate_ts:         'low',       // validation commentary
+  compose_rust:        'high',      // Rust codegen
+  repair_rust:         'medium',    // cargo error repair
+  compose_tla:         'high',      // formal specification — deep rigor, balanced latency
+  repair_tla:          'medium',    // targeted SANY error fixing
+});
+
+// Stages that produce structured JSON output.
+// Tier 1: json_schema — exact schema enforced by the API, zero parsing failures.
+// Tier 2: json_object — valid JSON guaranteed, shape validated downstream.
+// Text stages use no response_format — they need free-form reasoning output.
+const STAGE_JSON_SCHEMA = new Set([
+  'fact_extraction',
+  'diagram_plan',
+  'decompose',
+  'validate_ts',
+]);
+
+const STAGE_JSON_OBJECT = new Set([
+  'semantic_repair',
+  'copilot_enhance',
+  'compose_ts',
+  'repair_ts',
+]);
+
+// Union for backward compat — any stage that needs structured output
+const STAGE_STRUCTURED_OUTPUT = new Set([...STAGE_JSON_SCHEMA, ...STAGE_JSON_OBJECT]);
+
+// JSON schemas for Tier 1 stages — enforced by OpenAI structured outputs.
+// This eliminates JSON parsing failures and reduces reasoning overhead
+// (the model doesn't waste tokens guessing the output shape).
+const STAGE_JSON_SCHEMAS = {
+  fact_extraction: {
+    type: 'object',
+    properties: {
+      entities: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            type: { type: 'string', enum: ['actor', 'service', 'store', 'gateway', 'broker', 'cache', 'queue', 'external', 'decision', 'boundary'] },
+            responsibility: { type: 'string' },
+          },
+          required: ['name', 'type', 'responsibility'],
+          additionalProperties: false,
+        },
+      },
+      relationships: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            from: { type: 'string' },
+            to: { type: 'string' },
+            verb: { type: 'string' },
+            edgeType: { type: 'string' },
+          },
+          required: ['from', 'to', 'verb', 'edgeType'],
+          additionalProperties: false,
+        },
+      },
+      boundaries: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            members: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['name', 'members'],
+          additionalProperties: false,
+        },
+      },
+      failurePaths: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            trigger: { type: 'string' },
+            condition: { type: 'string' },
+            handler: { type: 'string' },
+            recovery: { type: 'string' },
+          },
+          required: ['trigger', 'condition', 'handler', 'recovery'],
+          additionalProperties: false,
+        },
+      },
+      diagramType: { type: 'string', enum: ['flowchart', 'sequence', 'state', 'er', 'gantt', 'mindmap'] },
+    },
+    required: ['entities', 'relationships', 'boundaries', 'failurePaths', 'diagramType'],
+    additionalProperties: false,
+  },
+
+  diagram_plan: {
+    type: 'object',
+    properties: {
+      directive: { type: 'string' },
+      nodes: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            label: { type: 'string' },
+            shape: { type: 'string', enum: ['rectangle', 'stadium', 'cylinder', 'diamond', 'hexagon', 'rounded'] },
+            entityRef: { type: 'string' },
+          },
+          required: ['id', 'label', 'shape', 'entityRef'],
+          additionalProperties: false,
+        },
+      },
+      edges: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            from: { type: 'string' },
+            to: { type: 'string' },
+            label: { type: 'string' },
+            style: { type: 'string', enum: ['solid', 'dashed', 'thick'] },
+            relationRef: { type: 'string' },
+          },
+          required: ['from', 'to', 'label', 'style', 'relationRef'],
+          additionalProperties: false,
+        },
+      },
+      subgraphs: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            title: { type: 'string' },
+            nodeIds: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['id', 'title', 'nodeIds'],
+          additionalProperties: false,
+        },
+      },
+      classDefs: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            style: { type: 'string' },
+          },
+          required: ['name', 'style'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['directive', 'nodes', 'edges', 'subgraphs', 'classDefs'],
+    additionalProperties: false,
+  },
+
+  decompose: {
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: {
+        viewName: { type: 'string' },
+        viewDescription: { type: 'string' },
+        suggestedType: { type: 'string' },
+        entities: { type: 'array', items: { type: 'string' } },
+        relationships: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['viewName', 'viewDescription', 'suggestedType', 'entities', 'relationships'],
+      additionalProperties: false,
+    },
+  },
+
+  validate_ts: {
+    type: 'object',
+    properties: {
+      valid: { type: 'boolean' },
+      issues: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            severity: { type: 'string', enum: ['error', 'warning', 'info'] },
+            message: { type: 'string' },
+            location: { type: 'string' },
+          },
+          required: ['severity', 'message'],
+          additionalProperties: false,
+        },
+      },
+      summary: { type: 'string' },
+    },
+    required: ['valid', 'issues', 'summary'],
+    additionalProperties: false,
+  },
+};
 
 // Stages that benefit most from local AI bootstrapping. The premium chain
 // remains a fallback when local providers are unavailable, but giving local
@@ -145,24 +485,71 @@ function _selectModelForStage(stage) {
   return baseModel;
 }
 
-// P5: Per-stage token caps — right-size output budget to reduce waste
+function _selectReasoningEffort(stage) {
+  return STAGE_REASONING_MAP[stage] || 'medium';
+}
+
+function _isStructuredStage(stage) {
+  return STAGE_STRUCTURED_OUTPUT.has(stage);
+}
+
+// Resolve the response_format for a given stage.
+// Returns { type: 'json_schema', json_schema: { ... } } for Tier 1 stages,
+// { type: 'json_object' } for Tier 2, or undefined for text stages.
+function _resolveResponseFormat(stage, override) {
+  if (override) return override;
+  if (STAGE_JSON_SCHEMA.has(stage) && STAGE_JSON_SCHEMAS[stage]) {
+    return {
+      type: 'json_schema',
+      json_schema: {
+        name: stage,
+        schema: STAGE_JSON_SCHEMAS[stage],
+        strict: true,
+      },
+    };
+  }
+  if (STAGE_JSON_OBJECT.has(stage)) {
+    return { type: 'json_object' };
+  }
+  return undefined;
+}
+
+// P5: Per-stage token caps — right-size output budget to reduce waste.
+// These caps include reasoning tokens for GPT-5.6 reasoning models.
+// OpenAI recommends reserving at least 25K tokens for xhigh reasoning.
+// Stages using xhigh/high reasoning get larger budgets; fast stages get less.
 const STAGE_TOKEN_CAP = Object.freeze({
-  fact_extraction:     2048,
-  diagram_plan:        3072,
-  composition:         8192,
-  semantic_repair:     4096,
-  copilot_suggest:     128,
-  copilot_enhance:     8192,
-  decompose:           6144,
-  render_prepare:      8192,
-  model_repair:        4096,
-  max_composition:     16384,
-  merge_composition:   16384,
-  repair_from_trace:   4096,
-  compose_ts:          16384,
-  repair_ts:           8192,
-  validate_ts:         4096,
+  fact_extraction:     8192,   // structured JSON — low reasoning
+  diagram_plan:        8192,   // structured JSON — low reasoning
+  composition:         16384,  // creative Mermaid — medium reasoning
+  semantic_repair:     8192,   // targeted JSON fix — low reasoning
+  copilot_suggest:     1024,   // short completion — minimal reasoning
+  copilot_enhance:     16384,  // full enhancement — medium reasoning
+  decompose:           12288,  // multi-view reasoning — medium
+  render_prepare:      16384,  // one-shot Mermaid — medium
+  model_repair:        8192,   // targeted fix — low reasoning
+  max_composition:     32768,  // final quality — high reasoning, needs room
+  merge_composition:   32768,  // merge all subviews — high reasoning
+  repair_from_trace:   8192,   // error-trace repair — low
+  compose_ts:          32768,  // runtime synthesis — high reasoning
+  repair_ts:           16384,  // compile/test repair — medium
+  validate_ts:         8192,   // validator commentary — low
+  compose_tla:         32768,  // formal spec synthesis — xhigh reasoning, needs 25K+
+  repair_tla:          16384,  // SANY error repair — medium reasoning
 });
+
+// Reasoning overhead multiplier — reasoning models burn tokens on invisible reasoning.
+// Multiply the stage cap by this factor to ensure enough budget for output + reasoning.
+const REASONING_TOKEN_MULTIPLIER = 2.0;
+
+function _resolveTokenLimit(stage, model) {
+  const baseCap = STAGE_TOKEN_CAP[stage] || 16384;
+  const isReasoningModel = catalog.usesCompletionTokens(model);
+  if (isReasoningModel) {
+    return Math.min(baseCap * REASONING_TOKEN_MULTIPLIER, 65536);
+  }
+  return Math.min(baseCap, 8192);
+}
 
 // ---- Health cache ---------------------------------------------------------
 
@@ -235,7 +622,7 @@ function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
  * @param {string} [opts.inputText] - input text for context size estimation
  * @returns {Promise<{content: string|null, actionTag: object|null}>}
  */
-async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix, rateEvents, extractContent, stage, inputText, traceId }) {
+async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix, rateEvents, extractContent, stage, inputText, traceId, reasoningEffort, responseFormat }) {
   let lastError = null;
   let actionTag = null;
   let _usedDirectFallback = false;
@@ -245,6 +632,10 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
   if (traceId) traceHeaders['X-Request-Id'] = traceId;
 
   const rawFetch = async () => {
+    const finalBody = { ...body };
+    if (reasoningEffort) finalBody.reasoning_effort = reasoningEffort;
+    if (responseFormat) finalBody.response_format = responseFormat;
+
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -253,7 +644,7 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
       try {
         const res = await fetch(url, {
           method: 'POST', headers: traceHeaders,
-          body: JSON.stringify(body),
+          body: JSON.stringify(finalBody),
           signal: controller.signal,
         });
 
@@ -270,9 +661,9 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
           });
         }
 
-        if (res.status === 429 || res.status === 503) {
+        if (res.status === 429 || res.status === 503 || (res.status >= 500 && res.status < 600)) {
           const retryAfterMs = _parseRetryAfter(res);
-          const eventType = res.status === 429 ? '429_rate_limit' : '503_overloaded';
+          const eventType = res.status === 429 ? '429_rate_limit' : `${res.status}_server_error`;
 
           logger.warn(`${logPrefix}.rate_limited`, {
             model, status: res.status, retryAfterMs,
@@ -308,7 +699,39 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
         }
 
         const data = await res.json();
-        return extractContent(data);
+
+        // Track prompt caching stats from API response
+        const usage = data.usage;
+        if (usage && (usage.prompt_tokens_details?.cached_tokens || usage.cache_write_tokens)) {
+          const cachedTokens = usage.prompt_tokens_details?.cached_tokens || 0;
+          const cacheWriteTokens = usage.cache_write_tokens || 0;
+          if (cachedTokens > 0 || cacheWriteTokens > 0) {
+            rateEvents.push({
+              type: 'prompt_cache',
+              cached_tokens: cachedTokens,
+              cache_write_tokens: cacheWriteTokens,
+              model,
+              stage: stage || logPrefix,
+            });
+            logger.info(`${logPrefix}.cache`, {
+              model, cached: cachedTokens, written: cacheWriteTokens,
+              stage: stage || logPrefix,
+            });
+          }
+        }
+
+        const content = extractContent(data);
+        if (!content && data.choices?.[0]) {
+          const choice = data.choices[0];
+          logger.warn(`${logPrefix}.empty_content`, {
+            model, stage: stage || logPrefix,
+            finish_reason: choice.finish_reason,
+            reasoning_tokens: data.usage?.completion_tokens_details?.reasoning_tokens,
+            completion_tokens: data.usage?.completion_tokens,
+            max_completion_tokens: finalBody.max_completion_tokens,
+          });
+        }
+        return content;
       } catch (err) {
         lastError = err;
         if (err.name === 'AbortError') {
@@ -353,12 +776,35 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
+      const finalBody = { ...body };
+      finalBody.model = _normalizeDirectFallbackModel(finalBody.model);
+      if (!_isReasoningModel(finalBody.model)) {
+        delete finalBody.reasoning_effort;
+        const tokenCap = finalBody.max_completion_tokens || finalBody.max_tokens || 4096;
+        finalBody.max_tokens = Math.min(tokenCap, 4096);
+        delete finalBody.max_completion_tokens;
+      }
+      if (reasoningEffort && _isReasoningModel(finalBody.model)) finalBody.reasoning_effort = reasoningEffort;
+      if (responseFormat) finalBody.response_format = responseFormat;
+
+      // OpenAI's json_object mode requires the word 'json' to appear in the
+      // conversation. Append a lowercase reminder if the prompt only uses 'JSON'.
+      if (finalBody.response_format?.type === 'json_object' && Array.isArray(finalBody.messages)) {
+        const hasJson = finalBody.messages.some(m => typeof m.content === 'string' && /json/i.test(m.content));
+        if (!hasJson) {
+          finalBody.messages = finalBody.messages.concat({ role: 'user', content: 'Return valid json.' });
+        }
+      }
+
       const res = await fetch(directUrl, {
         method: 'POST', headers: traceHeaders,
-        body: JSON.stringify(body),
+        body: JSON.stringify(finalBody),
         signal: controller.signal,
       });
-      if (res.ok) {
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        logger.warn(`${logPrefix}.direct_fallback_http_error`, { model: finalBody.model, status: res.status, body: errText.slice(0, 200) });
+      } else {
         const data = await res.json();
         const content = extractContent(data);
         if (content) {
@@ -381,10 +827,11 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
  * Includes 429/503 retry with exponential backoff.
  * @returns {Promise<{content: string|null, actionTag: object|null}>}
  */
-async function _callPremiumWithKey(apiKey, systemPrompt, userPrompt, modelOverride, timeoutMs, rateEvents, stage) {
+async function _callPremiumWithKey(apiKey, systemPrompt, userPrompt, modelOverride, timeoutMs, rateEvents, stage, reasoningEffort, responseFormat) {
   const model = modelOverride || PREMIUM_MODEL;
   const events = rateEvents || [];
-  const tokenParam = catalog.usesCompletionTokens(model) ? { max_completion_tokens: 16384 } : { max_tokens: 8192 };
+  const tokenLimit = _resolveTokenLimit(stage, model);
+  const tokenParam = catalog.usesCompletionTokens(model) ? { max_completion_tokens: tokenLimit } : { max_tokens: tokenLimit };
 
   return _fetchWithRetry({
     url: `${OPENAI_BASE_URL}/chat/completions`,
@@ -404,13 +851,15 @@ async function _callPremiumWithKey(apiKey, systemPrompt, userPrompt, modelOverri
     stage: stage || 'copilot_enhance',
     inputText: userPrompt,
     traceId: _traceId,
+    reasoningEffort: reasoningEffort || _selectReasoningEffort(stage),
+    responseFormat: responseFormat || _resolveResponseFormat(stage),
   });
 }
 
 /**
  * @returns {Promise<{content: string|null, actionTag: object|null}>}
  */
-async function _callPremium(systemPrompt, userPrompt, modelOverride, timeoutMs, maxTokensOverride, rateEvents, stage) {
+async function _callPremium(systemPrompt, userPrompt, modelOverride, timeoutMs, maxTokensOverride, rateEvents, stage, reasoningEffort, responseFormat) {
   const model = modelOverride || PREMIUM_MODEL;
   const timeout = timeoutMs || INFER_TIMEOUT_MS;
   const events = rateEvents || [];
@@ -438,7 +887,7 @@ async function _callPremium(systemPrompt, userPrompt, modelOverride, timeoutMs, 
     });
   }
 
-  const tokenLimit = maxTokensOverride || 16384;
+  const tokenLimit = maxTokensOverride || _resolveTokenLimit(stage, model);
   const tokenParam = catalog.usesCompletionTokens(model)
     ? { max_completion_tokens: tokenLimit }
     : { max_tokens: Math.min(tokenLimit, 8192) };
@@ -463,6 +912,8 @@ async function _callPremium(systemPrompt, userPrompt, modelOverride, timeoutMs, 
     stage: stage || 'copilot_enhance',
     inputText: userPrompt,
     traceId: _traceId,
+    reasoningEffort: reasoningEffort || _selectReasoningEffort(stage),
+    responseFormat: responseFormat || _resolveResponseFormat(stage),
   });
 }
 
@@ -545,13 +996,22 @@ async function _callEnhancer(systemPrompt, userPrompt, stage, extra) {
  * render stages prefer premium first.
  */
 async function infer(stage, context = {}) {
+  _activeInferenceCount++;
+  touchInferenceActivity();
+  try {
   const promptConfig = context.systemPrompt
     ? { system: context.systemPrompt, temperature: 0 }
     : buildPrompt(stage);
 
-  const systemPrompt = promptConfig.system;
+  let systemPrompt = promptConfig.system;
   const userPrompt = context.userPrompt || '';
   const rateEvents = [];
+
+  // Inject forward reasoning memory — compact context from prior pipeline stages
+  const memoryBlock = getReasoningMemoryBlock();
+  if (memoryBlock) {
+    systemPrompt = `${systemPrompt}\n\n[FORWARD REASONING MEMORY — prior agent insights from this pipeline run]\n${memoryBlock}`;
+  }
 
   const stageModel = _selectModelForStage(stage);
   const stageTokenCap = STAGE_TOKEN_CAP[stage] || undefined;
@@ -573,7 +1033,7 @@ async function infer(stage, context = {}) {
   }
 
   const providers = [
-    { name: 'premium',  ok: premiumOk,  call: () => _callPremium(systemPrompt, userPrompt, stageModel, undefined, stageTokenCap, rateEvents, stage), isPremium: true },
+    { name: 'premium',  ok: premiumOk,  call: () => _callPremium(systemPrompt, userPrompt, stageModel, undefined, stageTokenCap, rateEvents, stage, context.reasoningEffort, context.responseFormat), isPremium: true },
     { name: 'ollama',   ok: ollamaOk,   call: () => _callOllama(systemPrompt, userPrompt), isPremium: false },
     { name: 'enhancer', ok: enhancerOk, call: () => _callEnhancer(systemPrompt, userPrompt, stage, context.extra), isPremium: false },
   ];
@@ -594,7 +1054,10 @@ async function infer(stage, context = {}) {
       providers[2].ok = enhancerOk;
       if (!prov.ok) prov.ok = prov.name === 'ollama' ? ollamaOk : enhancerOk;
     }
-    if (!prov.ok) continue;
+    if (!prov.ok) {
+      _emitInferenceTrace({ stage, provider: prov.name, model: prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer'), result: 'skipped', latencyMs: 0, error: 'provider not available' });
+      continue;
+    }
 
     logger.info('provider.route', { provider: prov.name, stage, tier: prov.isPremium ? catalog.classifyTier(stageModel) : catalog.Tier.LOCAL });
     const callStart = Date.now();
@@ -606,6 +1069,7 @@ async function infer(stage, context = {}) {
 
     if (!output || !output.trim()) {
       logger.warn('provider.empty', { provider: prov.name, stage, ms: latencyMs });
+      _emitInferenceTrace({ stage, provider: prov.name, model: prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer'), result: 'empty', latencyMs });
       // On premium failure, trigger lazy local check for remaining chain items
       if (prov.isPremium && !_localChecked) {
         _localChecked = true;
@@ -618,14 +1082,19 @@ async function infer(stage, context = {}) {
 
     if (output.trim() === userPrompt.trim()) {
       logger.warn('provider.noop', { provider: prov.name, stage, ms: latencyMs });
+      _emitInferenceTrace({ stage, provider: prov.name, model: prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer'), result: 'noop', latencyMs, outputLen: output.length });
       continue;
     }
 
     const usedFallback = !!(prov.isPremium && callResult?.usedDirectFallback);
     logger.info('provider.ok', { provider: prov.name, stage, len: output.length, ms: latencyMs, model: prov.isPremium ? stageModel : undefined, tag: actionTag?.tag, usedDirectFallback: usedFallback || undefined });
+    const resolvedModel = prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer');
+    _emitInferenceTrace({ stage, provider: prov.name, model: resolvedModel, result: 'ok', latencyMs, outputLen: output.length });
+    // Append to forward reasoning memory for downstream stages
+    appendReasoningMemory(stage, resolvedModel, output);
     return {
       output: output.trim(), provider: prov.name, noOp: false, latencyMs,
-      model: prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer'),
+      model: resolvedModel,
       rateEvents: rateEvents.length ? rateEvents : undefined,
       actionTag,
       usedDirectFallback: usedFallback,
@@ -633,7 +1102,12 @@ async function infer(stage, context = {}) {
   }
 
   logger.warn('provider.exhausted', { stage });
+  _emitInferenceTrace({ stage, provider: 'none', model: 'none', result: 'error', latencyMs: 0, error: 'provider chain exhausted' });
   return { output: null, provider: 'none', noOp: true, latencyMs: 0, model: 'none', rateEvents: rateEvents.length ? rateEvents : undefined };
+  } finally {
+    _activeInferenceCount--;
+    touchInferenceActivity();
+  }
 }
 
 /**
@@ -641,6 +1115,9 @@ async function infer(stage, context = {}) {
  * Falls back to default premium, then Ollama, then local.
  */
 async function inferMax(stage, context = {}) {
+  _activeInferenceCount++;
+  touchInferenceActivity();
+  try {
   const maxModel = PREMIUM_MAX_MODEL || PREMIUM_MODEL;
   if (!PREMIUM_API_KEY) {
     logger.info('provider.max.no_api_key', { stage, fallback: 'infer' });
@@ -651,13 +1128,19 @@ async function inferMax(stage, context = {}) {
     ? { system: context.systemPrompt, temperature: 0 }
     : buildPrompt(stage);
 
-  const systemPrompt = promptConfig.system;
+  let systemPrompt = promptConfig.system;
   const userPrompt = context.userPrompt || '';
   const rateEvents = [];
 
+  // Inject forward reasoning memory — compact context from prior pipeline stages
+  const memoryBlock = getReasoningMemoryBlock();
+  if (memoryBlock) {
+    systemPrompt = `${systemPrompt}\n\n[FORWARD REASONING MEMORY — prior agent insights from this pipeline run]\n${memoryBlock}`;
+  }
+
   logger.info('provider.max.attempting', { model: maxModel, stage });
   const callStart = Date.now();
-  const callResult = await _callPremium(systemPrompt, userPrompt, maxModel, MAX_INFER_TIMEOUT_MS, undefined, rateEvents, stage);
+  const callResult = await _callPremium(systemPrompt, userPrompt, maxModel, MAX_INFER_TIMEOUT_MS, undefined, rateEvents, stage, context.reasoningEffort, context.responseFormat);
   const latencyMs = Date.now() - callStart;
   const output = callResult?.content;
   const actionTag = callResult?.actionTag;
@@ -665,6 +1148,9 @@ async function inferMax(stage, context = {}) {
   if (output && output.trim() && output.trim() !== userPrompt.trim()) {
     const usedFallback = !!callResult?.usedDirectFallback;
     logger.info('provider.max.success', { model: maxModel, stage, outputLen: output.length, latencyMs, rmTag: actionTag?.tag, usedDirectFallback: usedFallback || undefined });
+    _emitInferenceTrace({ stage, provider: `premium-max:${maxModel}`, model: maxModel, result: 'ok', latencyMs, outputLen: output.length });
+    // Append to forward reasoning memory for downstream stages
+    appendReasoningMemory(stage, maxModel, output);
     return {
       output: output.trim(), provider: `premium-max:${maxModel}`, noOp: false, latencyMs, model: maxModel,
       rateEvents: rateEvents.length ? rateEvents : undefined,
@@ -677,7 +1163,12 @@ async function inferMax(stage, context = {}) {
     logger.warn('provider.max.rate_limited_downgrade', { model: maxModel, stage, events: rateEvents.length });
   }
   logger.warn('provider.max.failed', { model: maxModel, stage, fallback: 'default_infer', latencyMs });
+  _emitInferenceTrace({ stage, provider: `premium-max:${maxModel}`, model: maxModel, result: 'error', latencyMs, error: 'max inference failed or returned unchanged input' });
   return infer(stage, context);
+  } finally {
+    _activeInferenceCount--;
+    touchInferenceActivity();
+  }
 }
 
 /**
@@ -731,8 +1222,12 @@ const ROLE_ALLOWED_STAGES = new Set([
  * @returns {Promise<{output: string|null, provider: string, noOp: boolean}>}
  */
 async function inferWithRole(stage, context, roleName) {
+  _activeInferenceCount++;
+  touchInferenceActivity();
+  try {
   if (!ROLE_ALLOWED_STAGES.has(stage)) {
     logger.info('provider.role.stage_blocked', { stage, roleName, reason: 'stage not allowed for role inference' });
+    _emitInferenceTrace({ stage, provider: `role:${roleName}`, model: 'none', result: 'error', latencyMs: 0, error: `stage ${stage} not allowed for role inference` });
     return infer(stage, context);
   }
 
@@ -741,12 +1236,14 @@ async function inferWithRole(stage, context, roleName) {
 
   if (!role || !role.enabled) {
     logger.info('provider.role.not_available', { roleName, found: !!role, enabled: role?.enabled });
+    _emitInferenceTrace({ stage, provider: `role:${roleName}`, model: 'none', result: 'error', latencyMs: 0, error: `role ${roleName} not found or disabled` });
     return infer(stage, context);
   }
 
   const apiKey = role.apiKey;
   if (!apiKey || apiKey.startsWith('{')) {
     logger.info('provider.role.no_valid_key', { roleName, reason: 'unresolved or empty key' });
+    _emitInferenceTrace({ stage, provider: `role:${roleName}`, model: role.model || 'unknown', result: 'error', latencyMs: 0, error: 'role has no valid api key' });
     return infer(stage, context);
   }
 
@@ -764,22 +1261,25 @@ async function inferWithRole(stage, context, roleName) {
   const rateEvents = [];
   const callStart = Date.now();
   try {
-    const callResult = await _callPremiumWithKey(apiKey, systemPrompt, userPrompt, model, INFER_TIMEOUT_MS, rateEvents, stage);
+    const callResult = await _callPremiumWithKey(apiKey, systemPrompt, userPrompt, model, INFER_TIMEOUT_MS, rateEvents, stage, context.reasoningEffort, context.responseFormat);
     const latencyMs = Date.now() - callStart;
     const output = callResult?.content;
     const actionTag = callResult?.actionTag;
 
     if (!output || !output.trim()) {
       logger.warn('provider.role.empty_output', { roleName, stage, latencyMs });
+      _emitInferenceTrace({ stage, provider: `role:${roleName}`, model, result: 'empty', latencyMs });
       return infer(stage, context);
     }
 
     if (output.trim() === userPrompt.trim()) {
       logger.warn('provider.role.no_op', { roleName, stage, latencyMs });
+      _emitInferenceTrace({ stage, provider: `role:${roleName}`, model, result: 'noop', latencyMs, outputLen: output.length });
       return infer(stage, context);
     }
 
     logger.info('provider.role.success', { roleName, model, stage, outputLen: output.length, latencyMs, rmTag: actionTag?.tag });
+    _emitInferenceTrace({ stage, provider: `role:${roleName}`, model, result: 'ok', latencyMs, outputLen: output.length });
     return {
       output: output.trim(), provider: `role:${roleName}:${model}`, noOp: false, latencyMs, model,
       rateEvents: rateEvents.length ? rateEvents : undefined,
@@ -788,12 +1288,36 @@ async function inferWithRole(stage, context, roleName) {
   } catch (err) {
     const latencyMs = Date.now() - callStart;
     logger.warn('provider.role.error', { roleName, stage, error: err.message, latencyMs });
+    _emitInferenceTrace({ stage, provider: `role:${roleName}`, model, result: 'error', latencyMs, error: err.message });
     return infer(stage, context);
   }
+} finally {
+    _activeInferenceCount--;
+    touchInferenceActivity();
+  }
+}
+
+function createRealInferenceProvider(config = {}) {
+  const apiKey = config.apiKey || PREMIUM_API_KEY;
+  const baseUrl = config.baseUrl || OPENAI_BASE_URL;
+
+  return {
+    infer: (stage, context) => infer(stage, context),
+    inferMax: (stage, context) => inferMax(stage, context),
+    inferWithRole: (stage, context, roleName) => inferWithRole(stage, context, roleName),
+    isMaxAvailable,
+    checkProviders,
+    apiKey,
+    baseUrl,
+  };
 }
 
 module.exports = {
   infer, inferMax, inferWithRole, checkProviders, isMaxAvailable,
   setTraceId, setDepthTier, getDepthTier,
   getFallbackEvents, clearFallbackEvents,
+  getLastInferenceAt, getActiveInferenceCount,
+  clearReasoningMemory, getReasoningMemoryBlock, appendReasoningMemory,
+  STAGE_JSON_SCHEMAS,
+  createRealInferenceProvider,
 };

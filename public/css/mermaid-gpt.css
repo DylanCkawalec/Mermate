@@ -20,6 +20,9 @@
   --danger: #ff6b6b;
   --danger-hover: #ee5a5a;
   --danger-bg: rgba(255, 107, 107, 0.1);
+  --success: #22c55e;
+  --warning: #e8820c;
+  --input-bg: #0a0a0a;
   --text: #f0f0f5;
   --text-secondary: #b0b0b8;
   --text-muted: #707078;
@@ -52,6 +55,19 @@ html, body {
 
 body {
   display: flex;
+}
+
+/* ==========================================================================
+   Keyboard focus — visible indicator on every interactive element
+   ========================================================================== */
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+[role="button"]:focus-visible,
+[role="switch"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* ==========================================================================
@@ -100,34 +116,40 @@ body {
   overflow-y: auto;
 }
 
-/* Sidebar flip (diagrams front / Opseeq chat back) */
+/* Sidebar panels (diagrams front / Opseeq chat back) — simple show/hide,
+   no 3D transforms, screen-reader and keyboard friendly. */
 .sidebar-flip-container {
   position: relative;
   width: 100%;
   height: 100%;
-  transition: transform 0.5s ease;
-  transform-style: preserve-3d;
-}
-
-.sidebar.flipped .sidebar-flip-container {
-  transform: rotateY(180deg);
 }
 
 .sidebar-face {
   position: absolute;
   inset: 0;
-  backface-visibility: hidden;
   display: flex;
   flex-direction: column;
   overflow-y: auto;
 }
 
 .sidebar-face-back {
-  transform: rotateY(180deg);
+  display: none;
 }
 
-.sidebar {
-  perspective: 1000px;
+.sidebar.flipped .sidebar-face-front {
+  display: none;
+}
+
+.sidebar.flipped .sidebar-face-back {
+  display: flex;
+}
+
+.sidebar-opseeq-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #111;
 }
 
 .sidebar-header-actions {
@@ -388,6 +410,17 @@ body {
   opacity: 0.5;
 }
 
+/* Mastered-run lineage anchor — the run TLA+/TypeScript derive from */
+.sidebar-item.lineage-anchor {
+  border-left: 2px solid #f59e0b;
+}
+
+.sidebar-lineage-tag {
+  color: #f59e0b;
+  font-size: 0.7rem;
+  margin-right: 2px;
+}
+
 .sidebar-empty {
   display: flex;
   flex-direction: column;
@@ -462,7 +495,7 @@ body {
   padding: 0 24px 0 18px;
   border: none;
   border-radius: 9999px;
-  background: #0066FF;
+  background: var(--accent);
   color: #fff;
   font-family: var(--font-sans);
   font-size: 14px;
@@ -474,7 +507,7 @@ body {
 }
 
 .btn-new-float:hover {
-  background: #0055dd;
+  background: var(--accent-hover);
   color: #fff;
 }
 
@@ -532,7 +565,7 @@ body {
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: #22c55e;
+  background: var(--success);
   margin-left: 4px;
   flex-shrink: 0;
 }
@@ -552,11 +585,17 @@ body {
   display: none !important;
 }
 
-/* Pulsing dot indicator — appears when the agent populates a tab with new
-   content while the user is on a different tab. Cleared on first visit. */
+/* New-content indicator — when the agent populates a tab the user is not
+   viewing, the tab flashes briefly to announce the handoff, then keeps a
+   persistent dot until the user visits it. Cleared on first visit. */
 .mode-btn.has-new-content {
   position: relative;
-  animation: tab-glow 1.5s ease-in-out infinite;
+  animation: tab-content-flash 0.8s ease-in-out 3;
+}
+
+@keyframes tab-content-flash {
+  0%, 100% { box-shadow: none; }
+  50% { box-shadow: 0 0 0 2px var(--warning), 0 0 12px 2px rgba(232, 130, 12, 0.35); }
 }
 
 .mode-btn.has-new-content::before {
@@ -567,20 +606,8 @@ body {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--accent, #e8820c);
-  box-shadow: 0 0 8px rgba(232, 130, 12, 0.7), 0 0 14px rgba(232, 130, 12, 0.4);
-  animation: tab-new-pulse 1.2s ease-in-out infinite;
+  background: var(--warning);
   z-index: 2;
-}
-
-@keyframes tab-new-pulse {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(1.4); opacity: 0.7; }
-}
-
-@keyframes tab-glow {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(232, 130, 12, 0); }
-  50% { box-shadow: 0 0 0 2px rgba(232, 130, 12, 0.25); }
 }
 
 .mode-btn.stage-reveal {
@@ -617,8 +644,8 @@ body {
 
 .stage-badge.stage-pass {
   background: #16a34a22;
-  color: #22c55e;
-  border: 1px solid #22c55e44;
+  color: var(--success);
+  border: 1px solid var(--success)44;
 }
 
 .stage-badge.stage-warn {
@@ -696,19 +723,19 @@ body {
   padding: 40px;
   border: 1px solid var(--border);
   border-radius: 40px;
-  background: #0a0a0a;
+  background: var(--input-bg);
   font-family: var(--font-sans);
   font-size: 0.9rem;
   line-height: 1.7;
   color: #e0e0e0;
   resize: vertical;
   transition: border-color var(--transition);
-  caret-color: #0066FF;
+  caret-color: var(--accent);
 }
 
 .input-textarea:focus {
   outline: none;
-  border-color: #0066FF;
+  border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(0, 102, 255, 0.15);
 }
 
@@ -727,18 +754,18 @@ body {
   padding: 0 20px;
   border: 1px solid var(--border);
   border-radius: 9999px;
-  background: #0a0a0a;
+  background: var(--input-bg);
   font-family: var(--font-sans);
   font-size: 0.9rem;
   color: #cccccc;
   outline: none;
   transition: all var(--transition);
-  caret-color: #0066FF;
+  caret-color: var(--accent);
 }
 
 .diagram-name-input:focus {
-  background: #0a0a0a;
-  border-color: #0066FF;
+  background: var(--input-bg);
+  border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(0, 102, 255, 0.15);
 }
 
@@ -795,104 +822,19 @@ body {
   position: relative;
 }
 
-/* "Gooey morph" ring while enhancement is in flight.
-   Activated by JS via the .is-enhancing class (set in copilot.enhance()).
-   Replaces the older rainbow conic with a softer, two-hue radial that
-   morphs hue + scale together for a refined "thinking" feel.
-   Performance: pure CSS, no JS reflow, GPU-friendly transforms only. */
+/* Enhance-in-flight state — simple border + subtle pulse. Communicates
+   "working" without GPU-heavy conic gradients or sheen sweeps. */
 .btn-enhance-toggle.is-enhancing {
-  position: relative;
-  isolation: isolate;
-}
-.btn-enhance-toggle.is-enhancing::before {
-  content: '';
-  position: absolute;
-  inset: -3px;
-  border-radius: inherit;
-  padding: 2px;
-  /* Conic-gradient with two hues only — produces a single soft band that
-     orbits the button instead of a high-contrast rainbow. */
-  background: conic-gradient(
-    from 0deg,
-    rgba(0, 122, 255, 0.0)   0%,
-    rgba(0, 122, 255, 0.85) 18%,
-    rgba(140, 92, 255, 0.95) 35%,
-    rgba(0, 224, 255, 0.85) 55%,
-    rgba(0, 122, 255, 0.0)  82%,
-    rgba(0, 122, 255, 0.0) 100%
-  );
-  -webkit-mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-          mask:
-    linear-gradient(#000 0 0) content-box,
-    linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-          mask-composite: exclude;
-  /* Slower (2.4s) + ease-in-out gives a "breathing" quality rather than
-     a frantic spin. The blur is what makes it feel gooey. */
-  animation: enhance-gooey-orbit 2.4s cubic-bezier(.45, .03, .55, .97) infinite;
-  filter: blur(0.6px);
-  pointer-events: none;
-  z-index: 1;
-}
-/* Soft outer halo that breathes with the orbit. */
-.btn-enhance-toggle.is-enhancing::after {
-  content: '';
-  position: absolute;
-  inset: -1px;
-  border-radius: inherit;
-  box-shadow: 0 0 12px 1px rgba(0, 122, 255, 0.35), 0 0 22px 2px rgba(140, 92, 255, 0.18);
-  animation: enhance-gooey-breathe 2.4s ease-in-out infinite;
-  pointer-events: none;
-  z-index: 0;
+  border-color: var(--accent);
+  animation: enhance-pulse 1.6s ease-in-out infinite;
 }
 
-@keyframes enhance-gooey-orbit {
-  0%   { transform: rotate(0deg);   filter: blur(0.6px); }
-  50%  { transform: rotate(180deg); filter: blur(1.0px); }
-  100% { transform: rotate(360deg); filter: blur(0.6px); }
-}
-@keyframes enhance-gooey-breathe {
-  0%, 100% { opacity: 0.55; }
-  50%      { opacity: 0.95; }
-}
-
-/* Soft diagonal sheen across the input textarea while enhancement runs.
-   The sheen rides on top of the textarea via a sibling pseudo-element on
-   the wrapper so we don't repaint the textarea content itself.
-   Slower (2.2s) with a wider gradient → reads as "reading the document"
-   rather than "loading bar". */
 .copilot-wrap.is-enhancing {
   position: relative;
-  overflow: hidden;
-}
-.copilot-wrap.is-enhancing::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: -40%;
-  width: 60%;
-  height: 100%;
-  pointer-events: none;
-  background: linear-gradient(
-    110deg,
-    transparent 0%,
-    rgba(255, 255, 255, 0.03) 25%,
-    rgba(0, 122, 255, 0.10)  45%,
-    rgba(140, 92, 255, 0.12) 55%,
-    rgba(255, 255, 255, 0.03) 75%,
-    transparent 100%
-  );
-  animation: enhance-sheen-slide 2.2s cubic-bezier(.5, 0, .5, 1) infinite;
-  z-index: 2;
 }
 
-@keyframes enhance-sheen-slide {
-  0%   { transform: translateX(0%);   opacity: 0; }
-  10%  { opacity: 1; }
-  90%  { opacity: 1; }
-  100% { transform: translateX(280%); opacity: 0; }
+.copilot-wrap.is-enhancing .input-textarea {
+  border-color: var(--accent);
 }
 
 /* No-op indicator — fires when enhance ran but produced no change (offline
@@ -1222,14 +1164,14 @@ body {
 }
 
 .btn-agent-toggle:hover {
-  border-color: #0066FF;
-  color: #0066FF;
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .btn-agent-toggle.active {
-  background: #0066FF;
+  background: var(--accent);
   color: #ffffff;
-  border-color: #0066FF;
+  border-color: var(--accent);
 }
 
 .btn-agent-toggle svg {
@@ -1244,7 +1186,7 @@ body {
   padding: 12px;
   border: 1px solid var(--border);
   border-radius: 24px;
-  background: #0a0a0a;
+  background: var(--input-bg);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.7);
   overflow-y: auto;
 }
@@ -1291,7 +1233,7 @@ body {
 }
 
 .agent-mode-option.agent-mode-disable .agent-mode-icon {
-  color: #ff6b6b;
+  color: var(--danger);
 }
 
 .agent-mode-option.agent-mode-disable:hover {
@@ -1653,7 +1595,7 @@ body {
 
 /* Success narration: green tint */
 .agent-log-entry.narration-complete .narration-text {
-  color: #22c55e;
+  color: var(--success);
   font-size: 0.7rem;
   font-weight: 500;
 }
@@ -1922,7 +1864,7 @@ body {
 }
 
 .metric-value.rising {
-  color: #22c55e;
+  color: var(--success);
   text-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
 }
 .metric-value.falling {
@@ -1950,7 +1892,7 @@ body {
   border-left-color: #e8820c;
 }
 .phase-group.phase-done {
-  border-left-color: #22c55e;
+  border-left-color: var(--success);
 }
 .phase-group.phase-error {
   border-left-color: #ef4444;
@@ -1984,7 +1926,7 @@ body {
   animation: agent-pulse 1.2s ease-in-out infinite;
 }
 .phase-done .phase-dot {
-  background: #22c55e;
+  background: var(--success);
 }
 .phase-error .phase-dot {
   background: #ef4444;
@@ -2123,7 +2065,7 @@ body {
 
 .btn-new {
   width: auto;
-  background: #0066FF;
+  background: var(--accent);
   color: #ffffff;
   justify-content: center;
   font-size: 0.78rem;
@@ -2482,9 +2424,10 @@ body {
   height: 100%;
 }
 
+/* Result viewer — PNG/SVG toggle, no 3D transforms. The .flipped class
+   switches which face is visible; JS API (FlipCard) is unchanged. */
 .flip-card-container {
   flex: 1;
-  perspective: 1200px;
   min-height: 340px;
 }
 
@@ -2499,19 +2442,12 @@ body {
   position: relative;
   width: 100%;
   height: 100%;
-  transition: transform 0.4s ease;
-  transform-style: preserve-3d;
-}
-
-.flip-card.flipped .flip-card-inner {
-  transform: rotateY(180deg);
 }
 
 .flip-card-face {
   position: absolute;
   width: 100%;
   height: 100%;
-  backface-visibility: hidden;
   background: var(--surface);
   border-radius: var(--radius-box);
   border: 1px solid var(--border);
@@ -2519,7 +2455,15 @@ body {
 }
 
 .flip-card-back {
-  transform: rotateY(180deg);
+  display: none;
+}
+
+.flip-card.flipped .flip-card-front {
+  display: none;
+}
+
+.flip-card.flipped .flip-card-back {
+  display: block;
 }
 
 .card-badge {
@@ -2796,6 +2740,72 @@ body {
   color: var(--text-muted);
   font-weight: 400;
   letter-spacing: 0.04em;
+}
+
+.loading-text.is-over-estimate {
+  color: #fbbf24;
+  font-weight: 500;
+  animation: loading-pulse-warn 2s ease-in-out infinite;
+}
+
+@keyframes loading-pulse-warn {
+  0%, 100% { opacity: 0.85; }
+  50% { opacity: 1; }
+}
+
+/* ==========================================================================
+   Repair Budget Indicator
+   ========================================================================== */
+
+.repair-budget-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(255,255,255,0.02);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.62rem;
+}
+
+.repair-budget-label {
+  color: var(--text-muted);
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.repair-budget-track {
+  flex: 1;
+  height: 4px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 999px;
+  overflow: hidden;
+  min-width: 40px;
+}
+
+.repair-budget-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.3s ease, background 0.3s ease;
+}
+
+.repair-budget-fill.is-warn {
+  background: #fbbf24;
+}
+
+.repair-budget-fill.is-exhausted {
+  background: #f87171;
+}
+
+.repair-budget-count {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
 }
 
 /* ==========================================================================
@@ -3206,6 +3216,31 @@ body {
 
 .tla-status { margin-bottom: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
 
+.tla-provenance {
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.tla-provenance-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-subtle);
+}
+.tla-provenance-verified {
+  background: #16a34a22;
+  color: var(--success);
+  border: 1px solid var(--success)44;
+  font-weight: 600;
+}
+
 .tla-badge {
   display: inline-block;
   padding: 3px 10px;
@@ -3213,7 +3248,7 @@ body {
   font-size: 12px;
   font-weight: 600;
 }
-.tla-pass { background: #16a34a22; color: #22c55e; border: 1px solid #22c55e44; }
+.tla-pass { background: #16a34a22; color: var(--success); border: 1px solid var(--success)44; }
 .tla-fail { background: #dc262622; color: #ef4444; border: 1px solid #ef444444; }
 .tla-warn { background: #eab30822; color: #eab308; border: 1px solid #eab30844; }
 .tla-skip { background: #64748b22; color: #94a3b8; border: 1px solid #94a3b844; }
@@ -3315,140 +3350,6 @@ body {
 }
 
 /* ==========================================================================
-   Pipeline Progress Bar
-   ========================================================================== */
-
-.pipeline-progress {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 4px 8px;
-  margin-top: 4px;
-  width: fit-content;
-}
-
-.pipeline-segment {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2px 10px;
-  border: none;
-  border-radius: 999px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  font-size: 0.58rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  cursor: pointer;
-  transition: all 0.25s ease;
-  height: 22px;
-}
-
-.pipeline-segment[data-state="locked"] {
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-muted);
-  opacity: 0.4;
-  cursor: default;
-}
-
-.pipeline-segment[data-state="pending"] {
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-muted);
-}
-
-.pipeline-segment[data-state="active"] {
-  background: var(--accent);
-  color: #fff;
-}
-
-.pipeline-segment[data-state="completed"] {
-  background: rgba(34, 197, 94, 0.12);
-  color: #22c55e;
-  border: 1px solid rgba(34, 197, 94, 0.25);
-}
-
-.pipeline-segment:hover:not([data-state="locked"]) {
-  filter: brightness(1.2);
-}
-
-/* ---- Tab handoff animation -----------------------------------------------
-   When the agent advances from idea → md → mmd, we don't just snap the
-   active tab — we play a brief "data flow" between the source tab and the
-   target tab so the user perceives the architecture being threaded through
-   the universal chain of stages.
-   The source tab dims with a parting glow; the target tab pulses bright
-   then settles. A horizontal scanner line on #pipeline-progress sweeps
-   between them. All driven by classes toggled from JS in
-   `mermaid-gpt-app.js → _animateTabHandoff(...)`. */
-
-#pipeline-progress {
-  position: relative;
-  isolation: isolate;
-}
-#pipeline-progress.is-handoff-active::before {
-  content: '';
-  position: absolute;
-  top: 50%;
-  left: 0;
-  width: 100%;
-  height: 2px;
-  transform: translateY(-50%);
-  pointer-events: none;
-  z-index: -1;
-  background: linear-gradient(
-    90deg,
-    rgba(0, 122, 255, 0.0) 0%,
-    rgba(0, 122, 255, 0.6) 40%,
-    rgba(140, 92, 255, 0.7) 50%,
-    rgba(0, 224, 255, 0.6) 60%,
-    rgba(0, 122, 255, 0.0) 100%
-  );
-  background-size: 30% 100%;
-  background-repeat: no-repeat;
-  animation: pipeline-handoff-scan 900ms cubic-bezier(.4, .0, .2, 1) forwards;
-  filter: blur(1px);
-  opacity: 0;
-}
-@keyframes pipeline-handoff-scan {
-  0%   { background-position:  0% 0; opacity: 0; }
-  15%  { opacity: 1; }
-  85%  { opacity: 1; }
-  100% { background-position: 100% 0; opacity: 0; }
-}
-
-.pipeline-segment.is-handoff-source {
-  animation: pipeline-handoff-source 700ms ease-out forwards;
-}
-.pipeline-segment.is-handoff-target {
-  animation: pipeline-handoff-target 900ms cubic-bezier(.2, .8, .4, 1) forwards;
-}
-@keyframes pipeline-handoff-source {
-  0%   { box-shadow: 0 0 0 0 rgba(0, 122, 255, 0.0); }
-  40%  { box-shadow: 0 0 10px 2px rgba(0, 122, 255, 0.45); }
-  100% { box-shadow: 0 0 0 0 rgba(0, 122, 255, 0.0); }
-}
-@keyframes pipeline-handoff-target {
-  0%   { transform: scale(1.0); box-shadow: 0 0 0 0 rgba(140, 92, 255, 0.0); }
-  35%  { transform: scale(1.08); box-shadow: 0 0 12px 3px rgba(140, 92, 255, 0.55); }
-  100% { transform: scale(1.0); box-shadow: 0 0 0 0 rgba(140, 92, 255, 0.0); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  #pipeline-progress.is-handoff-active::before,
-  .pipeline-segment.is-handoff-source,
-  .pipeline-segment.is-handoff-target {
-    animation: none !important;
-  }
-}
-
-.pipeline-arrow {
-  font-size: 0.55rem;
-  color: var(--text-muted);
-  opacity: 0.4;
-  user-select: none;
-}
-
-/* ==========================================================================
    Landing Page
    ========================================================================== */
 
@@ -3459,16 +3360,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(to top, #00CCFF, #0066FF, #001a44, #000);
-  background-size: 100% 300%;
-  background-position: 0% 100%;
-  animation: landing-drift 8s ease infinite alternate;
+  background: linear-gradient(to top, #00CCFF, var(--accent), #001a44, #000);
   transition: opacity 0.5s ease, visibility 0.5s ease;
-}
-
-@keyframes landing-drift {
-  0%   { background-position: 0% 100%; }
-  100% { background-position: 0% 0%; }
 }
 
 .landing.fade-out {
@@ -3695,53 +3588,6 @@ body {
   letter-spacing: 0.03em;
 }
 
-/* Beacon — thin progress bar at top of main */
-.autoguide-beacon {
-  display: flex;
-  gap: 2px;
-  height: 3px;
-  margin-bottom: 2px;
-  transition: opacity 0.3s ease;
-}
-
-.autoguide-beacon[hidden] {
-  display: none;
-}
-
-.beacon-seg {
-  flex: 1;
-  border-radius: 2px;
-  transition: background 0.4s ease, box-shadow 0.4s ease;
-  border: none;
-  padding: 0;
-  cursor: pointer;
-}
-
-.beacon-seg[data-state="locked"] {
-  background: rgba(255, 255, 255, 0.04);
-  cursor: default;
-}
-
-.beacon-seg[data-state="pending"] {
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.beacon-seg[data-state="active"] {
-  background: rgba(255, 140, 180, 0.6);
-  box-shadow: 0 0 6px 1px rgba(255, 140, 180, 0.3);
-  animation: beacon-pulse 1.8s ease-in-out infinite;
-}
-
-.beacon-seg[data-state="completed"] {
-  background: rgba(34, 197, 94, 0.5);
-  box-shadow: 0 0 4px 1px rgba(34, 197, 94, 0.2);
-}
-
-@keyframes beacon-pulse {
-  0%, 100% { box-shadow: 0 0 4px 1px rgba(255, 140, 180, 0.2); }
-  50%      { box-shadow: 0 0 8px 2px rgba(255, 140, 180, 0.4); }
-}
-
 /* Guide-active state for NemoClaw button */
 .btn-openclaw.guide-active {
   background: rgba(255, 140, 180, 0.12);
@@ -3755,5 +3601,4 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .autoguide-target { animation: none; box-shadow: 0 0 0 2px rgba(255, 140, 180, 0.4); }
-  .beacon-seg[data-state="active"] { animation: none; }
 }

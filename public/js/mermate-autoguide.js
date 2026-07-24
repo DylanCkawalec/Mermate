@@ -83,12 +83,6 @@
       results.push({ id: 'try-fullbuild', target: '#btn-agent-toggle', weight: 30, hint: 'Try Full Build for the complete pipeline' });
     }
 
-    if (hasInput && !m.maxMode && agentActive) {
-      const maxBtn = document.getElementById('btn-max');
-      if (maxBtn && maxBtn.classList.contains('visible')) {
-        results.push({ id: 'enable-max', target: '#btn-max', weight: 20, hint: 'Enable Max for premium output' });
-      }
-    }
 
     if (hasInput && !loading && !agentActive && !hasResult && INPUT_STAGES.has(mode)) {
       results.push({ id: 'render', target: '#btn-render', weight: 80, hint: 'Render your diagram' });
@@ -107,13 +101,13 @@
 
     if (hasResult && orch.isUnlocked('tla') && INPUT_STAGES.has(mode)) {
       const cta = document.querySelector('.standalone-continuation[data-continuation-stage="tla"]');
-      const seg = document.querySelector('.pipeline-segment[data-stage="tla"]');
+      const seg = document.querySelector('.mode-btn[data-mode="tla"]');
       results.push({ id: 'continue-tla', target: cta || seg, weight: 80, hint: 'Continue to TLA+ specification' });
     }
 
     if (orch.isCompleted('tla') && orch.isUnlocked('ts') && mode !== 'ts') {
       const cta = document.querySelector('.standalone-continuation[data-continuation-stage="ts"]');
-      const seg = document.querySelector('.pipeline-segment[data-stage="ts"]');
+      const seg = document.querySelector('.mode-btn[data-mode="ts"]');
       results.push({ id: 'continue-ts', target: cta || seg, weight: 80, hint: 'Continue to TypeScript runtime' });
     }
 
@@ -232,25 +226,6 @@
     if (tip) tip.hidden = true;
   }
 
-  // ---- Pipeline beacon ----
-
-  function _updateBeacon() {
-    const beacon = document.getElementById('autoguide-beacon');
-    if (!beacon) return;
-    const m = bus();
-    if (!m) return;
-    const orch = m.orchestrator;
-    const mode = m.currentMode;
-
-    beacon.querySelectorAll('.beacon-seg').forEach(seg => {
-      const stage = seg.dataset.stage;
-      if (orch.isCompleted(stage)) seg.dataset.state = 'completed';
-      else if (stage === mode) seg.dataset.state = 'active';
-      else if (orch.isUnlocked(stage)) seg.dataset.state = 'pending';
-      else seg.dataset.state = 'locked';
-    });
-  }
-
   // ---- Cascade timer ----
 
   function _startCascade() {
@@ -274,6 +249,8 @@
     if (!_active) return;
     const m = bus();
     if (!m) return;
+    // Skip the AI-backed evaluate call when the app is idle — no wasted API requests
+    if (m.runtimeState && !m.runtimeState.shouldPoll) return;
     try {
       const uiState = {
         currentMode: m.currentMode,
@@ -367,7 +344,6 @@
 
     const stepNum = pipelineSteps.indexOf(rule) + 1;
     _applyHighlight(el, rule.hint, rule.id, stepNum, total);
-    _updateBeacon();
     _startCascade();
   }
 
@@ -422,9 +398,6 @@
     _cascadeIndex = 0;
     _completedActions.clear();
 
-    const beacon = document.getElementById('autoguide-beacon');
-    if (beacon) beacon.hidden = false;
-
     _bindListeners();
     _startOpseeqPoll();
     _evaluate();
@@ -441,8 +414,6 @@
     _clearHighlight(true);
     _unbindListeners();
 
-    const beacon = document.getElementById('autoguide-beacon');
-    if (beacon) beacon.hidden = true;
     _hideTooltip();
 
     try { localStorage.setItem('mermate_guide_enabled', 'false'); } catch {}

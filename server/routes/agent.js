@@ -18,6 +18,8 @@
 const { Router } = require('express');
 const path = require('node:path');
 const fsp = require('node:fs/promises');
+const http = require('node:http');
+const { randomUUID } = require('node:crypto');
 const { analyze } = require('../services/input-analyzer');
 const provider = require('../services/inference-provider');
 const roleRegistry = require('../services/role-registry');
@@ -35,6 +37,20 @@ const logger = require('../utils/logger');
 const RENDER_TIMEOUT_MS = parseInt(process.env.MERMATE_RENDER_TIMEOUT || '660000', 10);
 
 const router = Router();
+
+// Canonical artifacts envelope — attached to every SSE event that carries
+// artifact sources. The frontend's normalizeAgentEvent prefers this shape;
+// the legacy per-key fields (md_source, draft_text…) remain for older
+// clients during the transition.
+function _withArtifactsEnvelope(data) {
+  if (!data) return data;
+  const md = data.md_source || data.draft_text || '';
+  const mmd = data.mmd_source || data.compiled_source || '';
+  const tla = data.tla_source || '';
+  const ts = data.ts_source || '';
+  if (!md && !mmd && !tla && !ts) return data;
+  return { ...data, artifacts: { md, mmd, tla, ts } };
+}
 
 const ASSETS_DIR = path.resolve(__dirname, '..', '..', '.cursor', 'assets');
 
@@ -144,30 +160,146 @@ function _buildAgentRoleHeader(role, stage, modePromptSkeleton) {
 }
 
 /**
- * Internal fetch to the render endpoint.
+ * Internal POST to the render endpoint over node:http.
  *
- * Uses a dedicated AbortController with RENDER_TIMEOUT_MS so long HPC-GoT
- * pipelines don't hit undici's default 300s headersTimeout.  The parent
- * abort (client disconnect) is also wired in so a tab-close still cancels.
+ * Node's global fetch (undici) enforces a hard 300s headersTimeout that an
+ * AbortController CANNOT extend — deep-spec renders exceeding 300s die with
+ * a generic "fetch failed". node:http has no implicit timeout, so the only
+ * limits are RENDER_TIMEOUT_MS and the parent abort (client stop).
  */
-async function _fetchRender(urlPath, body, parentAbort) {
-  const renderAbort = new AbortController();
-  const timer = setTimeout(() => renderAbort.abort(new Error('render_timeout')), RENDER_TIMEOUT_MS);
-  const parentListener = () => renderAbort.abort();
-  parentAbort.signal.addEventListener('abort', parentListener, { once: true });
-  try {
+function _fetchRender(urlPath, body, parentAbort) {
+  return new Promise((resolve, reject) => {
     const PORT = process.env.PORT || 3333;
-    const resp = await fetch(`http://localhost:${PORT}${urlPath}`, {
+    const payload = JSON.stringify(body);
+    const req = http.request({
+      host: 'localhost',
+      port: PORT,
+      path: urlPath,
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: renderAbort.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        cleanup();
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf-8'))); }
+        catch (e) { reject(new Error(`render_response_parse_failed: ${e.message}`)); }
+      });
+      res.on('error', (e) => { cleanup(); reject(e); });
     });
-    return await resp.json();
-  } finally {
-    clearTimeout(timer);
-    parentAbort.signal.removeEventListener('abort', parentListener);
+
+    const timer = setTimeout(() => {
+      req.destroy(new Error(`render_timeout after ${RENDER_TIMEOUT_MS}ms`));
+    }, RENDER_TIMEOUT_MS);
+    const parentListener = () => req.destroy(new Error('aborted'));
+    parentAbort.signal.addEventListener('abort', parentListener, { once: true });
+
+    function cleanup() {
+      clearTimeout(timer);
+      parentAbort.signal.removeEventListener('abort', parentListener);
+    }
+
+    req.on('error', (e) => { cleanup(); reject(e); });
+    req.write(payload);
+    req.end();
+  });
+}
+
+const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
+
+/**
+ * Read the persisted TLA+/TS artifact sources for a run from disk. Used as a
+ * fallback so pipeline/bundle SSE events always carry artifact text even when
+ * a downstream fetch failed or returned partial data — the user should never
+ * lose a spec that already exists on disk. Advisory — never throws.
+ */
+async function _readPersistedSources(runId) {
+  const out = { tla: null, cfg: null, ts: null };
+  if (!runId) return out;
+  try {
+    const runData = JSON.parse(await fsp.readFile(path.join(PROJECT_ROOT, 'runs', `${runId}.json`), 'utf-8'));
+    const read = async (rel) => {
+      if (!rel || typeof rel !== 'string') return null;
+      try { return await fsp.readFile(path.join(PROJECT_ROOT, rel.replace(/^\//, '')), 'utf-8'); }
+      catch { return null; }
+    };
+    out.tla = await read(runData.tla_artifacts?.tla);
+    out.cfg = await read(runData.tla_artifacts?.cfg);
+    out.ts = await read(runData.ts_artifacts?.source);
+  } catch { /* run.json missing/unreadable — nothing to recover */ }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+//  Detached agent sessions — an agent run survives browser refresh.
+//
+//  The run executes server-side against a session-owned AbortController.
+//  Every SSE event is buffered in the session AND broadcast to attached
+//  listeners. If the browser disconnects (refresh / tab close), the run
+//  keeps going for AGENT_SESSION_GRACE_MS; a reattaching client replays the
+//  buffered events and continues live. Explicit stop is a separate route.
+// ---------------------------------------------------------------------------
+
+const AGENT_SESSION_GRACE_MS = parseInt(process.env.MERMATE_AGENT_GRACE || '300000', 10);
+const AGENT_SESSION_RETAIN_MS = 10 * 60_000;
+const _agentSessions = new Map();
+
+function _createAgentSession(kind, mode) {
+  const session = {
+    id: randomUUID(),
+    kind,                     // 'run' | 'finalize'
+    mode: mode || null,
+    status: 'running',        // running | done | error | stopped
+    startedAt: Date.now(),
+    events: [],               // buffered SSE frames for replay
+    listeners: new Set(),     // attached http responses
+    abort: new AbortController(),
+    graceTimer: null,
+  };
+  _agentSessions.set(session.id, session);
+  return session;
+}
+
+function _sessionSend(session, type, data) {
+  const frame = `data: ${JSON.stringify({ type, ..._withArtifactsEnvelope(data) })}\n\n`;
+  if (type !== 'heartbeat') {
+    session.events.push(frame);
+    if (session.events.length > 3000) session.events.splice(0, session.events.length - 3000);
   }
+  for (const res of session.listeners) {
+    try { res.write(frame); } catch {}
+  }
+}
+
+function _sessionAttach(session, res) {
+  if (session.graceTimer) { clearTimeout(session.graceTimer); session.graceTimer = null; }
+  session.listeners.add(res);
+  res.on('close', () => {
+    session.listeners.delete(res);
+    if (session.status !== 'running' || session.listeners.size > 0) return;
+    logger.info('agent.session.detached', { session: session.id.slice(0, 8), graceMs: AGENT_SESSION_GRACE_MS });
+    session.graceTimer = setTimeout(() => {
+      if (session.status === 'running' && session.listeners.size === 0) {
+        logger.info('agent.session.grace_expired', { session: session.id.slice(0, 8) });
+        session.status = 'stopped';
+        session.abort.abort();
+      }
+    }, AGENT_SESSION_GRACE_MS);
+  });
+}
+
+function _sessionEnd(session, status) {
+  if (session.status === 'running') session.status = status;
+  if (session.graceTimer) { clearTimeout(session.graceTimer); session.graceTimer = null; }
+  for (const res of session.listeners) {
+    try { res.end(); } catch {}
+  }
+  session.listeners.clear();
+  const t = setTimeout(() => _agentSessions.delete(session.id), AGENT_SESSION_RETAIN_MS);
+  if (t.unref) t.unref();
 }
 
 function _extractText(output) {
@@ -250,26 +382,22 @@ router.post('/agent/run', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  // Abort controller — cancelled when the client disconnects (browser
-  // refresh, tab close, or frontend stop). Propagated into all fetch calls
-  // so in-flight LLM requests are torn down immediately.
-  //
-  // IMPORTANT: must use res.on('close'), NOT req.on('close').
-  // req 'close' fires as soon as the request body is consumed (immediately
-  // after JSON parsing), which would abort the pipeline before it starts.
-  // res 'close' fires when the SSE connection actually drops.
-  const abort = new AbortController();
-  res.on('close', () => {
-    if (!res.writableFinished && !abort.signal.aborted) {
-      logger.info('agent.run.client_disconnected');
-      abort.abort();
-    }
-  });
+  // Detached session — the run is owned by the session, NOT the SSE
+  // connection. A browser refresh detaches the listener but the pipeline
+  // keeps running; the client reattaches via GET /agent/attach/:id.
+  // Explicit stop is POST /agent/stop/:id (used by the Pause button).
+  const session = _createAgentSession('run', mode);
+  const abort = session.abort;
+  _sessionAttach(session, res);
 
   function sendEvent(type, data) {
     if (abort.signal.aborted) return;
-    try { res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`); } catch {}
+    _sessionSend(session, type, data);
   }
+
+  // First frame: hand the session id to the client so it can reattach
+  // after a refresh instead of restarting the whole pipeline.
+  sendEvent('agent_session', { session_id: session.id, mode, kind: 'run' });
 
   // Immediate feedback: emit ingest stage event BEFORE slow setup so the
   // client sees progression even if runTracker.create or analyze take 1-2s.
@@ -294,9 +422,9 @@ router.post('/agent/run', async (req, res) => {
       inputMode: currentStage,
       gotConfig,
       models: {
-        orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || 'gpt-4o',
-        worker: process.env.MERMATE_WORKER_MODEL || 'gpt-4o',
-        fast: process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-4o-mini',
+        orchestrator: process.env.MERMATE_ORCHESTRATOR_MODEL || 'gpt-5.6-sol',
+        worker: process.env.MERMATE_WORKER_MODEL || 'gpt-5.6-terra',
+        fast: process.env.MERMATE_FAST_STRUCTURED_MODEL || 'gpt-5.6-luna',
       },
     }).catch(() => null),
     _loadModePrompt(mode),
@@ -410,6 +538,23 @@ router.post('/agent/run', async (req, res) => {
       return;
     }
 
+    // Preservation policy — when the input is already a mature, data-rich
+    // specification (high quality/completeness, or a large structured doc),
+    // the user's data is the source of truth. Planning may reorganize and
+    // fill gaps but must NOT summarize or replace it with a simplification.
+    const isMatureInput =
+      (profile.qualityScore >= 0.7 && profile.completenessScore >= 0.7)
+      || startText.length >= 6000;
+
+    const planningDirective = isMatureInput
+      ? [
+          'The user input is already a rich, detailed specification. PRESERVE IT.',
+          'Keep every entity, section, table, constraint, protocol, and named component from the input.',
+          'Do NOT summarize, simplify, or drop data. Reorganize for clarity and fill genuine gaps only.',
+          'The user\'s data is the source of truth — your output must contain at least as much information as the input.',
+        ].join('\n')
+      : 'Produce a stronger architecture description. Be specific about services, data stores, flows, and failure handling.';
+
     const planningUserPrompt = [
       `[CURRENT ARTIFACT STAGE] ${currentStage}`,
       '[USER PROMPT]', prompt, '',
@@ -418,7 +563,7 @@ router.post('/agent/run', async (req, res) => {
       `Maturity: ${profile.maturity}`, `Quality: ${profile.qualityScore}`,
       `Entities: ${profile.shadow?.entities?.length || 0}`,
       `Gaps: ${(profile.shadow?.gaps || []).join('; ') || 'none'}`, '',
-      'Produce a stronger architecture description. Be specific about services, data stores, flows, and failure handling.',
+      planningDirective,
     ].filter(Boolean).join('\n');
 
     if (abort.signal.aborted) return;
@@ -459,6 +604,7 @@ router.post('/agent/run', async (req, res) => {
     const planLatency = Date.now() - planCallStart;
 
     // Score each plan result by analyzing it
+    const planCtx = catalog.estimateContext('copilot_enhance', planningUserPrompt);
     const scoredPlans = [];
     for (const { role, result } of planResults) {
       const roleName = role?.name || 'default';
@@ -469,7 +615,6 @@ router.post('/agent/run', async (req, res) => {
         success: !!result.output,
         provider: result.provider,
       });
-      const planCtx = catalog.estimateContext('copilot_enhance', planningUserPrompt);
       telemetry.record(runId, {
         stage: 'planning',
         role: roleName,
@@ -495,6 +640,20 @@ router.post('/agent/run', async (req, res) => {
       if (result.output && result.output.trim() !== startText.trim()) {
         const extracted = _extractText(result.output);
         if (extracted) {
+          // Shrinkage guard — a plan that loses more than 40% of a mature
+          // input is a simplification, not an improvement. Reject it so the
+          // user's data survives to the preview render.
+          if (isMatureInput && extracted.length < startText.length * 0.6) {
+            logger.info('agent.plan_rejected_shrinkage', {
+              role: roleName,
+              inputLen: startText.length,
+              planLen: extracted.length,
+            });
+            auditTracker.emit(auditId, 'agent:plan_rejected', {
+              role: roleName, reason: 'shrinkage', inputLen: startText.length, planLen: extracted.length,
+            });
+            continue;
+          }
           const planProfile = analyze(extracted, 'idea');
           scoredPlans.push({
             text: extracted,
@@ -780,16 +939,75 @@ router.post('/agent/run', async (req, res) => {
     });
 
   } catch (err) {
-    if (abort.signal.aborted) return;
-    auditTracker.emit(auditId, 'sys:error', { message: err.message, stage: 'run' });
-    logger.error('agent.run.error', { error: err.message });
-    sendEvent('error', { message: err.message });
-    if (parentRunId) await runTracker.finalize(parentRunId, 'failed').catch(() => {});
-  } finally {
+    if (!abort.signal.aborted) {
+      auditTracker.emit(auditId, 'sys:error', { message: err.message, stage: 'run' });
+      logger.error('agent.run.error', { error: err.message });
+      sendEvent('error', { message: err.message });
+      if (parentRunId) await runTracker.finalize(parentRunId, 'failed').catch(() => {});
+    }
     stopNarrator();
     auditTracker.closeRun(auditId);
-    res.end();
+    _sessionEnd(session, abort.signal.aborted ? 'stopped' : 'error');
+    return;
   }
+  stopNarrator();
+  auditTracker.closeRun(auditId);
+  _sessionEnd(session, 'done');
+});
+
+// ---- Session reattach / stop / discovery ----
+
+router.get('/agent/active', (_req, res) => {
+  const sessions = [];
+  for (const s of _agentSessions.values()) {
+    sessions.push({
+      session_id: s.id,
+      kind: s.kind,
+      mode: s.mode,
+      status: s.status,
+      started_at: s.startedAt,
+      events: s.events.length,
+    });
+  }
+  return res.json({ success: true, sessions });
+});
+
+router.get('/agent/attach/:sessionId', (req, res) => {
+  const session = _agentSessions.get(req.params.sessionId);
+  if (!session) {
+    return res.status(404).json({ success: false, error: 'session_not_found' });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  // Replay everything the client missed, then continue live.
+  for (const frame of session.events) {
+    try { res.write(frame); } catch {}
+  }
+
+  if (session.status !== 'running') {
+    try { res.end(); } catch {}
+    return;
+  }
+
+  logger.info('agent.session.reattached', { session: session.id.slice(0, 8), buffered: session.events.length });
+  _sessionAttach(session, res);
+});
+
+router.post('/agent/stop/:sessionId', (req, res) => {
+  const session = _agentSessions.get(req.params.sessionId);
+  if (!session) {
+    return res.json({ success: true, status: 'gone' });
+  }
+  if (session.status === 'running') {
+    session.status = 'stopped';
+    session.abort.abort();
+    logger.info('agent.session.stopped', { session: session.id.slice(0, 8) });
+  }
+  return res.json({ success: true, status: session.status });
 });
 
 // ---- Phase 2: Finalize with Max render (after user notes) ----
@@ -806,18 +1024,18 @@ router.post('/agent/finalize', async (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  const abort = new AbortController();
-  res.on('close', () => {
-    if (!res.writableFinished && !abort.signal.aborted) {
-      logger.info('agent.finalize.client_disconnected');
-      abort.abort();
-    }
-  });
+  // Detached session — the final Max render is the longest step in the
+  // pipeline; it must survive a browser refresh exactly like /agent/run.
+  const session = _createAgentSession('finalize', mode);
+  const abort = session.abort;
+  _sessionAttach(session, res);
 
   function sendEvent(type, data) {
     if (abort.signal.aborted) return;
-    try { res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`); } catch {}
+    _sessionSend(session, type, data);
   }
+
+  sendEvent('agent_session', { session_id: session.id, mode, kind: 'finalize' });
 
   const finalizeAuditId = auditTracker.createRun(null, 'agent:finalize');
   const stopNarrator = narrator.watchRun(finalizeAuditId, null, sendEvent, auditTracker);
@@ -923,11 +1141,24 @@ router.post('/agent/finalize', async (req, res) => {
 
         if (!abort.signal.aborted) {
           sendEvent('stage', { stage: 'tla_build', message: 'Generating TLA+ specification via Specula...' });
+          auditTracker.emit(finalizeAuditId, 'agent:stage_enter', { stage: 'tla' });
           try {
             const tlaData = await _fetchRender('/api/render/tla', {
               diagram_name: fbName,
               run_id: fbRunId,
+              audit_run_id: finalizeAuditId,
             }, abort);
+
+            // Guarantee artifact text on every downstream event: if the render
+            // response didn't echo the source, read it back from disk so the
+            // TLA+ tab always populates — even on partial/failed validation.
+            let tlaSrc = tlaData.tla_source || null;
+            let cfgSrc = tlaData.cfg_source || null;
+            if (!tlaSrc) {
+              const persisted = await _readPersistedSources(fbRunId);
+              tlaSrc = persisted.tla;
+              cfgSrc = cfgSrc || persisted.cfg;
+            }
 
             sendEvent('pipeline_stage', {
               stage: 'tla',
@@ -935,24 +1166,29 @@ router.post('/agent/finalize', async (req, res) => {
               sany_valid: tlaData.sany?.valid,
               tlc_checked: tlaData.tlc?.checked,
               violations: tlaData.tlc?.violations?.length || 0,
-              tla_source: tlaData.tla_source || null,
-              cfg_source: tlaData.cfg_source || null,
+              tla_source: tlaSrc,
+              cfg_source: cfgSrc,
             });
 
             if (tlaData.success && tlaData.sany?.valid && !abort.signal.aborted) {
               sendEvent('stage', { stage: 'ts_build', message: 'Compiling TypeScript runtime from TLA+ spec...' });
+              auditTracker.emit(finalizeAuditId, 'agent:stage_enter', { stage: 'ts' });
               try {
                 const tsData = await _fetchRender('/api/render/ts', {
                   diagram_name: fbName,
                   run_id: fbRunId,
+                  audit_run_id: finalizeAuditId,
                 }, abort);
+
+                let tsSrc = tsData.ts_source || null;
+                if (!tsSrc) tsSrc = (await _readPersistedSources(fbRunId)).ts;
 
                 sendEvent('pipeline_stage', {
                   stage: 'ts',
                   success: tsData.success,
                   compile_ok: tsData.compile?.success,
                   tests_ok: tsData.tests?.success,
-                  ts_source: tsData.ts_source || null,
+                  ts_source: tsSrc,
                 });
 
                 sendEvent('bundle_ready', {
@@ -961,36 +1197,50 @@ router.post('/agent/finalize', async (req, res) => {
                   stages_completed: ['mmd', 'tla', 'ts'],
                   tla_valid: tlaData.sany?.valid,
                   ts_compiled: tsData.compile?.success,
-                  tla_source: tlaData.tla_source || null,
-                  ts_source: tsData.ts_source || null,
+                  tla_source: tlaSrc,
+                  cfg_source: cfgSrc,
+                  ts_source: tsSrc,
                 });
               } catch (tsErr) {
                 sendEvent('pipeline_stage', { stage: 'ts', success: false, error: tsErr.message });
+                // TS failed, but TLA+ succeeded — still ship the verified spec
+                // so the user keeps the artifact they already paid for.
                 sendEvent('bundle_ready', {
                   diagram_name: fbName,
                   run_id: fbRunId,
                   stages_completed: ['mmd', 'tla'],
                   tla_valid: tlaData.sany?.valid,
                   ts_compiled: false,
+                  tla_source: tlaSrc,
+                  cfg_source: cfgSrc,
                 });
               }
             } else {
+              // TLA+ ran but didn't fully validate — still ship whatever spec
+              // was generated so the TLA+ tab populates for manual repair.
               sendEvent('bundle_ready', {
                 diagram_name: fbName,
                 run_id: fbRunId,
                 stages_completed: ['mmd'],
                 tla_valid: tlaData.sany?.valid || false,
                 ts_compiled: false,
+                tla_source: tlaSrc,
+                cfg_source: cfgSrc,
               });
             }
           } catch (tlaErr) {
             sendEvent('pipeline_stage', { stage: 'tla', success: false, error: tlaErr.message });
+            // Even if the TLA+ fetch threw, a prior partial spec may exist on
+            // disk — recover it so the user isn't left with an empty tab.
+            const persisted = await _readPersistedSources(fbRunId);
             sendEvent('bundle_ready', {
               diagram_name: fbName,
               run_id: fbRunId,
               stages_completed: ['mmd'],
               tla_valid: false,
               ts_compiled: false,
+              tla_source: persisted.tla,
+              cfg_source: persisted.cfg,
             });
           }
         }
@@ -1038,7 +1288,7 @@ router.post('/agent/finalize', async (req, res) => {
   } finally {
     stopNarrator();
     auditTracker.closeRun(finalizeAuditId);
-    res.end();
+    _sessionEnd(session, abort.signal.aborted ? 'stopped' : 'done');
   }
 });
 

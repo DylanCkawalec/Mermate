@@ -1,0 +1,150 @@
+{
+  "scenarios": {
+    "simple_flowchart": {
+      "fact_extraction": {
+        "entities": [
+          { "name": "User", "type": "actor", "responsibility": "Initiates request" },
+          { "name": "WebApp", "type": "gateway", "responsibility": "Handles web traffic" },
+          { "name": "Database", "type": "store", "responsibility": "Stores persistent data" }
+        ],
+        "relationships": [
+          { "from": "User", "to": "WebApp", "verb": "submits form", "edgeType": "sync" },
+          { "from": "WebApp", "to": "Database", "verb": "queries record", "edgeType": "sync" }
+        ],
+        "boundaries": [],
+        "failurePaths": [],
+        "diagramType": "flowchart"
+      },
+      "diagram_plan": {
+        "directive": "flowchart TB",
+        "nodes": [
+          { "id": "N1", "label": "User", "shape": "stadium", "entityRef": "User" },
+          { "id": "N2", "label": "WebApp", "shape": "rectangle", "entityRef": "WebApp" },
+          { "id": "N3", "label": "Database", "shape": "cylinder", "entityRef": "Database" }
+        ],
+        "edges": [
+          { "from": "N1", "to": "N2", "label": "submits form", "style": "solid", "relationRef": "User->WebApp" },
+          { "from": "N2", "to": "N3", "label": "queries record", "style": "solid", "relationRef": "WebApp->Database" }
+        ],
+        "subgraphs": [],
+        "classDefs": []
+      },
+      "composition": "flowchart TB\n    N1([\"User\"])\n    N2[\"WebApp\"]\n    N3[(\"Database\")]\n    N1 -->|\"submits form\"| N2\n    N2 -->|\"queries record\"| N3\n"
+    },
+    "distributed_system": {
+      "fact_extraction": {
+        "entities": [
+          { "name": "Client", "type": "actor", "responsibility": "Sends user requests" },
+          { "name": "APIGateway", "type": "gateway", "responsibility": "Routes and authenticates incoming traffic" },
+          { "name": "AuthService", "type": "service", "responsibility": "Validates tokens and credentials" },
+          { "name": "OrderService", "type": "service", "responsibility": "Processes orders" },
+          { "name": "PaymentGateway", "type": "external", "responsibility": "Processes credit card payments" },
+          { "name": "InventoryService", "type": "service", "responsibility": "Manages stock items" },
+          { "name": "MainDB", "type": "store", "responsibility": "Stores order and user state" },
+          { "name": "Cache", "type": "cache", "responsibility": "Caches product lookup data" }
+        ],
+        "relationships": [
+          { "from": "Client", "to": "APIGateway", "verb": "POST /orders", "edgeType": "sync" },
+          { "from": "APIGateway", "to": "AuthService", "verb": "verify token", "edgeType": "sync" },
+          { "from": "APIGateway", "to": "OrderService", "verb": "forward order", "edgeType": "sync" },
+          { "from": "OrderService", "to": "Cache", "verb": "check stock cache", "edgeType": "sync" },
+          { "from": "OrderService", "to": "PaymentGateway", "verb": "charge card", "edgeType": "sync" },
+          { "from": "OrderService", "to": "InventoryService", "verb": "decrement stock", "edgeType": "async" },
+          { "from": "OrderService", "to": "MainDB", "verb": "save order", "edgeType": "sync" },
+          { "from": "InventoryService", "to": "MainDB", "verb": "update inventory", "edgeType": "sync" }
+        ],
+        "boundaries": [
+          { "name": "Ingress Boundary", "members": ["Client", "APIGateway", "AuthService"] },
+          { "name": "Core Services", "members": ["OrderService", "InventoryService", "Cache", "MainDB"] }
+        ],
+        "failurePaths": [
+          { "trigger": "Payment Failure", "condition": "Declined card", "handler": "OrderService", "recovery": "Mark order failed & notify client" }
+        ],
+        "diagramType": "flowchart"
+      },
+      "composition": "flowchart TB\n    subgraph Ingress [\"Ingress Boundary\"]\n        Client([\"Client\"])\n        APIGateway[\"APIGateway\"]\n        AuthService[\"AuthService\"]\n    end\n    subgraph Core [\"Core Services\"]\n        OrderService[\"OrderService\"]\n        InventoryService[\"InventoryService\"]\n        Cache[(\"Cache\")]\n        MainDB[(\"MainDB\")]\n    end\n    PaymentGateway{{\"PaymentGateway\"}}\n    Client -->|\"POST /orders\"| APIGateway\n    APIGateway -->|\"verify token\"| AuthService\n    APIGateway -->|\"forward order\"| OrderService\n    OrderService -->|\"check stock cache\"| Cache\n    OrderService -->|\"charge card\"| PaymentGateway\n    OrderService -.->|\"decrement stock\"| InventoryService\n    OrderService -->|\"save order\"| MainDB\n    InventoryService -->|\"update inventory\"| MainDB\n"
+    },
+    "sequence_diagram": {
+      "fact_extraction": {
+        "entities": [
+          { "name": "User", "type": "actor", "responsibility": "Initiates action" },
+          { "name": "Client", "type": "actor", "responsibility": "Web frontend" },
+          { "name": "API", "type": "gateway", "responsibility": "Backend controller" },
+          { "name": "AuthServer", "type": "service", "responsibility": "OAuth token provider" }
+        ],
+        "relationships": [
+          { "from": "User", "to": "Client", "verb": "Click Login", "edgeType": "sync" },
+          { "from": "Client", "to": "API", "verb": "POST /login", "edgeType": "sync" },
+          { "from": "API", "to": "AuthServer", "verb": "Validate Credentials", "edgeType": "sync" },
+          { "from": "AuthServer", "to": "API", "verb": "Token Issued", "edgeType": "sync" },
+          { "from": "API", "to": "Client", "verb": "200 OK", "edgeType": "sync" }
+        ],
+        "boundaries": [],
+        "failurePaths": [],
+        "diagramType": "sequence"
+      },
+      "composition": "sequenceDiagram\n    participant User\n    participant Client\n    participant API\n    participant AuthServer\n    User->>Client: Click Login\n    Client->>API: POST /login\n    API->>AuthServer: Validate Credentials\n    AuthServer-->>API: Token Issued\n    API-->>Client: 200 OK\n"
+    },
+    "state_diagram": {
+      "fact_extraction": {
+        "entities": [
+          { "name": "Pending", "type": "decision", "responsibility": "Awaiting payment" },
+          { "name": "Processing", "type": "decision", "responsibility": "Order being fulfilled" },
+          { "name": "Completed", "type": "decision", "responsibility": "Order delivered" },
+          { "name": "Failed", "type": "decision", "responsibility": "Payment or fulfillment failed" }
+        ],
+        "relationships": [
+          { "from": "Pending", "to": "Processing", "verb": "payment_received", "edgeType": "sync" },
+          { "from": "Processing", "to": "Completed", "verb": "fulfilled", "edgeType": "sync" },
+          { "from": "Processing", "to": "Failed", "verb": "error", "edgeType": "sync" },
+          { "from": "Failed", "to": "Pending", "verb": "retry", "edgeType": "sync" }
+        ],
+        "boundaries": [],
+        "failurePaths": [],
+        "diagramType": "state"
+      },
+      "composition": "stateDiagram-v2\n    [*] --> Pending\n    Pending --> Processing : payment_received\n    Processing --> Completed : fulfilled\n    Processing --> Failed : error\n    Failed --> Pending : retry\n    Completed --> [*]\n"
+    },
+    "decompose_views": {
+      "decompose": [
+        {
+          "viewName": "Ingress View",
+          "viewDescription": "Handles incoming client requests and auth",
+          "suggestedType": "flowchart",
+          "entities": ["Client", "Gateway", "AuthService"],
+          "relationships": ["Client -> Gateway", "Gateway -> AuthService"]
+        },
+        {
+          "viewName": "Core Processing",
+          "viewDescription": "Order processing and inventory management",
+          "suggestedType": "flowchart",
+          "entities": ["Gateway", "OrderService", "InventoryService"],
+          "relationships": ["Gateway -> OrderService", "OrderService -> InventoryService"]
+        },
+        {
+          "viewName": "Persistence Layer",
+          "viewDescription": "Database storage and caching",
+          "suggestedType": "flowchart",
+          "entities": ["OrderService", "PostgresDB", "RedisCache"],
+          "relationships": ["OrderService -> PostgresDB", "OrderService -> RedisCache"]
+        }
+      ],
+      "merge_composition": "flowchart TB\n    subgraph Ingress [\"Ingress View\"]\n        Client([\"Client\"]) --> Gateway[\"Gateway\"]\n        Gateway --> AuthService[\"AuthService\"]\n    end\n    subgraph Core [\"Core Processing\"]\n        Gateway --> OrderService[\"OrderService\"]\n        OrderService --> InventoryService[\"InventoryService\"]\n    end\n    subgraph Persistence [\"Persistence Layer\"]\n        OrderService --> PostgresDB[(\"PostgresDB\")]\n        OrderService --> RedisCache[(\"RedisCache\")]\n    end\n"
+    },
+    "tla_spec": {
+      "compose_tla": "---------------- MODULE OrderPipeline ----------------\nEXTENDS Naturals, Sequences, FiniteSets\n\nVARIABLES state, queue\n\nInit ==\n    /\\ state = \"Pending\"\n    /\\ queue = <<>>\n\nNext ==\n    \\/ /\\ state = \"Pending\"\n       /\\ state' = \"Processing\"\n       /\\ UNCHANGED queue\n    \\/ /\\ state = \"Processing\"\n       /\\ state' = \"Completed\"\n       /\\ UNCHANGED queue\n\nTypeInvariant ==\n    state \\in {\"Pending\", \"Processing\", \"Completed\"}\n\n======================================================="
+    },
+    "ts_runtime": {
+      "compose_ts": "{\"ts_source\": \"export interface OrderState { state: 'Pending' | 'Processing' | 'Completed'; }\\nexport function transition(current: OrderState): OrderState {\\n  if (current.state === 'Pending') return { state: 'Processing' };\\n  if (current.state === 'Processing') return { state: 'Completed' };\\n  return current;\\n}\"}",
+      "validate_ts": {
+        "valid": true,
+        "issues": [],
+        "summary": "TypeScript code is valid and well-typed."
+      }
+    },
+    "compile_retry": {
+      "model_repair": "flowchart TB\n    A[\"Valid Node A\"] --> B[\"Valid Node B\"]\n",
+      "semantic_repair": "{\"repaired\": \"flowchart TB\\n    A[\\\"Valid Node A\\\"] --> B[\\\"Valid Node B\\\"]\\n\"}"
+    }
+  }
+}

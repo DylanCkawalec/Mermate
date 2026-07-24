@@ -271,10 +271,21 @@ function buildCopilotSuggestPrompt() {
  *
  * @param {string} enhanceMode - "selection" | "full" | "refine" | "expand" | "distill"
  */
-function buildCopilotEnhancePrompt(enhanceMode) {
-  const selectionTask = `TASK: Enhance ONLY the selected text passage. Use the surrounding context to understand intent. Return the improved version of the selected text only — not the full document. Make it more specific, architecturally precise, and Mermaid-ready.`;
+function buildCopilotEnhancePrompt(enhanceMode, targetFormat) {
+  // targetFormat: 'idea'|'md'|'mmd'|'tla'|'ts' — controls the output format.
+  // When null/undefined, defaults to 'idea' (plain text) for backward compat.
+  const fmt = targetFormat || 'idea';
+  const isMmd = fmt === 'mmd';
+  const isMd  = fmt === 'md';
+  const isTla = fmt === 'tla';
+  const isTs  = fmt === 'ts';
+  const isStructured = isMmd || isMd || isTla || isTs;
 
-  const refineTask = `TASK: Refine the user's idea while preserving every entity and relationship they named. Add specificity, name failure paths, and tighten engineering clarity. The user has already done substantial thinking — your job is to sharpen, not rewrite.`;
+  const selectionTask = `TASK: Enhance ONLY the selected text passage. Use the surrounding context to understand intent. Return the improved version of the selected text only — not the full document. Make it more specific, architecturally precise, and ${isMmd ? 'valid Mermaid-ready' : 'well-structured'}.`;
+
+  const refineTask = isStructured
+    ? `TASK: Refine the user's ${isMmd ? 'Mermaid diagram source' : isMd ? 'markdown specification' : isTla ? 'TLA+ specification' : 'TypeScript code'} while preserving every entity, relationship, and structural element they defined. Add specificity, name failure paths, and tighten engineering clarity. The user has already done substantial thinking — your job is to sharpen, not rewrite. Output must be valid ${isMmd ? 'Mermaid syntax' : isMd ? 'markdown' : isTla ? 'TLA+' : 'TypeScript'}.`
+    : `TASK: Refine the user's idea while preserving every entity and relationship they named. Add specificity, name failure paths, and tighten engineering clarity. The user has already done substantial thinking — your job is to sharpen, not rewrite.`;
 
   const expandTask = [
     `TASK: The user has provided a *seed* — a short subject ("the mentibus blockchain", "an inventory app", "a fab orchestrator"). Their intent is for you to act as an expert systems architect and expand the seed into a 4–10 sentence specification that is rich enough to render as a meaningful Mermaid architecture diagram.`,
@@ -316,12 +327,39 @@ function buildCopilotEnhancePrompt(enhanceMode) {
 
   // Distill MUST preserve the user's concepts (extraction-style preservation),
   // expand does not preserve (nothing to preserve), refine preserves verbatim.
-  const axiomBlock = isExpand
-    ? [AXIOMS_INTERPRETATION, AXIOMS_AAD].join('\n')
-    : [AXIOMS_INTERPRETATION, AXIOMS_AAD, AXIOMS_PRESERVATION].join('\n');
+  // Structured formats (mmd/md/tla/ts) always get preservation + syntax axioms.
+  const axiomBlock = isStructured
+    ? [AXIOMS_INTERPRETATION, AXIOMS_AAD, AXIOMS_PRESERVATION, isMmd ? AXIOMS_MERMAID_SYNTAX : ''].filter(Boolean).join('\n')
+    : (isExpand
+      ? [AXIOMS_INTERPRETATION, AXIOMS_AAD].join('\n')
+      : [AXIOMS_INTERPRETATION, AXIOMS_AAD, AXIOMS_PRESERVATION].join('\n'));
+
+  // Format-specific output instruction
+  const formatOutputRule = isMmd
+    ? `- Output valid Mermaid syntax only. The first line must be a valid Mermaid directive (flowchart, sequenceDiagram, stateDiagram-v2, classDiagram, erDiagram, etc.). No markdown fencing, no explanation outside %% comments.`
+    : isMd
+    ? `- Output well-structured markdown only. Use proper headers, lists, and formatting. No Mermaid syntax unless embedded in a code block.`
+    : isTla
+    ? `- Output valid TLA+ specification only. Proper MODULE declaration, definitions, invariants, and properties. No markdown fencing, no prose outside TLA+ comments.`
+    : isTs
+    ? `- Output valid TypeScript code only. Proper types, interfaces, and implementations. No markdown fencing, no prose outside code comments.`
+    : `- Output plain text only — no Mermaid syntax, no markdown fencing.`;
 
   let rules;
-  if (isExpand) {
+  if (isStructured && !isSelection) {
+    // Structured formats always use refine-style rules with format-specific output
+    rules = [
+      `RULES (refine mode — ${fmt} format):`,
+      `- Every entity, node, relationship, or definition the user wrote must appear in your output.`,
+      `- Do not reverse flow directions or change semantic meaning.`,
+      `- Preserve named technologies, variables, and identifiers verbatim.`,
+      `- Do not add entirely new systems unless strongly implied.`,
+      `- Fix syntax errors, improve readability, and strengthen architectural clarity.`,
+      formatOutputRule,
+      `- Return JSON: {"enhanced_source":"<text>","intent_preserved":true,"expansion_summary":"<1 sentence>"}`,
+      `- Response must be valid JSON.`,
+    ].join('\n');
+  } else if (isExpand) {
     rules = [
       `RULES (expand mode):`,
       `- Keep the user's named subject as the central anchor — every component you add must clearly belong to it.`,
@@ -351,14 +389,17 @@ function buildCopilotEnhancePrompt(enhanceMode) {
       `- Do not reverse flow directions.`,
       `- Preserve named technologies (Redis, Kafka, PostgreSQL, etc.) verbatim.`,
       `- Do not add entirely new systems unless strongly implied.`,
-      `- Output plain text only — no Mermaid syntax, no markdown fencing.`,
+      formatOutputRule,
       `- Return JSON: {"enhanced_source":"<text>","intent_preserved":true,"expansion_summary":"<1 sentence>"}`,
       `- Response must be valid JSON.`,
     ].join('\n');
   }
 
   let header;
-  if (isExpand) {
+  if (isStructured) {
+    const fmtName = isMmd ? 'Mermaid diagram source' : isMd ? 'markdown specification' : isTla ? 'TLA+ specification' : 'TypeScript code';
+    header = `You are MERMATE, an expert systems architect. The user has ${isSelection ? 'selected text within' : 'pasted'} ${fmtName} and clicked Enhance. Your job is to improve it — fix syntax issues, strengthen architectural clarity, add missing failure paths, and tighten structure — while preserving every entity, relationship, and semantic element the user defined. The output must be valid ${isMmd ? 'Mermaid syntax' : isMd ? 'markdown' : isTla ? 'TLA+' : 'TypeScript'}.`;
+  } else if (isExpand) {
     header = `You are MERMATE, an expert systems architect. The user has typed a short seed idea into a prompt bar. They expect you to expand it into a real architect-grade specification — not a one-line rephrasing. This is an "idea bloom": a small word becomes a paragraph that any engineer could turn into a working system.`;
   } else if (isDistill) {
     header = `You are MERMATE, an expert systems architect functioning as a high-fidelity compression engine. The user has pasted a large technical document into a prompt bar. They expect you to compress it — losslessly across architectural concepts — into a single dense "simple idea" prompt that fully replaces the dump. The output must be small enough to feel like a prompt yet rich enough that no architectural detail is lost.`;
@@ -926,7 +967,7 @@ function buildMaxCompositionUserPrompt(baselineMmd, facts, plan, originalSource)
   const parts = [];
 
   parts.push(`[ORIGINAL USER INTENT]`);
-  parts.push(originalSource.slice(0, 2000));
+  parts.push(originalSource.slice(0, 10000));
   parts.push('');
   parts.push(`[ARCHITECTURE FACTS]`);
   parts.push(JSON.stringify(facts, null, 2));
@@ -1020,11 +1061,11 @@ function buildMergeCompositionPrompt() {
  * @param {Array} subviewMmds - [{viewName, mmdSource, score, ...}]
  * @param {string} originalSource
  * @param {object} [opts]
- * @param {number} [opts.maxInputChars] - approximate char budget (default ~350K ≈ 100K tokens)
+ * @param {number} [opts.maxInputChars] - approximate char budget (default ~800K ≈ 230K tokens, fits gpt-5.6 1.05M context)
  * @returns {string}
  */
 function buildMergeCompositionUserPrompt(subviewMmds, originalSource, opts = {}) {
-  const maxChars = opts.maxInputChars || 350_000;
+  const maxChars = opts.maxInputChars || 800_000;
   const parts = [];
   let charBudget = maxChars;
 

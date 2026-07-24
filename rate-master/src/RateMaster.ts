@@ -167,17 +167,22 @@ export class RateMaster extends EventEmitter {
     const priority = options.priority ?? JobPriority.NORMAL;
 
     const enqueuedAt = Date.now();
+    let execStart = 0;
+    const wrappedFn = () => {
+      execStart = Date.now();
+      return fn();
+    };
 
     return limiter
-      .enqueue(fn, priority, { traceId, timeoutMs: options.timeoutMs })
+      .enqueue(wrappedFn, priority, { traceId, timeoutMs: options.timeoutMs })
       .then((result) => {
         this.telemetry.emitSpan({
           traceId,
           spanId: newTraceId(),
           endpoint,
           priority,
-          queueWaitMs: 0, // enriched inside AdaptiveRateLimiter
-          executionMs: Date.now() - enqueuedAt,
+          queueWaitMs: execStart > 0 ? execStart - enqueuedAt : 0,
+          executionMs: execStart > 0 ? Date.now() - execStart : Date.now() - enqueuedAt,
           success: true,
           timestamp: Date.now(),
         });

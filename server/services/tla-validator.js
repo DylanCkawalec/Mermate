@@ -14,6 +14,7 @@
 
 const { spawn } = require('node:child_process');
 const path = require('node:path');
+const os = require('node:os');
 const fsp = require('node:fs/promises');
 const logger = require('../utils/logger');
 
@@ -23,22 +24,35 @@ const JAR_PATH = path.join(VENDOR_DIR, 'tla2tools.jar');
 
 const SANY_TIMEOUT_MS = parseInt(process.env.MERMATE_SANY_TIMEOUT_MS || '15000', 10);
 const TLC_TIMEOUT_MS = parseInt(process.env.MERMATE_TLC_TIMEOUT_MS || '60000', 10);
+const TLC_HEAP_MB = parseInt(process.env.MERMATE_TLC_HEAP_MB || '0', 10); // 0 = JVM default
+const TLC_MAX_STATES = parseInt(process.env.MERMATE_TLC_MAX_STATES || '0', 10); // 0 = disabled
 const MAX_REPAIR_ATTEMPTS = 2;
 
 // ---- Java / JAR availability -----------------------------------------------
 
 let _javaAvailable = null;
 let _jarAvailable = null;
+let _javaVersion = null;
 
 async function checkJava() {
   if (_javaAvailable !== null) return _javaAvailable;
   try {
     const result = await _exec('java', ['-version'], { timeout: 5000 });
     _javaAvailable = result.exitCode === 0;
+    if (_javaAvailable) {
+      // `java -version` prints to stderr; first line carries the version.
+      const line = (result.stderr || result.stdout || '').split('\n')[0] || '';
+      const m = line.match(/"([^"]+)"/);
+      _javaVersion = m ? m[1] : line.trim() || 'unknown';
+    }
   } catch {
     _javaAvailable = false;
   }
   return _javaAvailable;
+}
+
+function getJavaVersion() {
+  return _javaVersion;
 }
 
 async function checkJar() {
@@ -55,6 +69,16 @@ async function checkJar() {
 async function isAvailable() {
   const [java, jar] = await Promise.all([checkJava(), checkJar()]);
   return java && jar;
+}
+
+/**
+ * Boot warm-up — probe Java + jar once at server start so the first TLA+
+ * render never pays the probe cost mid-request. Fire-and-forget.
+ */
+function warmUp() {
+  isAvailable().then((ok) => {
+    logger.info('tla_validator.warmup', { available: ok, javaVersion: _javaVersion, jarPath: JAR_PATH });
+  }).catch(() => { /* probes cache their own failures */ });
 }
 
 // ---- Process execution helper ----------------------------------------------
@@ -145,17 +169,30 @@ async function runSany(tlaFilePath) {
 async function runTlc(tlaFilePath, cfgFilePath) {
   const tlaDir = path.dirname(tlaFilePath);
   const tracePath = path.join(tlaDir, 'trace.json');
+  // Isolated metadir keeps TLC's states/ scratch out of the flow directory
+  // and lets -cleanup wipe it safely after the run.
+  const metaDir = path.join(os.tmpdir(), `tlc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
+
+  const jvmArgs = ['-XX:+UseParallelGC'];
+  if (TLC_HEAP_MB > 0) jvmArgs.push(`-Xmx${TLC_HEAP_MB}m`);
 
   const start = Date.now();
   const result = await _exec('java', [
-    '-XX:+UseParallelGC',
+    ...jvmArgs,
     '-jar', JAR_PATH,
     '-config', cfgFilePath,
     '-workers', 'auto',
     '-deadlock',
+    '-checkpoint', '0',
+    '-metadir', metaDir,
+    '-cleanup',
     '-dumpTrace', 'json', tracePath,
     tlaFilePath,
   ], { timeout: TLC_TIMEOUT_MS, cwd: tlaDir });
+
+  // Best-effort removal of the scratch dir (TLC -cleanup handles states/,
+  // this removes the metadir shell itself).
+  fsp.rm(metaDir, { recursive: true, force: true }).catch(() => {});
 
   const wallClockMs = Date.now() - start;
   const combined = result.stdout + '\n' + result.stderr;
@@ -270,6 +307,60 @@ async function runTlc(tlaFilePath, cfgFilePath) {
   };
 }
 
+// ---- State-space guard -----------------------------------------------------
+
+/**
+ * Rough heuristic for state-space size. Treats each variable's state set as
+ * contributing a multiplicative factor, capped to avoid arithmetic overflow.
+ * This is intentionally conservative: it warns early on architectures that
+ * are likely to explode TLC runtime without disabling the bounded 60s cap.
+ *
+ * @param {Array<{id: string, stateSet: string}>} variables
+ * @param {Array<{actionName: string}>} actions
+ * @returns {number}
+ */
+function estimateStateSpace(variables, actions) {
+  let estimate = 1;
+  let unboundedFactors = 0;
+
+  for (const v of variables || []) {
+    const set = String(v.stateSet || '');
+    // {"a", "b", "c"} style finite sets
+    const finiteMatch = set.match(/\{[^}]*\}/);
+    if (finiteMatch) {
+      const elems = finiteMatch[0].split(',').filter((s) => s.trim().length > 0).length;
+      estimate *= Math.max(1, elems);
+    } else if (/Nat|Int|Seq/.test(set)) {
+      unboundedFactors++;
+    } else {
+      // Unknown / boolean-ish default
+      estimate *= 2;
+    }
+  }
+
+  // Action concurrency multiplies combinatorics, but only if variables exist.
+  const actionCount = (actions || []).length || 1;
+  if ((variables || []).length > 0) {
+    estimate *= Math.max(1, actionCount);
+  }
+
+  if (unboundedFactors > 0) {
+    estimate *= Math.pow(10, unboundedFactors);
+  }
+
+  return Math.min(estimate, Number.MAX_SAFE_INTEGER);
+}
+
+function _logStateSpaceGuard(estimate) {
+  if (TLC_MAX_STATES > 0 && estimate > TLC_MAX_STATES) {
+    logger.warn('tla_validator.statespace_guard', {
+      estimate,
+      cap: TLC_MAX_STATES,
+      note: 'State-space estimate exceeds configured cap; TLC timeout remains authoritative.',
+    });
+  }
+}
+
 // ---- Repair Loop -----------------------------------------------------------
 
 /**
@@ -312,6 +403,66 @@ async function validateWithRepair(tlaSource, tlaDir, moduleName, repairFn) {
 }
 
 /**
+ * Fast-path validation: run SANY on both the LLM-generated spec and the
+ * deterministic scaffold in parallel. If the LLM spec is invalid but the
+ * scaffold passes, adopt the scaffold immediately — this saves up to two
+ * LLM repair round-trips (≈ 30–60s) while honestly reporting the deterministic
+ * source in provenance. The selected source is then run through the full
+ * SANY+TLC pipeline so the returned shape matches fullValidation().
+ *
+ * @param {string} llmSource - LLM/refined TLA+ source
+ * @param {string} scaffoldSource - Deterministic compiler output
+ * @param {string} cfgSource - TLC config text
+ * @param {string} tlaDir - Directory for temp files
+ * @param {string} moduleName
+ * @param {Function} repairFn - async (source, errors) => repairedSource
+ * @returns {Promise<object>} - same shape as fullValidation() plus usedScaffold
+ */
+async function validateWithScaffoldFastPath(llmSource, scaffoldSource, cfgSource, tlaDir, moduleName, repairFn) {
+  const llmPath = path.join(tlaDir, `${moduleName}_llm.tla`);
+  const scaffoldPath = path.join(tlaDir, `${moduleName}_scaffold.tla`);
+
+  await fsp.mkdir(tlaDir, { recursive: true });
+  await Promise.all([
+    fsp.writeFile(llmPath, llmSource, 'utf8'),
+    fsp.writeFile(scaffoldPath, scaffoldSource, 'utf8'),
+  ]);
+
+  const [llmSany, scaffoldSany] = await Promise.all([
+    runSany(llmPath),
+    runSany(scaffoldPath),
+  ]);
+
+  logger.info('tla_validator.scaffold_fastpath', {
+    moduleName,
+    llmValid: llmSany.valid,
+    scaffoldValid: scaffoldSany.valid,
+  });
+
+  let selectedSource = llmSource;
+  let usedScaffold = false;
+  let fastRepairAttempts = 0;
+
+  if (llmSany.valid) {
+    selectedSource = llmSource;
+    usedScaffold = false;
+  } else if (scaffoldSany.valid) {
+    selectedSource = scaffoldSource;
+    usedScaffold = true;
+  } else {
+    // Neither passed: fall back to the normal repair loop on the LLM source.
+    const repaired = await validateWithRepair(llmSource, tlaDir, moduleName, repairFn);
+    selectedSource = repaired.tlaSource;
+    fastRepairAttempts = repaired.repairAttempts;
+  }
+
+  const validation = await fullValidation(selectedSource, cfgSource, tlaDir, moduleName, repairFn);
+  validation.usedScaffold = usedScaffold;
+  validation.sany.repairAttempts = (validation.sany.repairAttempts || 0) + fastRepairAttempts;
+  return validation;
+}
+
+/**
  * Full validation pipeline: SANY + TLC.
  *
  * @param {string} tlaSource
@@ -338,6 +489,7 @@ async function fullValidation(tlaSource, cfgSource, tlaDir, moduleName, repairFn
         valid: false,
         errors: sanyPhase.sanyResult.errors,
         repairAttempts: sanyPhase.repairAttempts,
+        wallClockMs: sanyPhase.sanyResult.wallClockMs || 0,
       },
       tlc: { checked: false, success: false, invariantsChecked: [], violations: [], statesExplored: 0, wallClockMs: 0 },
     };
@@ -372,11 +524,16 @@ module.exports = {
   isAvailable,
   checkJava,
   checkJar,
+  getJavaVersion,
+  warmUp,
   runSany,
   runTlc,
   validateWithRepair,
+  validateWithScaffoldFastPath,
   fullValidation,
+  estimateStateSpace,
   JAR_PATH,
   SANY_TIMEOUT_MS,
   TLC_TIMEOUT_MS,
+  TLC_MAX_STATES,
 };

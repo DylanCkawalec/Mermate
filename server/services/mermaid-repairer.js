@@ -240,6 +240,122 @@ function repair(source) {
     changes.push('normalized indentation');
   }
 
+  // ---- 7. Fix misplaced pipe characters -----------------------------------
+  // Ollama models sometimes produce "NodeID |"label"" or "NodeID |label|"
+  // without a preceding edge operator. In Mermaid, | is only valid as an
+  // edge label delimiter: A -->|label| B. A standalone pipe causes a parse
+  // error. Fix by removing the pipe segment and converting it to a comment.
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('%%')) continue;
+    if (/^(subgraph|classDef|class|style|linkStyle|direction|flowchart|graph)\b/i.test(trimmed)) continue;
+
+    // Skip lines that have proper edge labels (arrow before pipe)
+    if (/(-->|==>|-\.->|---)\s*\|/.test(trimmed)) continue;
+
+    // Detect misplaced pipe: "NodeID |something" or "NodeID |"something""
+    const pipeMatch = trimmed.match(/^(\w[\w]*)\s*\|(.+)$/);
+    if (pipeMatch) {
+      const nodeId = pipeMatch[1];
+      const rest = pipeMatch[2];
+      // Check if the pipe is being used as a label delimiter without an edge
+      // If the line doesn't have any edge operator, the pipe is misplaced
+      if (!EDGE_RE.test(trimmed)) {
+        lines[i] = `${line.match(/^\s*/)[0]}${nodeId} %% ${rest.replace(/["']/g, '').trim()}`;
+        changes.push(`fixed misplaced pipe on line ${i + 1}: converted to comment`);
+      }
+    }
+  }
+
+  // ---- 8. Strip escaped quotes and inner quotes from labels ----------------
+  // Ollama models produce: A -->|\"label\"| B  and  Node[("text")]
+  // Mermaid edge labels with pipes don't need quotes, and node bracket
+  // text with quotes causes parse errors. Strip them first so subsequent
+  // pipe/label detection works on clean text.
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('%%')) continue;
+
+    // Fix escaped quotes in edge labels: |\"text\"| → |text|
+    if (/\|\\?["']/.test(trimmed)) {
+      const fixed = lines[i]
+        .replace(/\|\\+"/g, '|')      // |\" → |
+        .replace(/\|\\+'/g, '|')      // |\' → |
+        .replace(/\\+"/g, '')          // remaining \"
+        .replace(/\\+'/g, '');         // remaining \'
+      if (fixed !== lines[i]) {
+        lines[i] = fixed;
+        changes.push(`stripped escaped quotes on line ${i + 1}`);
+      }
+    }
+
+    // Fix quotes inside node brackets: [("text")] → [(text)]
+    const bracketQuoteRe = /(\[|\()[\s]*["']([^"']+)["'][\s]*(\]|\))/g;
+    if (bracketQuoteRe.test(lines[i])) {
+      lines[i] = lines[i].replace(bracketQuoteRe, '$1$2$3');
+      changes.push(`stripped quotes inside node brackets on line ${i + 1}`);
+    }
+  }
+
+  // ---- 9. Fix edge lines with pipe labels but missing target node ---------
+  // Another ollama pattern: "A --> |label|" with no target node after the
+  // closing pipe. Mermaid requires: A -->|label| B
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('%%')) continue;
+
+    // Match: "NodeID --> |label|" or "NodeID -->|label|" with nothing after
+    const danglingLabelRe = /^(\w[\w]*)\s*(-->|==>|-\.->)\s*\|([^|]*)\|\s*$/;
+    const danglingMatch = trimmed.match(danglingLabelRe);
+    if (danglingMatch) {
+      const indent = line.match(/^\s*/)[0];
+      const nodeId = danglingMatch[1];
+      const edge = danglingMatch[2];
+      const label = danglingMatch[3].trim();
+      // Create a target node from the label
+      const targetId = label.replace(/[^a-zA-Z0-9]/g, '').slice(0, 20) || 'Target';
+      lines[i] = `${indent}${nodeId} ${edge}|${label}| ${targetId}`;
+      changes.push(`added missing target node for edge label on line ${i + 1}`);
+    }
+  }
+
+  // ---- 10. Fix unclosed pipe labels ----------------------------------------
+  // Ollama sometimes opens a pipe label but never closes it:
+  //   A -->|some text without closing pipe
+  // Detect: edge operator followed by |... with no matching closing |
+  // Fix: close the pipe and add a target node derived from the label.
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('%%')) continue;
+
+    // Skip if line has balanced pipes (already valid)
+    const pipeCount = (trimmed.match(/\|/g) || []).length;
+    if (pipeCount % 2 === 0) continue;
+
+    // Check for edge operator followed by unclosed pipe
+    const unclosedRe = /^(\w[\w]*)\s*(-->|==>|-\.->)\s*\|(.+)$/;
+    const unclosedMatch = trimmed.match(unclosedRe);
+    if (unclosedMatch) {
+      const indent = line.match(/^\s*/)[0];
+      const nodeId = unclosedMatch[1];
+      const edge = unclosedMatch[2];
+      let label = unclosedMatch[3].trim();
+      // Remove trailing quote if present
+      label = label.replace(/["']$/, '');
+      const targetId = label.replace(/[^a-zA-Z0-9]/g, '').slice(0, 20) || 'Target';
+      lines[i] = `${indent}${nodeId} ${edge}|${label}| ${targetId}`;
+      changes.push(`closed unclosed pipe label on line ${i + 1}`);
+    }
+  }
+
   return {
     source: lines.join('\n'),
     changes,

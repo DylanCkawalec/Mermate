@@ -624,6 +624,22 @@ function buildValidationLoop(ctx) {
         initialClassification: classifyViolation(violation),
       })),
     },
+    // Upstream bug-confirmation workflow (Specula skills/bug-confirmation):
+    // every counterexample classified as a potential code_bug must survive
+    // investigate → reproduce → defend → consolidate before it is reported.
+    bugConfirmation: {
+      status: (ctx.validation?.tlc?.violations || []).length > 0 ? 'pending_confirmation' : 'not_required',
+      phases: ['investigation', 'reproduction', 'defense', 'consolidation'],
+      objective: 'Confirm suspected code bugs by reproducing the counterexample against real behavior; repairs are only accepted when the repair status validates cleanly.',
+      reportPolicy: 'Confirmed bug reports are emitted as separate artifacts, never embedded into the spec itself.',
+    },
+    // Upstream harness-generation skill — the TS runtime harness downstream
+    // is this Protocol's instrumentation target.
+    harnessGeneration: {
+      status: 'delegated_to_ts_stage',
+      objective: 'Instrument the implementation so real traces can be captured and replayed through the Trace spec.',
+      instrumentationSpec: 'instrumentation-spec.md',
+    },
     classificationPolicy: [
       { label: 'code_bug', when: 'Real traces reproduce the counterexample and the model matches observed behavior.' },
       { label: 'model_bug', when: 'The counterexample depends on impossible states or empty traces.' },
@@ -634,6 +650,8 @@ function buildValidationLoop(ctx) {
       'Run trace validation first to eliminate model-code drift.',
       'Run model checking with the current MC config and any hunt configs.',
       'Classify each counterexample and feed the result back into the modeling brief or the implementation plan.',
+      'Confirm suspected code bugs through the bug-confirmation phases before reporting.',
+      'Generate/refresh the harness from the instrumentation spec to capture new traces.',
     ],
   };
 }
