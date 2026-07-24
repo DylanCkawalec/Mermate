@@ -604,6 +604,7 @@ router.post('/agent/run', async (req, res) => {
     const planLatency = Date.now() - planCallStart;
 
     // Score each plan result by analyzing it
+    const planCtx = catalog.estimateContext('copilot_enhance', planningUserPrompt);
     const scoredPlans = [];
     for (const { role, result } of planResults) {
       const roleName = role?.name || 'default';
@@ -614,7 +615,6 @@ router.post('/agent/run', async (req, res) => {
         success: !!result.output,
         provider: result.provider,
       });
-      const planCtx = catalog.estimateContext('copilot_enhance', planningUserPrompt);
       telemetry.record(runId, {
         stage: 'planning',
         role: roleName,

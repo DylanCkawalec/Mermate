@@ -15,18 +15,27 @@ const { buildPrompt } = require('./axiom-prompts');
 const ENHANCER_URL = process.env.MERMAID_ENHANCER_URL || 'http://localhost:8100';
 const TIMEOUT_MS = parseInt(process.env.MERMAID_ENHANCER_TIMEOUT || '15000', 10);
 
+const _availCache = { ok: false, checkedAt: 0 };
+const AVAIL_TTL = 5000;
+
 /**
  * Check if the enhancer service is available.
  * @returns {Promise<boolean>}
  */
 async function isAvailable() {
+  const now = Date.now();
+  if (now - _availCache.checkedAt < AVAIL_TTL) return _availCache.ok;
   let timer = null;
   try {
     const controller = new AbortController();
     timer = setTimeout(() => controller.abort(), 2000);
     const res = await fetch(`${ENHANCER_URL}/health`, { signal: controller.signal });
+    _availCache.ok = res.ok;
+    _availCache.checkedAt = now;
     return res.ok;
   } catch {
+    _availCache.ok = false;
+    _availCache.checkedAt = now;
     return false;
   } finally {
     if (timer) clearTimeout(timer);

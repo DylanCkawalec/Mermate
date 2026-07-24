@@ -322,7 +322,7 @@ async function compileWithRetry(mmdSource, outputDir, baseName, ports = null) {
       repairChanges.push(`model-assisted repair via ${modelResult.provider}`);
       const reRepaired = deterministicRepair(modelResult.output);
       if (reRepaired.changes.length > 0) repairChanges.push(...reRepaired.changes);
-      result = await compile(reRepaired.source, outputDir, baseName);
+      result = await p.compiler.compile(reRepaired.source, outputDir, baseName);
       if (result.ok) return { result, mmdSource: reRepaired.source, attempts: 3, repairChanges };
     }
   }
@@ -1180,7 +1180,7 @@ async function decomposeAndRender(source, profile, ports = null, useMax = false)
 
   const decomposePrompt = buildDecomposeUserPrompt(source, profile);
   const decompCallStart = Date.now();
-  const decomposeResult = await provider.infer('decompose', { userPrompt: decomposePrompt });
+  const decomposeResult = await inferFn('decompose', { userPrompt: decomposePrompt });
   stagesExecuted.push('decompose');
 
   if (rt) {
@@ -1235,7 +1235,7 @@ async function decomposeAndRender(source, profile, ports = null, useMax = false)
         prep.mmdSource, errorStr, viewShadow, viewDesc,
         { lineNumber, priorAttempts: compileOut.attempts, deterministicChanges: compileOut.repairChanges },
       );
-      const repairResult = await provider.infer('repair_from_trace', { userPrompt: tracePrompt });
+      const repairResult = await inferFn('repair_from_trace', { userPrompt: tracePrompt });
 
       if (repairResult.output) {
         const repairedCompile = await compileWithRetry(repairResult.output, outputDir, 'subview');
