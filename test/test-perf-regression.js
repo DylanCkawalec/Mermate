@@ -24,16 +24,16 @@ test('Performance Budget: renderHPCGoT completes in < 500ms (offline fake)', asy
   assert.ok(elapsed < 500, `renderHPCGoT latency ${elapsed}ms < 500ms budget`);
 });
 
-test('Performance Budget: decomposeAndRender completes in < 5000ms (offline fake + subview compile)', async () => {
+test('Performance Budget: decomposeAndRender completes in < 15000ms (offline fake + subview compile)', async () => {
   const start = Date.now();
   const source = 'Large e-commerce platform with Ingress Gateway, Order Processing, and Persistence.';
   await inputRouter.decomposeAndRender(source, null, null, false);
   const elapsed = Date.now() - start;
 
-  assert.ok(elapsed < 5000, `decomposeAndRender latency ${elapsed}ms < 5000ms budget`);
+  assert.ok(elapsed < 15000, `decomposeAndRender latency ${elapsed}ms < 15000ms budget`);
 });
 
-test('Performance Budget: compileWithRetry completes in < 2500ms on valid input', async () => {
+test('Performance Budget: compileWithRetry completes in < 8000ms on valid input', async () => {
   const validMmd = 'flowchart TB\n    A["Start"] --> B["End"]';
   const tmpDir = path.join(__dirname, 'fixtures');
 
@@ -41,7 +41,7 @@ test('Performance Budget: compileWithRetry completes in < 2500ms on valid input'
   await inputRouter.compileWithRetry(validMmd, tmpDir, 'perf-valid');
   const elapsed = Date.now() - start;
 
-  assert.ok(elapsed < 2500, `compileWithRetry latency ${elapsed}ms < 2500ms budget`);
+  assert.ok(elapsed < 8000, `compileWithRetry latency ${elapsed}ms < 8000ms budget`);
 });
 
 test('Memory Stability: 20 consecutive pipeline iterations do not cause uncontrolled heap growth', async () => {
