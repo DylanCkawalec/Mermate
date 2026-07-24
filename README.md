@@ -4,7 +4,7 @@
 
 **AI architecture copilot for Mermaid, built to turn raw ideas into expert system diagrams.**
 
-Describe a system in plain English. Mermate compiles it into production-quality Mermaid diagrams — flowcharts, state machines, sequence diagrams, ER diagrams, and more — with optional AI enhancement powered by whatever local or remote LLM you connect.
+Describe a system in plain English. Mermate compiles it into production-quality Mermaid diagrams — flowcharts, state machines, sequence diagrams, ER diagrams, and more — with optional AI enhancement powered by whatever local or remote LLM you connect. The full pipeline runs idea → Markdown → Mermaid → TLA+ specification → TypeScript runtime → downloadable bundle, with audit-grade event tracking, repair budgets, and a boot-time toolchain readiness check.
 
 ---
 
@@ -28,7 +28,7 @@ Typical local stack:
 
 - **Opseeq** (optional): OpenAI-compatible gateway + management API on `http://127.0.0.1:9090` — set `OPSEEQ_URL` to that origin **without** `/v1` (see [docs/tandem-opseeq-protocol.md](docs/tandem-opseeq-protocol.md)).
 - **Ollama** (optional): local inference on `http://127.0.0.1:11434`
-- **Mermate**: idea → markdown → Mermaid → **TLA+** → **TypeScript runtime** → optional **Rust binary** and **macOS `.app`** on `http://127.0.0.1:3333`
+- **Mermate**: idea → markdown → Mermaid → **TLA+** → **TypeScript runtime** → optional **Rust binary** and **macOS `.app`** on `http://127.0.0.1:3333`. Boot sequence checks server health, inference providers, TLA+ toolchain, Specula readiness, and diagram history before showing the app. A centralized `RuntimeState` tracker gates all periodic pollers (Opseeq heartbeat, autoguide) so the app makes zero API calls when idle.
 - **MCP**: Python bridge under `mcp_service/` with repo `.mcp.json` (virtualenv path may need adjusting after clone)
 - **Outputs**: diagram and formal artifacts under `flows/`; run lineage and traces under `runs/` (including `*.trace.json`); optional export dumps under `~/Desktop/MERMATE/dumps` or `MERMATE_DUMP_DIR`; successful Rust packaging can copy a `.app` to the Desktop with a generated landing page and `skill.json` for agent consumption
 
@@ -215,6 +215,9 @@ Representative HTTP surfaces:
 - Rust packaging (e.g. compile + `.app`): routes under `server/routes/rust.js` as mounted in `server/index.js`
 - `POST /api/guide/evaluate` — Auto Guide evaluation (heuristic fallback when Opseeq is unhealthy)
 - `GET /api/agent/modes`, `POST /api/agent/run`, `POST /api/agent/finalize`
+- `GET /api/agent/active` — list live agent sessions (used for reattach after page refresh)
+- `GET /api/render/tla/errors/:runId` — persisted TLA+ source for frontend hydration
+- `GET /api/render/ts/source/:runId` — persisted TypeScript source for frontend hydration
 
 That enables:
 
@@ -423,6 +426,27 @@ The frontend agent UI calls two SSE endpoints:
 There is also:
 
 - `GET /api/agent/modes`: returns the available agent modes and labels
+- `GET /api/agent/active`: returns live agent sessions for reattach after page refresh
+
+### Audit events and repair budget
+
+Every LLM call, repair attempt, render completion/failure, and agent stage transition emits an audit event via `server/services/audit-tracker.js`. The terminal narrator (`server/services/terminal-narrator.js`) converts these into concise SSE narration events for the agent panel log.
+
+Repair calls are budgeted per stage via `MERMATE_MAX_REPAIR_CALLS` (default 5). When the budget is exhausted, a `sys:error` audit event fires and the stage fails gracefully. The agent panel shows a live repair budget indicator bar that fills as attempts are consumed.
+
+### Boot sequence and idle state management
+
+On page load, the frontend runs a coordinated boot sequence:
+
+1. **Server health** — `GET /api/health` (schema version check)
+2. **Inference providers** — `GET /api/copilot/health` (AI availability)
+3. **TLA+ toolchain** — `GET /api/render/tla/status` (Java/Specula readiness)
+4. **Diagrams** — `GET /api/diagrams` (sidebar reconciliation)
+5. **Opseeq** — polls until healthy if warming up
+
+Each step shows a status badge (green/yellow/red) in the boot overlay. The app does **not** auto-fire AI API calls on boot — TLA+/TS tabs hydrate from persisted artifacts on disk, and auto-render is suppressed during the initial restore.
+
+A centralized `RuntimeState` tracker monitors agent state, loading state, and user interaction timestamps. All periodic pollers (Opseeq heartbeat every 20s, autoguide evaluate every 5s) consult `RuntimeState.shouldPoll` before firing. When the app is idle (no agent running, no loading, no user interaction for 60s), all API calls stop completely.
 
 ### Available agent modes
 
@@ -547,8 +571,11 @@ mermaid/
 │       ├── run-exporter.js        # Optional completed-run dumps
 │       ├── icon-generator.js      # DALL·E / GPT Image icons + macOS bundle helpers
 │       ├── landing-page-generator.js  # Packaged-app dashboard + skill.json
-│       └── gpt-enhancer-bridge.js # HTTP bridge to the enhancer service
+│       ├── gpt-enhancer-bridge.js # HTTP bridge to the enhancer service
+│       ├── audit-tracker.js       # Audit event emission for LLM calls, repairs, renders
+│       └── terminal-narrator.js   # Converts audit events to SSE narration for agent panel
 ├── public/                 # Frontend (served statically)
+│   ├── js/mermaid-gpt-app.js      # Main app controller, boot sequence, RuntimeState
 │   ├── js/mermaid-gpt-copilot.js  # Ghost-text copilot for Simple Idea mode
 │   ├── js/mermaid-gpt-agent.js    # Frontend agent orchestration and SSE handling
 │   ├── js/mermate-autoguide.js    # Auto Guide + /api/guide/evaluate polling
@@ -561,6 +588,9 @@ mermaid/
 │   └── flows/              # Compiled output from ./mermaid.sh compile
 ├── flows/                  # Compiled output from the web app (served at /flows)
 ├── runs/                   # Run JSON + *.trace.json lineage (served at /runs)
+├── specula-engine/         # Specula TLA+ engine (git submodule)
+├── rate-master/            # Adaptive rate limiter and OODA controller (TypeScript)
+├── meta_cognition/         # Meta-cognition gateway (Python)
 ├── test/                   # Node test suite (incl. test-e2e-tandem.js)
 └── archs/mermaid_axioms.md # The intelligence model (read this)
 ```
@@ -630,6 +660,7 @@ MERMAID_ENHANCER_TIMEOUT=15000              # Enhancer request timeout in ms
 MERMAID_ENHANCER_START_CMD="<command>"      # Auto-start command for the enhancer
 MERMATE_DUMP_DIR=~/Desktop/MERMATE/dumps    # Optional completed-run export directory
 MERMATE_DUMP_RETENTION_DAYS=30              # Export cleanup horizon
+MERMATE_MAX_REPAIR_CALLS=5                   # Max repair attempts per stage before sys:error
 OPSEEQ_WS_ENABLED=true                      # Optional low-latency Opseeq stage telemetry
 OPSEEQ_WS_URL=ws://localhost:9090/api/mermate/ws
 OPSEEQ_WS_TOKEN=<optional-token>

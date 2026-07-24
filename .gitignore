@@ -42,3 +42,31 @@ simple-idea.prompt
 /push-to-limit.prompt
 /simple-idea.prompt
 /archs/
+
+# Dev scratch files and local notes
+errors.txt
+simple-idea.txt
+tracn.tla
+*.tla
+!specula-engine/**/*.tla
+!docs/**/*.tla
+
+# Specula-engine build artifacts
+specula-engine/.venv/
+specula-engine/dist/
+specula-engine/build/
+specula-engine/*.egg-info/
+
+# Rate-master build output
+rate-master/dist/
+rate-master/node_modules/
+
+# Meta-cognition local state
+meta_cognition/.venv/
+
+# IDE and editor artifacts
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
