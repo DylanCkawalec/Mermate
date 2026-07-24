@@ -510,7 +510,7 @@ router.post('/agent/run', async (req, res) => {
         cfg_source: tlaData.cfg_source || null,
         error: tlaData.error || null,
       });
-      sendEvent('done', { final_text: tlaData.tla_source || startText });
+      sendEvent('done', { final_text: tlaData.tla_source || startText, tla_source: tlaData.tla_source || '', cfg_source: tlaData.cfg_source || null });
       return;
     }
 
@@ -534,7 +534,7 @@ router.post('/agent/run', async (req, res) => {
         ts_source: tsData.ts_source || startText,
         error: tsData.error || tsData.details || null,
       });
-      sendEvent('done', { final_text: tsData.ts_source || startText });
+      sendEvent('done', { final_text: tsData.ts_source || startText, ts_source: tsData.ts_source || '' });
       return;
     }
 
@@ -1282,7 +1282,7 @@ router.post('/agent/finalize', async (req, res) => {
 
     auditTracker.emit(finalizeAuditId, 'agent:stage_enter', { stage: 'complete' });
     sendEvent('stage', { stage: 'complete', message: 'Agent workflow complete' });
-    sendEvent('done', { final_text: draftText, mmd_source: finalData.compiled_source || '', run_id: agentParentRunId || finalData.run_id });
+    sendEvent('done', { final_text: draftText, md_source: draftText, mmd_source: finalData.compiled_source || '', run_id: agentParentRunId || finalData.run_id });
 
   } catch (err) {
     if (abort.signal.aborted) return;

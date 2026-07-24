@@ -270,7 +270,6 @@ const STAGE_JSON_SCHEMA = new Set([
 
 const STAGE_JSON_OBJECT = new Set([
   'semantic_repair',
-  'copilot_enhance',
   'compose_ts',
   'repair_ts',
 ]);

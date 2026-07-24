@@ -253,16 +253,48 @@
     }
 
     _persist() {
+      const payload = JSON.stringify({
+        state: this.state,
+        artifacts: this.artifacts,
+        session: this.session,
+      });
       try {
-        const payload = JSON.stringify({
-          state: this.state,
-          artifacts: this.artifacts,
-          session: this.session,
-        });
-        // localStorage survives browser restart — sole persistence layer,
-        // ONE payload: FSM state + artifacts + session lineage together.
         localStorage.setItem('mermate_workflow', payload);
-      } catch { /* storage full or unavailable */ }
+      } catch (err) {
+        if (err && err.name === 'QuotaExceededError') {
+          // localStorage is full — trim large artifacts and retry once.
+          // The session state + runId are small; artifacts (especially a
+          // 50K-char pasted idea or generated TLA+ spec) are the bulk.
+          const trimmed = {};
+          for (const [k, v] of Object.entries(this.artifacts)) {
+            trimmed[k] = (v && v.length > 50000) ? v.slice(0, 50000) + '\n[…truncated for storage…]' : v;
+          }
+          try {
+            localStorage.setItem('mermate_workflow', JSON.stringify({
+              state: this.state,
+              artifacts: trimmed,
+              session: this.session,
+            }));
+            console.warn('[orchestrator] localStorage quota exceeded — trimmed large artifacts to fit');
+            return;
+          } catch (err2) {
+            // Still failing — save just the session + state (no artifacts)
+            // so at least the runId and stage progression survive.
+            try {
+              localStorage.setItem('mermate_workflow', JSON.stringify({
+                state: this.state,
+                artifacts: {},
+                session: this.session,
+              }));
+              console.error('[orchestrator] localStorage quota exceeded even after trimming — saved session only, artifacts dropped');
+            } catch {
+              console.error('[orchestrator] localStorage completely unavailable — all session data lost on refresh');
+            }
+          }
+        } else {
+          console.error('[orchestrator] persist failed:', err);
+        }
+      }
     }
 
     restore() {
@@ -821,7 +853,7 @@
     }
     return {
       artifacts: {
-        md: (canonical?.md ?? event.md_source ?? event.draft_text ?? '') || '',
+        md: (canonical?.md ?? event.md_source ?? event.draft_text ?? event.final_text ?? '') || '',
         mmd: (canonical?.mmd ?? event.mmd_source ?? event.compiled_source ?? '') || '',
         tla: (canonical?.tla ?? event.tla_source ?? '') || '',
         ts: (canonical?.ts ?? event.ts_source ?? '') || '',
@@ -2658,7 +2690,7 @@
     try {
       const controller = new AbortController();
       // Scale timeout with input size: ~1 KB per second + 30s base, capped at 120s
-      const timeoutMs = Math.min(120000, 30000 + Math.floor(trimmed.length / 100) * 1000);
+      const timeoutMs = Math.min(180000, 30000 + Math.floor(trimmed.length / 100) * 1000);
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       const res = await fetch(`${COPILOT_API_BASE}/enhance`, {
