@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Literal
 
@@ -12,7 +13,7 @@ except ImportError as exc:  # pragma: no cover - exercised only when dependency 
         "Missing Python dependency 'mcp[cli]'. Run `python3 -m pip install -r requirements.txt`."
     ) from exc
 
-from .client import MermateClient, MermateHttpError, summarize_sse_events
+from .client import MermateClient, MermateHttpError, summarize_sse_events, get_shared_client, get_shared_openclaw_client
 
 
 SERVER_NAME = "mermate-openclaw-mcp"
@@ -49,6 +50,17 @@ STAGE_MAP = {
         "route": "/api/render/ts",
         "description": "Generate and validate a TypeScript runtime from the TLA+ stage.",
         "requires": "run_id with persisted TLA+ artifacts",
+        "next_stage": "rust",
+    },
+    "rust": {
+        "route": "/api/render/rust",
+        "description": "Generate and validate a Rust runtime from the TypeScript stage.",
+        "requires": "run_id with persisted TS artifacts",
+    },
+    "tsx": {
+        "route": "/api/render/tsx",
+        "description": "Generate a TSX/React component from a render run.",
+        "requires": "run_id from /api/render",
     },
     "agent_preview": {
         "route": "/api/agent/run",
@@ -58,6 +70,45 @@ STAGE_MAP = {
     "agent_finalize": {
         "route": "/api/agent/finalize",
         "description": "SSE workflow that optionally applies notes and runs the final Max render.",
+    },
+    "agent_session": {
+        "route": "/api/agent/active",
+        "description": "List active agent sessions, attach to a running session, or stop one.",
+        "management": {
+            "active": "/api/agent/active — List all active agent sessions",
+            "attach": "/api/agent/attach/:sessionId — Reattach to a running agent SSE stream",
+            "stop": "/api/agent/stop/:sessionId — Stop a running agent session",
+        },
+    },
+    "runs": {
+        "route": "/api/runs",
+        "description": "List run IDs, fetch run manifests, summaries, and execution traces.",
+        "management": {
+            "list": "/api/runs — List recent run IDs",
+            "get": "/api/runs/:run_id — Fetch a run manifest",
+            "summary": "/api/runs/:run_id/summary — Fetch a run summary",
+            "trace": "/api/runs/:run_id/trace — Fetch execution trace for a run",
+        },
+    },
+    "artifacts": {
+        "route": "/api/artifacts/:run_id",
+        "description": "List and download persisted artifacts for a run.",
+    },
+    "bundle": {
+        "route": "/api/runs/:runId/bundle",
+        "description": "Download a complete bundle (mmd, svg, tla, ts, rust) for a run.",
+    },
+    "guide": {
+        "route": "/api/guide/status",
+        "description": "Opseeq guide integration: health check, connect, evaluate, and narrate.",
+    },
+    "specula": {
+        "route": "/api/specula/health",
+        "description": "Specula engine integration: health, skill files, TLC validation.",
+    },
+    "trace": {
+        "route": "/api/mermate/trace/:run_id",
+        "description": "Append and read execution trace events for runs.",
     },
     "project_pipeline": {
         "route": "/api/projects/:id/pipeline",
@@ -74,9 +125,13 @@ TOOL_ROUTE_MAP = {
         "/api/copilot/health",
         "/api/render/tla/status",
         "/api/render/ts/status",
+        "/api/render/rust/status",
+        "/api/render/tsx/status",
         "/api/agent/modes",
         "/api/meta/health",
         "/api/rate-master/metrics",
+        "/api/specula/health",
+        "/api/guide/status",
     ],
     "mermate_copilot": ["/api/copilot/enhance"],
     "mermate_visual_styles": ["/api/visual/styles"],
@@ -88,11 +143,17 @@ TOOL_ROUTE_MAP = {
     "mermate_tla_revalidate": ["/api/render/tla/revalidate"],
     "mermate_tla_edit": ["/api/render/tla/edit"],
     "mermate_render_ts": ["/api/render/ts"],
+    "mermate_render_ts_source": ["/api/render/ts/source/:run_id"],
+    "mermate_render_rust": ["/api/render/rust"],
+    "mermate_render_tsx": ["/api/render/tsx"],
     "mermate_full_pipeline": ["/api/render", "/api/render/tla", "/api/render/ts", "/api/projects/:id", "/api/projects/:id/pipeline"],
     "mermate_agent_modes": ["/api/agent/modes"],
     "mermate_agent_run": ["/api/agent/run"],
     "mermate_agent_finalize": ["/api/agent/finalize"],
     "mermate_agent_workflow": ["/api/agent/run", "/api/agent/finalize"],
+    "mermate_agent_active": ["/api/agent/active"],
+    "mermate_agent_attach": ["/api/agent/attach/:sessionId"],
+    "mermate_agent_stop": ["/api/agent/stop/:sessionId"],
     "mermate_list_diagrams": ["/api/diagrams"],
     "mermate_rename_diagram": ["/api/diagrams/:name"],
     "mermate_delete_diagram": ["/api/diagrams/:name"],
@@ -108,6 +169,21 @@ TOOL_ROUTE_MAP = {
     "mermate_meta_audit": ["/api/meta/audit"],
     "mermate_meta_cron": ["/api/meta/cron"],
     "mermate_agents": ["/api/agents"],
+    "mermate_list_runs": ["/api/runs"],
+    "mermate_get_run": ["/api/runs/:run_id"],
+    "mermate_get_run_summary": ["/api/runs/:run_id/summary"],
+    "mermate_get_run_trace": ["/api/runs/:run_id/trace"],
+    "mermate_get_artifacts": ["/api/artifacts/:run_id"],
+    "mermate_get_bundle": ["/api/runs/:runId/bundle"],
+    "mermate_rate_master_metrics": ["/api/rate-master/metrics"],
+    "mermate_specula_health": ["/api/specula/health"],
+    "mermate_specula_validate_tlc": ["/api/specula/validate-tlc"],
+    "mermate_specula_skill": ["/api/specula/skills/:skill/:file"],
+    "mermate_guide_status": ["/api/guide/status"],
+    "mermate_guide_evaluate": ["/api/guide/evaluate"],
+    "mermate_trace_append": ["/api/mermate/stage"],
+    "mermate_trace_get": ["/api/mermate/trace/:run_id"],
+    "mermate_trace_stats": ["/api/mermate/trace-stats"],
     "openclaw_status": ["/api/status"],
     "openclaw_chat": ["/api/chat"],
     "openclaw_connectivity_probe": ["/api/connectivity/probe"],
@@ -131,11 +207,11 @@ mcp = FastMCP(
 
 
 def create_client() -> MermateClient:
-    return MermateClient(base_url=DEFAULT_BASE_URL, timeout_s=DEFAULT_ROUTE_TIMEOUT_S)
+    return get_shared_client()
 
 
 def create_openclaw_client() -> MermateClient:
-    return MermateClient(base_url=DEFAULT_OPENCLAW_URL, timeout_s=DEFAULT_OPENCLAW_TIMEOUT_S)
+    return get_shared_openclaw_client(DEFAULT_OPENCLAW_URL, float(DEFAULT_OPENCLAW_TIMEOUT_S))
 
 
 def _normalize_input_mode(mode: str | None) -> str | None:
@@ -240,23 +316,35 @@ def tool_route_map_resource() -> str:
 )
 def full_build_plan_prompt(source: str) -> str:
     return (
-        "Use the Mermate MCP tools to turn this request into a render, then continue through TLA+ and "
-        "TypeScript when the prior stage succeeds.\n\n"
+        "Use the Mermate MCP tools to turn this request into a render, then continue through TLA+, "
+        "TypeScript, and optionally Rust when each prior stage succeeds.\n\n"
         f"Source request:\n{source.strip()}"
     )
 
 
-@mcp.tool(description="Inspect the local Mermate runtime, including copilot, TLA, TS, meta, and rate-master availability.")
+@mcp.tool(description="Inspect the local Mermate runtime, including copilot, TLA, TS, Rust, TSX, agent, meta, rate-master, specula, and guide availability.")
 def mermate_status() -> dict[str, Any]:
-    return {
-        "base_url": DEFAULT_BASE_URL,
-        "copilot": _call_json("GET", "/api/copilot/health"),
-        "tla": _call_json("GET", "/api/render/tla/status"),
-        "ts": _call_json("GET", "/api/render/ts/status"),
-        "agent_modes": _call_json("GET", "/api/agent/modes"),
-        "meta": _call_json("GET", "/api/meta/health"),
-        "rate_master": _call_json("GET", "/api/rate-master/metrics"),
+    checks = {
+        "copilot": ("GET", "/api/copilot/health"),
+        "tla": ("GET", "/api/render/tla/status"),
+        "ts": ("GET", "/api/render/ts/status"),
+        "rust": ("GET", "/api/render/rust/status"),
+        "tsx": ("GET", "/api/render/tsx/status"),
+        "agent_modes": ("GET", "/api/agent/modes"),
+        "meta": ("GET", "/api/meta/health"),
+        "rate_master": ("GET", "/api/rate-master/metrics"),
+        "specula": ("GET", "/api/specula/health"),
+        "guide": ("GET", "/api/guide/status"),
     }
+    results: dict[str, Any] = {"base_url": DEFAULT_BASE_URL}
+    with ThreadPoolExecutor(max_workers=min(len(checks), 10)) as pool:
+        futures = {
+            pool.submit(_call_json, method, path): key
+            for key, (method, path) in checks.items()
+        }
+        for future in as_completed(futures):
+            results[futures[future]] = future.result()
+    return results
 
 
 @mcp.tool(description="Run Mermate's deterministic input analyzer on idea, markdown, or Mermaid text.")
@@ -765,6 +853,176 @@ def mermate_meta_cron() -> dict[str, Any]:
 @mcp.tool(description="List the loaded agent definitions from Mermate.")
 def mermate_agents() -> dict[str, Any]:
     return _call_json("GET", "/api/agents")
+
+
+# ---- Agent session management -----------------------------------------------
+
+@mcp.tool(description="List all active agent sessions with their current stage and status.")
+def mermate_agent_active() -> dict[str, Any]:
+    return _call_json("GET", "/api/agent/active")
+
+
+@mcp.tool(description="Reattach to a running agent session by sessionId. Returns the current session state.")
+def mermate_agent_attach(session_id: str) -> dict[str, Any]:
+    return _call_json("GET", f"/api/agent/attach/{session_id}")
+
+
+@mcp.tool(description="Stop a running agent session by sessionId. Returns the stopped session status.")
+def mermate_agent_stop(session_id: str) -> dict[str, Any]:
+    return _call_json("POST", f"/api/agent/stop/{session_id}")
+
+
+# ---- Runs management --------------------------------------------------------
+
+@mcp.tool(description="List recent run IDs from the Mermate run tracker.")
+def mermate_list_runs(limit: int = 20) -> dict[str, Any]:
+    return _call_json("GET", "/api/runs", query={"limit": limit})
+
+
+@mcp.tool(description="Fetch the full manifest for a specific run by run_id.")
+def mermate_get_run(run_id: str) -> dict[str, Any]:
+    return _call_json("GET", f"/api/runs/{run_id}")
+
+
+@mcp.tool(description="Fetch a summary view of a run, including stage timings, provider usage, and outcome.")
+def mermate_get_run_summary(run_id: str) -> dict[str, Any]:
+    return _call_json("GET", f"/api/runs/{run_id}/summary")
+
+
+@mcp.tool(description="Fetch the execution trace for a run, including all stage events and timing data.")
+def mermate_get_run_trace(run_id: str) -> dict[str, Any]:
+    return _call_json("GET", f"/api/runs/{run_id}/trace")
+
+
+# ---- Artifacts and bundles --------------------------------------------------
+
+@mcp.tool(description="List persisted artifacts (mmd, svg, tla, ts, rust) for a given run_id.")
+def mermate_get_artifacts(run_id: str) -> dict[str, Any]:
+    return _call_json("GET", f"/api/artifacts/{run_id}")
+
+
+@mcp.tool(description="Download a complete bundle for a run, including all generated artifacts as a structured payload.")
+def mermate_get_bundle(run_id: str) -> dict[str, Any]:
+    return _call_json("GET", f"/api/runs/{run_id}/bundle")
+
+
+# ---- Rate-master ------------------------------------------------------------
+
+@mcp.tool(description="Read live rate-master adaptive queue metrics: throughput, retries, backoff state, and per-endpoint health.")
+def mermate_rate_master_metrics() -> dict[str, Any]:
+    return _call_json("GET", "/api/rate-master/metrics")
+
+
+# ---- Rust and TSX -----------------------------------------------------------
+
+@mcp.tool(description="Generate and validate a Rust runtime from an existing render run with TypeScript artifacts.")
+def mermate_render_rust(
+    run_id: str,
+    diagram_name: str | None = None,
+    timeout_s: int | None = None,
+) -> dict[str, Any]:
+    return _call_json(
+        "POST",
+        "/api/render/rust",
+        body={"run_id": run_id, "diagram_name": diagram_name},
+        timeout_s=timeout_s or DEFAULT_TS_TIMEOUT_S,
+    )
+
+
+@mcp.tool(description="Generate a TSX/React component from an existing render run.")
+def mermate_render_tsx(
+    run_id: str,
+    diagram_name: str | None = None,
+    timeout_s: int | None = None,
+) -> dict[str, Any]:
+    return _call_json(
+        "POST",
+        "/api/render/tsx",
+        body={"run_id": run_id, "diagram_name": diagram_name},
+        timeout_s=timeout_s or DEFAULT_TS_TIMEOUT_S,
+    )
+
+
+@mcp.tool(description="Read the persisted TypeScript source for a run without regenerating it.")
+def mermate_render_ts_source(run_id: str) -> dict[str, Any]:
+    return _call_json("GET", f"/api/render/ts/source/{run_id}")
+
+
+# ---- Specula ----------------------------------------------------------------
+
+@mcp.tool(description="Check Specula engine availability and health status.")
+def mermate_specula_health() -> dict[str, Any]:
+    return _call_json("GET", "/api/specula/health")
+
+
+@mcp.tool(description="Validate a TLA+ spec and config through the Specula TLC engine with optional workers and timeout.")
+def mermate_specula_validate_tlc(
+    spec_path: str,
+    cfg_path: str,
+    memory: str | None = None,
+    workers: int | None = None,
+    timeout_minutes: int | None = None,
+    deadlock: bool = False,
+    json_trace: bool = False,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {"spec_path": spec_path, "cfg_path": cfg_path, "deadlock": deadlock, "json_trace": json_trace}
+    if memory is not None:
+        body["memory"] = memory
+    if workers is not None:
+        body["workers"] = workers
+    if timeout_minutes is not None:
+        body["timeout_minutes"] = timeout_minutes
+    return _call_json("POST", "/api/specula/validate-tlc", body=body, timeout_s=DEFAULT_TLA_TIMEOUT_S)
+
+
+@mcp.tool(description="Read a skill file from the Specula engine's skill registry.")
+def mermate_specula_skill(skill: str, file: str) -> dict[str, Any]:
+    client = create_client()
+    try:
+        payload = client.request_json("GET", f"/api/specula/skills/{skill}/{file}")
+        if isinstance(payload, dict):
+            return payload
+        return {"success": True, "data": payload}
+    except Exception as exc:
+        return _normalize_api_error(exc, f"/api/specula/skills/{skill}/{file}")
+
+
+# ---- Guide (Opseeq) ---------------------------------------------------------
+
+@mcp.tool(description="Check Opseeq guide connectivity and health status.")
+def mermate_guide_status() -> dict[str, Any]:
+    return _call_json("GET", "/api/guide/status")
+
+
+@mcp.tool(description="Evaluate a UI state through the Opseeq guide for architectural recommendations.")
+def mermate_guide_evaluate(
+    ui_state: dict[str, Any],
+    timeout_s: int | None = None,
+) -> dict[str, Any]:
+    return _call_json(
+        "POST",
+        "/api/guide/evaluate",
+        body={"uiState": ui_state},
+        timeout_s=timeout_s or DEFAULT_ROUTE_TIMEOUT_S,
+    )
+
+
+# ---- Trace ------------------------------------------------------------------
+
+@mcp.tool(description="Append a trace event to a run's execution trace store.")
+def mermate_trace_append(run_id: str, event: dict[str, Any]) -> dict[str, Any]:
+    body = {"run_id": run_id, **event}
+    return _call_json("POST", "/api/mermate/stage", body=body)
+
+
+@mcp.tool(description="Read all trace events for a given run_id.")
+def mermate_trace_get(run_id: str) -> dict[str, Any]:
+    return _call_json("GET", f"/api/mermate/trace/{run_id}")
+
+
+@mcp.tool(description="Read aggregate trace statistics across all runs.")
+def mermate_trace_stats() -> dict[str, Any]:
+    return _call_json("GET", "/api/mermate/trace-stats")
 
 
 def main() -> None:

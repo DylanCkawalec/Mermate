@@ -10,7 +10,26 @@ from uuid import uuid4
 
 DEFAULT_BASE_URL = os.environ.get("MERMATE_URL", "http://127.0.0.1:3333").rstrip("/")
 DEFAULT_TIMEOUT_S = float(os.environ.get("MERMATE_MCP_HTTP_TIMEOUT_S", "30"))
-USER_AGENT = "mermate-openclaw-mcp/0.1.0"
+USER_AGENT = "mermate-openclaw-mcp/5.0.0"
+
+# Module-level singleton clients — reused across tool calls to avoid
+# repeated TCP connection setup overhead.
+_shared_client: MermateClient | None = None
+_shared_openclaw_client: MermateClient | None = None
+
+
+def get_shared_client() -> MermateClient:
+    global _shared_client
+    if _shared_client is None:
+        _shared_client = MermateClient(base_url=DEFAULT_BASE_URL, timeout_s=DEFAULT_TIMEOUT_S)
+    return _shared_client
+
+
+def get_shared_openclaw_client(base_url: str, timeout_s: float) -> MermateClient:
+    global _shared_openclaw_client
+    if _shared_openclaw_client is None:
+        _shared_openclaw_client = MermateClient(base_url=base_url, timeout_s=timeout_s)
+    return _shared_openclaw_client
 
 
 class MermateHttpError(RuntimeError):
