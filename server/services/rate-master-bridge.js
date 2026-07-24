@@ -163,15 +163,18 @@ async function execute(stage, model, inputText, fn) {
     return { result, actionTag };
   }
 
+  let execStart = 0;
+  const wrappedFn = () => { execStart = Date.now(); return fn(); };
+
   try {
-    const result = await rm.execute(endpoint, fn, {
+    const result = await rm.execute(endpoint, wrappedFn, {
       priority,
       traceId: `mermate-${actionTag.seq}`,
       timeoutMs: parseInt(process.env.MERMATE_INFER_TIMEOUT_MS || process.env.MERMATE_INFER_TIMEOUT || '180000', 10),
     });
 
-    actionTag.queueWaitMs = 0;
-    actionTag.executionMs = Date.now() - actionTag.enqueuedAt;
+    actionTag.queueWaitMs = execStart > 0 ? execStart - actionTag.enqueuedAt : 0;
+    actionTag.executionMs = execStart > 0 ? Date.now() - execStart : Date.now() - actionTag.enqueuedAt;
 
     logger.info('rm.done', {
       tag: actionTag.tag,
@@ -209,7 +212,9 @@ function feedback(model, fb) {
 function getMetrics() {
   const rm = _getInstance();
   if (!rm) return null;
-  return rm.getMetrics();
+  const metrics = rm.getMetrics();
+  metrics.recentDecisions = rm.memory.decisions.slice(-10);
+  return metrics;
 }
 
 /**
