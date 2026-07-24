@@ -281,6 +281,7 @@ window.MermaidAgent = class MermaidAgent {
     this._teardownThinkingEffect();
     this._running = false;
     this.notesWrap.hidden = true;
+    this._hideRepairBudget();
     this._addNarrationLog('Agent paused — current artifact and tabs preserved. Edit any tab, then run again to continue from that context.', 'system', 'agent:paused');
     this._paused = true;
     this.onStateChange('idle');
@@ -359,6 +360,30 @@ window.MermaidAgent = class MermaidAgent {
       case 'int':
       default: return Math.round(value).toLocaleString();
     }
+  }
+
+  // ---- Repair budget indicator ----
+
+  _updateRepairBudget(attempt, budget) {
+    const bar = document.getElementById('repair-budget-bar');
+    const fill = document.getElementById('repair-budget-fill');
+    const count = document.getElementById('repair-budget-count');
+    if (!bar || !fill || !count) return;
+    bar.hidden = false;
+    const pct = Math.min(100, (attempt / budget) * 100);
+    fill.style.width = `${pct}%`;
+    count.textContent = `${attempt}/${budget}`;
+    fill.classList.remove('is-warn', 'is-exhausted');
+    if (attempt >= budget) {
+      fill.classList.add('is-exhausted');
+    } else if (attempt >= budget * 0.6) {
+      fill.classList.add('is-warn');
+    }
+  }
+
+  _hideRepairBudget() {
+    const bar = document.getElementById('repair-budget-bar');
+    if (bar) bar.hidden = true;
   }
 
   // ---- Phase accordion ----
@@ -487,6 +512,12 @@ window.MermaidAgent = class MermaidAgent {
       case 'narration':
         this._phaseStepCount++;
         this._addNarrationLog(event.message, event.source, event.eventType);
+        if (event.eventType === 'render:repair' && event.attempt != null) {
+          this._updateRepairBudget(event.attempt, event.budget || 5);
+        }
+        if (event.eventType === 'render:complete' || event.eventType === 'render:failed') {
+          this._hideRepairBudget();
+        }
         if (event.elapsed) {
           this._updateMetric('elapsed', event.elapsed / 1000);
         }
@@ -634,6 +665,7 @@ window.MermaidAgent = class MermaidAgent {
         this._addNarrationLog('Agent workflow complete', 'system', 'done');
         this._running = false;
         this._narratorActive = false;
+        this._hideRepairBudget();
         this._clearSession();
         this.onComplete(event.final_text);
         this.onStateChange('idle');
@@ -646,6 +678,7 @@ window.MermaidAgent = class MermaidAgent {
         this._markPreviousLogDone();
         this._closeCurrentPhase('error');
         this._addNarrationLog(`${event.message}`, 'system', 'sys:error');
+        this._hideRepairBudget();
         this._clearSession();
         this.onError(event.message);
         break;

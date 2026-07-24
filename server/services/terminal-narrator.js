@@ -292,6 +292,8 @@ function watchRun(auditRunId, telemetryRunId, sendEvent, auditTracker) {
         eventType: event.type,
         stage: event.stage || null,
         role: event.role || null,
+        attempt: event.attempt || null,
+        budget: event.budget || null,
         elapsed: event.elapsed,
         runId: telemetryRunId,
       });

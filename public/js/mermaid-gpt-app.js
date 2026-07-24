@@ -395,6 +395,76 @@
   let currentRunId = null;
   let _agentHandoffToken = 0;
   let _agentGazeTimer = null;
+  let _isBootRestore = false;
+
+  // =========================================================================
+  //  RuntimeState — single source of truth for "is the app doing work?"
+  //
+  //  Every periodic poller (Opseeq heartbeat, autoguide) must consult this
+  //  before firing. The app is "active" when:
+  //    - An agent is running or finalizing
+  //    - A render is in progress
+  //    - The user interacted within the last IDLE_TIMEOUT_MS
+  //  Otherwise the app is "idle" and pollers must stand down.
+  // =========================================================================
+
+  const IDLE_TIMEOUT_MS = 60_000; // 60s since last interaction = idle
+  let _lastInteractionAt = Date.now();
+
+  const RuntimeState = {
+    _agentState: 'idle',
+    _isLoading: false,
+
+    setAgentState(state) {
+      this._agentState = state;
+      _lastInteractionAt = Date.now(); // state transitions count as activity
+    },
+    setLoading(on) {
+      this._isLoading = on;
+    },
+    touch() {
+      _lastInteractionAt = Date.now();
+    },
+    get isAgentActive() {
+      return this._agentState === 'running' || this._agentState === 'finalizing';
+    },
+    get isBusy() {
+      return this._isLoading || this.isAgentActive;
+    },
+    get isRecentlyActive() {
+      return (Date.now() - _lastInteractionAt) < IDLE_TIMEOUT_MS;
+    },
+    get shouldPoll() {
+      return this.isBusy || this.isRecentlyActive;
+    },
+    get snapshot() {
+      return {
+        agentState: this._agentState,
+        isLoading: this._isLoading,
+        isAgentActive: this.isAgentActive,
+        isBusy: this.isBusy,
+        isRecentlyActive: this.isRecentlyActive,
+        shouldPoll: this.shouldPoll,
+        msSinceInteraction: Date.now() - _lastInteractionAt,
+      };
+    },
+  };
+
+  // Track user interactions that reset the idle timer
+  function _initInteractionTracking() {
+    const events = ['mousedown', 'keydown', 'input', 'scroll', 'touchstart'];
+    let _interactionDebounce = null;
+    function _onInteraction() {
+      // Debounce rapid events (e.g. typing) to avoid excessive touch() calls
+      if (_interactionDebounce) return;
+      _interactionDebounce = setTimeout(() => {
+        RuntimeState.touch();
+        _interactionDebounce = null;
+      }, 500);
+    }
+    events.forEach(evt => document.addEventListener(evt, _onInteraction, { passive: true }));
+  }
+  _initInteractionTracking();
 
   // The local currentRunId/currentDiagramName/currentPaths variables are
   // in-memory working mirrors; the orchestrator owns persistence (single
@@ -420,6 +490,11 @@
   let profileHint = '';
   let agentState = 'idle';
   let notesDirty = false;
+
+  function setAgentState(state) {
+    agentState = state;
+    RuntimeState.setAgentState(state);
+  }
 
   const AGENT_MODES_BY_STAGE = {
     idea: [
@@ -958,8 +1033,11 @@
       // Only type into the visible textarea when the user is still viewing
       // this tab; otherwise just stash the artifact + flag the tab.
       if (currentMode === mode) {
+        input.style.opacity = '0';
+        input.style.transition = 'opacity 0.25s ease';
         input.value = src;
         input.dispatchEvent(new Event('input', { bubbles: true }));
+        requestAnimationFrame(() => { input.style.opacity = '1'; });
       } else {
         _markTabHasNewContent(mode);
       }
@@ -1067,7 +1145,9 @@
             input.placeholder = mode === 'tla'
               ? `Generating TLA+ specification from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)} (the mastered run)\nExpected wait: ${cfg.duration.label} — Specula → SANY → TLC\nPress Render or wait for auto-start.`
               : `Generating TypeScript runtime from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)} (the mastered run)\nExpected wait: ${cfg.duration.label} — compile → tsc → harness → coverage\nPress Render or wait for auto-start.`;
-            if (currentMode === mode && !isLoading) render();
+            // On boot restore, show the placeholder but DON'T auto-fire
+            // an expensive AI API call — let the user press Render.
+            if (!_isBootRestore && currentMode === mode && !isLoading) render();
           });
         }
       }
@@ -1397,25 +1477,30 @@
     const suffix = durationLabel ? ` · expected ${durationLabel}` : '';
     const expectedMs = STAGE_REGISTRY[currentMode]?.duration?.ms || 0;
     loadingText.textContent = `${baseMessage}${suffix}`;
+    loadingText.classList.remove('is-over-estimate');
     _loadingTicker = setInterval(() => {
       const elapsed = Math.round((Date.now() - _loadingStartedAt) / 1000);
       const overEstimate = expectedMs > 0 && (Date.now() - _loadingStartedAt) > expectedMs;
       if (overEstimate) {
         loadingText.textContent = `${baseMessage} — ${elapsed}s · taking longer than expected`;
+        loadingText.classList.add('is-over-estimate');
       } else {
         loadingText.textContent = `${baseMessage} — ${elapsed}s${suffix}`;
+        loadingText.classList.remove('is-over-estimate');
       }
     }, 1000);
   }
 
   function _stopLoadingTicker() {
     if (_loadingTicker) { clearInterval(_loadingTicker); _loadingTicker = null; }
+    loadingText.classList.remove('is-over-estimate');
   }
 
   function setLoading(on, contentState) {
     // Don't show loading overlay during agent operations - agent panel shows progress
     if (on && (agentState === 'running' || agentState === 'finalizing' || agentState === 'awaiting_notes')) {
       isLoading = on;
+      RuntimeState.setLoading(on);
       btnRender.disabled = on;
       input.readOnly = on;
       syncUiGuidance();
@@ -1423,6 +1508,7 @@
     }
 
     isLoading = on;
+    RuntimeState.setLoading(on);
     btnRender.disabled = on;
     input.readOnly = on;
     if (on) {
@@ -2643,7 +2729,7 @@
   function setAgentMode(modeId) {
     if (!modeId && agent && agent.running) {
       agent.stopAndPause();
-      agentState = 'idle';
+      setAgentState('idle');
       notesDirty = false;
       input.readOnly = false;
       setLoading(false);
@@ -2803,7 +2889,7 @@
         _showStandaloneContinuation('download', `Full build complete — ${completedStages.join(' \u2192 ')}`, 'Download Full Bundle');
       },
       onComplete: () => {
-        agentState = 'idle';
+        setAgentState('idle');
         btnAgentRun.textContent = 'Continue Agent';
         btnAgentRun.classList.remove('is-stopping');
         btnAgentRun.disabled = false;
@@ -2830,7 +2916,7 @@
         _resetDocTitleAfter(8000);
       },
       onError: (msg) => {
-        agentState = 'idle';
+        setAgentState('idle');
         notesDirty = false;
         showError(msg);
         showToast(`Agent error: ${msg}`, 'error', 6000);
@@ -2847,7 +2933,7 @@
         _resetDocTitleAfter(6000);
       },
       onStateChange: (state) => {
-        agentState = state;
+        setAgentState(state);
         if (state === 'running') {
           notesDirty = false;
           btnAgentRun.textContent = 'Pause Agent';
@@ -2873,7 +2959,7 @@
       if (isLoading) return;
       if (agent && agent.running) {
         orchestrator.setArtifact(currentMode, input.value);
-        agent.stopAndPause(); agentState = 'idle'; notesDirty = false;
+        agent.stopAndPause(); setAgentState('idle'); notesDirty = false;
         btnAgentRun.textContent = 'Continue Agent'; btnAgentRun.classList.remove('is-stopping'); btnAgentRun.disabled = false; btnAgentRun.hidden = false;
         input.readOnly = false; setLoading(false); syncUiGuidance(); return;
       }
@@ -2910,7 +2996,7 @@
     btnAgentStop.addEventListener('click', () => {
       if (agent) {
         orchestrator.setArtifact(currentMode, input.value);
-        agent.stopAndPause(); agentState = 'idle'; notesDirty = false; btnAgentRun.disabled = false; input.readOnly = false; setLoading(false); syncUiGuidance();
+        agent.stopAndPause(); setAgentState('idle'); notesDirty = false; btnAgentRun.disabled = false; input.readOnly = false; setLoading(false); syncUiGuidance();
       }
     });
   }
@@ -2939,7 +3025,9 @@
 
   orchestrator.restore();
   _restoreSession();
+  _isBootRestore = true;
   setMode(orchestrator.currentStage);
+  _isBootRestore = false;
   _rebuildAgentDropdown();
   updateBadges();
 
@@ -3007,6 +3095,20 @@
 
   const _bootOverlay = document.getElementById('boot-overlay');
   const _bootStatusText = document.getElementById('boot-status-text');
+  const _bootBadges = document.getElementById('boot-badges');
+
+  function _bootBadge(label, state) {
+    if (!_bootBadges) return;
+    let el = _bootBadges.querySelector(`[data-badge="${label}"]`);
+    if (!el) {
+      el = document.createElement('span');
+      el.dataset.badge = label;
+      el.className = 'boot-badge pending';
+      el.innerHTML = `<span class="boot-badge-dot"></span><span>${label}</span>`;
+      _bootBadges.appendChild(el);
+    }
+    el.className = `boot-badge ${state}`;
+  }
 
   function _bootProgress(msg) {
     if (_bootStatusText) _bootStatusText.textContent = msg;
@@ -3040,6 +3142,7 @@
     // Step 1: Server health + payload-contract compatibility
     const EXPECTED_SCHEMA_VERSION = 1;
     _bootProgress('Checking server health...');
+    _bootBadge('Server', 'pending');
     try {
       const res = await fetch('/api/health');
       healthData = await res.json();
@@ -3047,13 +3150,16 @@
       if (healthData.schema_version != null && healthData.schema_version !== EXPECTED_SCHEMA_VERSION) {
         console.warn(`[boot] payload-contract mismatch — server schema_version ${healthData.schema_version}, frontend expects ${EXPECTED_SCHEMA_VERSION}. Artifact envelopes may not parse correctly.`);
       }
+      _bootBadge('Server', 'ok');
     } catch (err) {
+      _bootBadge('Server', 'fail');
       _bootFail('server health check failed');
       healthData = null;
     }
 
     // Step 2: Copilot + Max mode availability
     _bootProgress('Checking inference providers...');
+    _bootBadge('AI', 'pending');
     try {
       const res = await fetch('/api/copilot/health');
       copilotData = await res.json();
@@ -3062,10 +3168,13 @@
       if (copilot && typeof copilot.setHealthState === 'function') {
         copilot.setHealthState(copilotData.available);
       }
-    } catch { copilotData = null; }
+      _bootBadge('AI', copilotData?.available ? 'ok' : 'warn');
+    } catch { copilotData = null; _bootBadge('AI', 'fail'); }
 
     // Step 3: TLA+ status
     _bootProgress('Checking TLA+ toolchain...');
+    _bootBadge('TLA+', 'pending');
+    _bootBadge('Specula', 'pending');
     try {
       const res = await fetch('/api/render/tla/status');
       tlaData = await res.json();
@@ -3082,10 +3191,13 @@
             : 'TLA+ — Specula unavailable (set CLAUDE_API_KEY)';
         }
       }
-    } catch { tlaData = null; }
+      _bootBadge('TLA+', tlaData?.available ? 'ok' : 'warn');
+      _bootBadge('Specula', tlaData?.specula?.apiKeyPresent ? 'ok' : 'warn');
+    } catch { tlaData = null; _bootBadge('TLA+', 'fail'); _bootBadge('Specula', 'fail'); }
 
     // Step 4: Diagrams list (sidebar reconciliation)
     _bootProgress('Loading diagrams...');
+    _bootBadge('Diagrams', 'pending');
     try {
       const res = await fetch('/api/diagrams');
       diagramsData = await res.json();
@@ -3096,7 +3208,8 @@
           sidebar.add({ name: d.name, type: d.diagram_type || '', paths: d.paths, timestamp: d.created_at ? new Date(d.created_at).toLocaleString() : '', run_id: d.run_id || null });
         });
       }
-    } catch { diagramsData = null; }
+      _bootBadge('Diagrams', 'ok');
+    } catch { diagramsData = null; _bootBadge('Diagrams', 'fail'); }
 
     // Step 5: Complete — show Opseeq status (poll if warming up)
     if (healthData?.opseeq?.warming && !healthData.opseeq.healthy) {
@@ -3119,6 +3232,9 @@
     const opseeqStatus = healthData?.opseeq
       ? (healthData.opseeq.healthy ? 'Opseeq ready' : (healthData.opseeq.warming ? 'Opseeq warming' : 'Opseeq offline'))
       : '';
+    if (healthData?.opseeq) {
+      _bootBadge('Opseeq', healthData.opseeq.healthy ? 'ok' : (healthData.opseeq.warming ? 'warn' : 'fail'));
+    }
     _bootProgress(
       healthData
         ? `Ready — ${providerCount} provider(s), ${healthData.agents?.active || 0} agents${opseeqStatus ? ', ' + opseeqStatus : ''}`
@@ -3128,12 +3244,14 @@
   }
 
   // ---- Opseeq gateway lifecycle (browser-window heartbeat) -----------------
-  // Pings the backend every 20s while the tab is visible.
-  // The backend starts the Opseeq container on first heartbeat and
-  // stops it after 60s of no heartbeats (tab closed/navigated away).
+  // Pings the backend every 20s while the tab is visible AND the app is
+  // active (agent running, loading, or user recently interacted).
+  // When idle, heartbeats stop and the backend shuts down Opseeq after
+  // its idle timeout — no wasted API calls.
   let _opseeqHeartbeatTimer = null;
 
   async function _opseeqHeartbeat() {
+    if (!RuntimeState.shouldPoll) return;
     try {
       await fetch('/api/opseeq/heartbeat', { method: 'POST' });
     } catch { /* server may be briefly unreachable */ }
@@ -3191,6 +3309,7 @@
     get hasInput() { return !!(input.value || '').trim(); },
     get hasName() { return !!diagramNameInput?.value?.trim(); },
     get hasResult() { return !!currentPaths; },
+    runtimeState: RuntimeState,
     orchestrator: {
       get state() { return Object.freeze({ ...orchestrator.state }); },
       isUnlocked(s) { return orchestrator.isUnlocked(s); },

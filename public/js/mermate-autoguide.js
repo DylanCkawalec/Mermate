@@ -249,6 +249,8 @@
     if (!_active) return;
     const m = bus();
     if (!m) return;
+    // Skip the AI-backed evaluate call when the app is idle — no wasted API requests
+    if (m.runtimeState && !m.runtimeState.shouldPoll) return;
     try {
       const uiState = {
         currentMode: m.currentMode,
