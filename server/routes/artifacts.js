@@ -61,23 +61,14 @@ router.get('/artifacts/:run_id', async (req, res) => {
   };
 
   // Stage 2: Facts + Plan (typed architecture)
-  let facts = null;
-  let plan = null;
-  for (const call of (runData.agent_calls || [])) {
-    if (call.stage === 'fact_extraction' && call.success) {
-      try { facts = JSON.parse(call.output_text); } catch { /* skip */ }
-    }
-    if (call.stage === 'diagram_plan' && call.success) {
-      try { plan = JSON.parse(call.output_text); } catch { /* skip */ }
-    }
-  }
+  // NOTE: run-tracker records agent calls hash-only (prompt_hash + token
+  // estimates — no raw payloads, by design), so fact/plan text is not
+  // reconstructable from lineage. Reported as unavailable by design.
   stages.architecture = {
-    available: !!(facts?.entities?.length),
-    facts: facts || null,
-    plan: plan || null,
-    entityCount: facts?.entities?.length || 0,
-    relationshipCount: facts?.relationships?.length || 0,
-    failurePathCount: facts?.failurePaths?.length || 0,
+    available: false,
+    facts: null,
+    plan: null,
+    note: 'agent call payloads are hash-only by design (run-tracker)',
   };
 
   // Stage 3: Mermaid Diagram

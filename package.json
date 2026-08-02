@@ -1,8 +1,23 @@
 {
   "name": "mermaid-gpt",
   "version": "5.0.0",
-  "description": "Local Mermaid diagram renderer with chat-style UI and optional GPT enhancement",
+  "description": "AI architecture copilot for Mermaid — idea to Markdown, diagram, TLA+ specification, and TypeScript runtime. Bring your own model.",
   "main": "server/index.js",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DylanCkawalec/Mermate.git"
+  },
+  "files": [
+    "server/",
+    "public/",
+    "docs/",
+    "archs/mermaid_axioms.md",
+    "mermaid.sh",
+    "vendor/tla2tools.jar",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node server/index.js",
     "opseeq:status": "curl -sf http://localhost:9090/api/status | python3 -m json.tool",
@@ -16,18 +31,22 @@
     "test:ci": "npm run test:regression && npm run test:contract && npm run test:fast && npm run test:compile"
   },
   "dependencies": {
-    "@mermaid-js/mermaid-cli": "^11.4.0",
-    "duckdb": "^1.4.4",
-    "express": "^5.1.0",
-    "multer": "^2.1.1",
-    "three": "^0.183.2"
+    "@mermaid-js/mermaid-cli": "11.4.0",
+    "duckdb": "1.4.4",
+    "express": "5.1.0",
+    "multer": "2.2.0",
+    "three": "0.183.2"
+  },
+  "overrides": {
+    "tar": "7.5.22"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=20.0.0",
+    "npm": ">=9.0.0"
   },
   "private": true,
   "devDependencies": {
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "tsx": "4.21.0",
+    "typescript": "5.9.3"
   }
 }

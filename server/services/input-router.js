@@ -327,7 +327,7 @@ async function compileWithRetry(mmdSource, outputDir, baseName, ports = null) {
     }
   }
 
-  logger.error('compile.all_attempts_failed', { baseName, attempts: 3 });
+  logger.error('compile.all_attempts_failed', { baseName, attempts: 3, sourcePreview: mmdSource.slice(0, 2000) });
   return { result, mmdSource, attempts: 3, repairChanges };
 }
 

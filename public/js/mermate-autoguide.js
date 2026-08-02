@@ -40,7 +40,7 @@
     const m = bus();
     if (!m) return [];
 
-    const results = [];
+    let results = [];
     const mode = m.currentMode;
     const loading = m.isLoading;
     const aState = m.agentState;
