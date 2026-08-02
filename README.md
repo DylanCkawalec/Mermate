@@ -32,6 +32,8 @@ Open [http://localhost:3333](http://localhost:3333). That's it.
 
 **Requirements:** Node.js ≥ 20, npm ≥ 9. Python ≥ 3.9 only if you run the optional local enhancer.
 
+Full component-by-component setup — optional providers, TLA+/TLC toolchain, Rust + **desktop `.app` packaging**, MCP bridge, and the (optional) Opseeq gateway — is in **[docs/installation.md](docs/installation.md)**.
+
 **Try these first prompts** (paste into *Simple Idea*, press **Render**):
 
 ```
@@ -134,6 +136,7 @@ Idle discipline: when nothing is running and you haven't interacted for 60s, the
 
 | Doc | Contents |
 |---|---|
+| [docs/installation.md](docs/installation.md) | **Installation & deployment — every component, Opseeq optional, desktop app** |
 | [docs/MERMATE-PRODUCT-SPECIFICATION.md](docs/MERMATE-PRODUCT-SPECIFICATION.md) | Full product specification |
 | [docs/specs/MermateOrchestrator.tla](docs/specs/MermateOrchestrator.tla) | The winning control-plane design (TLC-verified) |
 | [plan.md](plan.md) | Winning-design implementation plan + findings |
