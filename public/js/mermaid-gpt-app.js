@@ -261,6 +261,20 @@
     }
 
     _persist() {
+      // Coalesce: one gesture often mutates several times (setArtifact +
+      // switchTo + setSession on every tab switch), and each used to pay a
+      // full stringify+write of ALL artifacts. Now: one write per task.
+      // Durability still lands inside the gesture's task — SyncDisks
+      // semantics preserved, 3 writes → 1.
+      if (this._persistScheduled) return;
+      this._persistScheduled = true;
+      queueMicrotask(() => {
+        this._persistScheduled = false;
+        this._persistNow();
+      });
+    }
+
+    _persistNow() {
       const payload = JSON.stringify({
         state: this.state,
         artifacts: this.artifacts,
