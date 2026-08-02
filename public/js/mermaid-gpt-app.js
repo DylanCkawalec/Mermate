@@ -3404,9 +3404,11 @@
     } catch { diagramsData = null; _bootBadge('Diagrams', 'fail'); }
 
     // Step 5: Complete — show Opseeq status (poll if warming up)
+    // Bounded 4×2s wait: Opseeq is optional, so boot must not stall on it.
+    // The 20s browser heartbeat keeps the badge live after boot.
     if (healthData?.opseeq?.warming && !healthData.opseeq.healthy) {
       _bootProgress('Opseeq warming up...');
-      for (let i = 0; i < 15; i++) {
+      for (let i = 0; i < 4; i++) {
         await new Promise(r => setTimeout(r, 2000));
         try {
           const pollRes = await fetch('/api/health');
