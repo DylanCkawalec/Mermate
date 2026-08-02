@@ -26,6 +26,10 @@ const SPECULA_REFERENCE = require('./specula-reference');
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const SPECULA_ROOT = path.join(PROJECT_ROOT, 'specula-engine');
 const SPECULA_SKILLS = path.join(SPECULA_ROOT, 'skills');
+// Mermate-owned skill overlay (specification-master-agent tree). The pinned
+// specula-engine submodule is read-only upstream; project skills live here
+// and take precedence in getSkillText so we control how TLA+ is written.
+const MERMATE_SKILLS = process.env.MERMATE_SKILLS_DIR || path.join(PROJECT_ROOT, '.windsurf', 'skills');
 const SPECULA_TLC_SCRIPT = path.join(SPECULA_ROOT, 'scripts', 'tlc', 'run_model_check.sh');
 const SPECULA_TRACE_DEBUGGER = path.join(SPECULA_ROOT, 'tools', 'trace_debugger', 'mcp_server.py');
 const SPECULA_SPEC_ANALYZER = path.join(SPECULA_ROOT, 'tools', 'spec_analyzer');
@@ -142,7 +146,9 @@ async function getSkillText(skill, file) {
   const cacheKey = `${skill}/${file}`;
   if (_promptCache.has(cacheKey)) return _promptCache.get(cacheKey);
 
-  const filePath = path.join(SPECULA_SKILLS, skill, file);
+  // Overlay first (Mermate-owned skills), then the pinned submodule.
+  const overlayPath = path.join(MERMATE_SKILLS, skill, file);
+  const filePath = _existsSync(overlayPath) ? overlayPath : path.join(SPECULA_SKILLS, skill, file);
   if (!_existsSync(filePath)) return null;
 
   try {
@@ -164,6 +170,18 @@ async function getSpecGenerationGuide() {
   const overview = await getSkillText('', 'workflow-overview.md');
   if (!guide) return null;
   return `Specula workflow overview:\n${overview || '(not available)'}\n\n---\n\nSpecula spec-generation guide:\n${guide}`;
+}
+
+/**
+ * Get the specification-master-agent orchestrator skill (Lamport methodology,
+ * Minimum Acceptable Skeleton gate) for injection into TLA+ writer prompts.
+ * Returns null when the overlay skill is not installed.
+ */
+async function getMasterAgentGuide() {
+  const text = await getSkillText('specification-master-agent', 'SKILL.md');
+  if (!text) return null;
+  // Strip YAML frontmatter — prompt injection needs the body only.
+  return text.replace(/^---\n[\s\S]*?\n---\n/, '').trim();
 }
 
 /**
@@ -267,11 +285,13 @@ module.exports = {
   warmUp,
   getSkillText,
   getSpecGenerationGuide,
+  getMasterAgentGuide,
   getValidationWorkflowGuide,
   runSpeculaTlc,
   analyzeTrace,
   clearCache,
   SPECULA_ROOT,
   SPECULA_SKILLS,
+  MERMATE_SKILLS,
   SPECULA_TLC_SCRIPT,
 };

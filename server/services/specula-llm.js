@@ -238,9 +238,10 @@ async function generateTlaSpec(facts, plan, moduleName, deterministicSeed) {
   // submodule is present. This keeps Mermate's instructions aligned with the
   // upstream Specula spec-generation guide without hard-cording its text.
   const speculaGuide = await speculaEngine.getSpecGenerationGuide();
-  const systemPrompt = speculaGuide
-    ? `${TLA_GEN_SYSTEM}\n\n--- UPSTREAM SPECOLA METHODOLOGY ---\n${speculaGuide}`
-    : TLA_GEN_SYSTEM;
+  const masterGuide = await speculaEngine.getMasterAgentGuide().catch(() => null);
+  let systemPrompt = TLA_GEN_SYSTEM;
+  if (masterGuide) systemPrompt += `\n\n--- SPECIFICATION MASTER AGENT METHODOLOGY (binding) ---\n${masterGuide}`;
+  if (speculaGuide) systemPrompt += `\n\n--- UPSTREAM SPECOLA METHODOLOGY ---\n${speculaGuide}`;
 
   const entities = (facts?.entities || []).map(e => `- ${e.name} (${e.type})`).join('\n');
   const relationships = (facts?.relationships || []).map(r =>
