@@ -70,3 +70,4 @@ meta_cognition/.venv/
 *.swp
 *.swo
 *~
+docs/specs/states/
