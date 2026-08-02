@@ -72,6 +72,14 @@ Canonical refusal:
 Primary: *Specifying Systems* (https://lamport.azurewebsites.net/tla/book-21-07-04.pdf), Lamport TLA+ pages, PlusCal tutorial, TLA+ Foundation.  
 Secondary sources are subordinate.
 
+### Distributed-Algorithm Citation Dictionary
+`references/disalg-bib-dict.md` (mirrored from https://github.com/alg-nju/disalg-bib-dict, license in `references/disalg-bib-dict-LICENSE`): a complete alphabetized dictionary of BibTeX entries, mainly on distributed algorithm design and implementation. Every entry is an admissible citable resource.  
+Usage protocol (binding):
+- Consult when a specification, invariant, refinement, or impossibility claim requires grounding in the distributed-algorithms literature (consensus, consistency, replication, fault models, liveness/safety, refinement mappings, etc.).
+- Read selectively: locate the alphabetical section and entry by citation key; never load the whole dictionary into working memory.
+- Cite by the entry's BibTeX key verbatim; do not invent citations not present in the dictionary.
+- This dictionary is a citation resource, not methodology: *Specifying Systems* and the Mandatory Formal Prerequisites remain supreme.
+
 ## Chapter Guardrails (Binding)
 - Ch. 1–2: sets, functions, predicates; state = assignment; behavior = infinite sequence.  
 - Ch. 3–5: complete concurrent specs; INSTANCE for modularity.  

@@ -7,6 +7,17 @@ description: Use when the user wants to build, extend, or debug the Python MCP b
 
 Treat the Express API as the source of truth. The MCP layer should stay thin and map directly onto real routes.
 
+## Authoring Discipline
+
+Everything in this MCP service is written under `ponytail` (full intensity): the laziest solution that actually works. Concretely:
+
+- One tool per real route. No synthetic workflows, no speculative tools "for later" — later can scaffold for itself.
+- Stdlib and existing code first: extend `mcp_service/client.py` transport or `server.py` tools; never add a new dependency for what the shared client already does.
+- Deletion over addition: if a route dies, its tool dies in the same diff.
+- Shortest correct diff wins; deliberate simplifications get a `ponytail:` comment naming the ceiling.
+
+Parent application model: `.windsurf/skills/mermate/SKILL.md` (master) with `mermate-agentic-infra` owning the bridge's invariants (fire-and-forget telemetry, replayable SSE, tool↔route parity). This file governs *how* the bridge is written; those govern *what* it must preserve.
+
 Files to inspect first:
 
 - `mcp_service/server.py`
