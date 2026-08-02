@@ -1,6 +1,6 @@
 {
   "name": "mermaid-gpt",
-  "version": "5.0.0",
+  "version": "1.0.0",
   "description": "AI architecture copilot for Mermaid — idea to Markdown, diagram, TLA+ specification, and TypeScript runtime. Bring your own model.",
   "main": "server/index.js",
   "license": "Apache-2.0",
