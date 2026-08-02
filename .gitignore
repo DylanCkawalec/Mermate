@@ -71,3 +71,11 @@ meta_cognition/.venv/
 *.swo
 *~
 docs/specs/states/
+
+# Runtime/dev artifacts (never production)
+logs/
+error.txt
+new-logs.txt
+*.tmp.js
+test/fixtures/*.png
+test/fixtures/*.svg
