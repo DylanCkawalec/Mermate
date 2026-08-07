@@ -1,6 +1,6 @@
 ![Mermate](./mermate-banner.png)
 
-# Mermate
+# Mermate 🧜🏻‍♀️
 
 **AI architecture copilot for Mermaid — raw ideas in, verified systems out.**
 
