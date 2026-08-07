@@ -327,7 +327,7 @@ async function compileWithRetry(mmdSource, outputDir, baseName, ports = null) {
     }
   }
 
-  logger.error('compile.all_attempts_failed', { baseName, attempts: 3 });
+  logger.error('compile.all_attempts_failed', { baseName, attempts: 3, sourcePreview: mmdSource.slice(0, 2000) });
   return { result, mmdSource, attempts: 3, repairChanges };
 }
 
@@ -1200,10 +1200,17 @@ async function decomposeAndRender(source, profile, ports = null, useMax = false)
   if (decomposeResult.output) {
     try {
       const raw = decomposeResult.output.trim();
-      const jsonStart = raw.indexOf('[');
-      const jsonEnd = raw.lastIndexOf(']');
-      if (jsonStart >= 0 && jsonEnd > jsonStart) {
-        subViews = JSON.parse(raw.slice(jsonStart, jsonEnd + 1));
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        subViews = parsed;
+      } else if (parsed && Array.isArray(parsed.views)) {
+        subViews = parsed.views;
+      } else {
+        const jsonStart = raw.indexOf('[');
+        const jsonEnd = raw.lastIndexOf(']');
+        if (jsonStart >= 0 && jsonEnd > jsonStart) {
+          subViews = JSON.parse(raw.slice(jsonStart, jsonEnd + 1));
+        }
       }
     } catch { /* invalid JSON */ }
   }

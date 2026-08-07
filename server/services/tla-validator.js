@@ -441,7 +441,6 @@ async function validateWithScaffoldFastPath(llmSource, scaffoldSource, cfgSource
 
   let selectedSource = llmSource;
   let usedScaffold = false;
-  let fastRepairAttempts = 0;
 
   if (llmSany.valid) {
     selectedSource = llmSource;
@@ -450,15 +449,12 @@ async function validateWithScaffoldFastPath(llmSource, scaffoldSource, cfgSource
     selectedSource = scaffoldSource;
     usedScaffold = true;
   } else {
-    // Neither passed: fall back to the normal repair loop on the LLM source.
-    const repaired = await validateWithRepair(llmSource, tlaDir, moduleName, repairFn);
-    selectedSource = repaired.tlaSource;
-    fastRepairAttempts = repaired.repairAttempts;
+    // Neither passed: let fullValidation handle the repair loop.
+    selectedSource = llmSource;
   }
 
   const validation = await fullValidation(selectedSource, cfgSource, tlaDir, moduleName, repairFn);
   validation.usedScaffold = usedScaffold;
-  validation.sany.repairAttempts = (validation.sany.repairAttempts || 0) + fastRepairAttempts;
   return validation;
 }
 

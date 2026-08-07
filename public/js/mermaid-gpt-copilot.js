@@ -889,7 +889,7 @@ window.MermaidCopilot = class MermaidCopilot {
     if (chars <= 2000)  return 12000;
     if (chars <= 10000) return 30000;
     if (chars <= 40000) return 75000;
-    return 120000;
+    return 180000;
   }
 
   /**

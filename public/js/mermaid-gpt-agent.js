@@ -623,7 +623,7 @@ window.MermaidAgent = class MermaidAgent {
           );
           this.onRenderResult(event);
           if (this._mode !== 'full-build') {
-            this._showContinuationCTA('tla', 'Diagram complete', 'Continue to TLA+ Specification', { autoChain: true, delayMs: 3000 });
+            this._showContinuationCTA('tla', 'Diagram complete', 'Continue to TLA+ Specification', { autoChain: false });
           }
         } else {
           this._addNarrationLog(`Render failed  —  ${(event.error || 'unknown').slice(0, 45)}`, 'system', 'render:failed');
@@ -666,6 +666,9 @@ window.MermaidAgent = class MermaidAgent {
         this._running = false;
         this._narratorActive = false;
         this._hideRepairBudget();
+        if (event.mmd_source || event.md_source || event.tla_source || event.ts_source) {
+          this.onRenderResult(event);
+        }
         this._clearSession();
         this.onComplete(event.final_text);
         this.onStateChange('idle');

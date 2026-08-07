@@ -154,6 +154,7 @@
       // Owned here so state + artifacts + session persist as ONE payload.
       this.session = { runId: null, diagramName: '', paths: null };
       this._subscribers = [];
+      this._storageDegraded = false;  // HealthAlarm: tracked so recovery fires once
     }
 
     get currentStage() { return this.state.currentStage; }
@@ -196,7 +197,14 @@
         this.state.completed[payload.stage] = true;
       }
       if (typeof payload.confidence === 'number' && payload.stage) {
-        this.state.confidence[payload.stage] = payload.confidence;
+        // Two-axis confidence (F1): numeric score drives badges; the formal
+        // verification level is an independent axis so a rendered-but-
+        // unverified artifact can never masquerade as a verified one.
+        // verification: 'none' | 'draft' | 'compiled' | 'sany' | 'tlc' | 'tests'
+        this.state.confidence[payload.stage] = {
+          value: payload.confidence,
+          verification: payload.verification || null,
+        };
       }
       if (payload.guidance && payload.stage) {
         this.state.guidance[payload.stage] = payload.guidance;
@@ -253,16 +261,73 @@
     }
 
     _persist() {
+      // Coalesce: one gesture often mutates several times (setArtifact +
+      // switchTo + setSession on every tab switch), and each used to pay a
+      // full stringify+write of ALL artifacts. Now: one write per task.
+      // Durability still lands inside the gesture's task — SyncDisks
+      // semantics preserved, 3 writes → 1.
+      if (this._persistScheduled) return;
+      this._persistScheduled = true;
+      queueMicrotask(() => {
+        this._persistScheduled = false;
+        this._persistNow();
+      });
+    }
+
+    _persistNow() {
+      const payload = JSON.stringify({
+        state: this.state,
+        artifacts: this.artifacts,
+        session: this.session,
+      });
       try {
-        const payload = JSON.stringify({
-          state: this.state,
-          artifacts: this.artifacts,
-          session: this.session,
-        });
-        // localStorage survives browser restart — sole persistence layer,
-        // ONE payload: FSM state + artifacts + session lineage together.
         localStorage.setItem('mermate_workflow', payload);
-      } catch { /* storage full or unavailable */ }
+        if (this._storageDegraded) {
+          // RecoverStorage: durability resumed — clear the alarm.
+          this._storageDegraded = false;
+          window.dispatchEvent(new CustomEvent('mermate:storage-ok'));
+        }
+      } catch (err) {
+        if (err && err.name === 'QuotaExceededError') {
+          // localStorage is full — trim large artifacts and retry once.
+          // The session state + runId are small; artifacts (especially a
+          // 50K-char pasted idea or generated TLA+ spec) are the bulk.
+          const trimmed = {};
+          for (const [k, v] of Object.entries(this.artifacts)) {
+            trimmed[k] = (v && v.length > 50000) ? v.slice(0, 50000) + '\n[…truncated for storage…]' : v;
+          }
+          try {
+            localStorage.setItem('mermate_workflow', JSON.stringify({
+              state: this.state,
+              artifacts: trimmed,
+              session: this.session,
+            }));
+            console.warn('[orchestrator] localStorage quota exceeded — trimmed large artifacts to fit');
+            this._storageDegraded = true;
+            window.dispatchEvent(new CustomEvent('mermate:storage-degraded', { detail: { trimmed: true } }));
+            return;
+          } catch (err2) {
+            // Still failing — save just the session + state (no artifacts)
+            // so at least the runId and stage progression survive.
+            try {
+              localStorage.setItem('mermate_workflow', JSON.stringify({
+                state: this.state,
+                artifacts: {},
+                session: this.session,
+              }));
+              console.error('[orchestrator] localStorage quota exceeded even after trimming — saved session only, artifacts dropped');
+              this._storageDegraded = true;
+              window.dispatchEvent(new CustomEvent('mermate:storage-degraded', { detail: { artifactsDropped: true } }));
+            } catch {
+              console.error('[orchestrator] localStorage completely unavailable — all session data lost on refresh');
+              this._storageDegraded = true;
+              window.dispatchEvent(new CustomEvent('mermate:storage-degraded', { detail: { unavailable: true } }));
+            }
+          }
+        } else {
+          console.error('[orchestrator] persist failed:', err);
+        }
+      }
     }
 
     restore() {
@@ -669,11 +734,16 @@
 
       const badge = btn.querySelector('.stage-badge');
       if (badge) {
-        const conf = state.confidence[btnMode];
-        if (conf !== undefined) {
+        const confRaw = state.confidence[btnMode];
+        // Legacy numeric entries (pre-split sessions) read through unchanged.
+        const conf = typeof confRaw === 'number' ? confRaw : confRaw?.value;
+        if (conf !== undefined && conf !== null) {
           badge.hidden = false;
           badge.textContent = `${Math.round(conf * 100)}%`;
           badge.className = 'stage-badge';
+          badge.title = (confRaw && typeof confRaw === 'object' && confRaw.verification)
+            ? `verification: ${confRaw.verification}`
+            : '';
           if (conf >= 0.8) badge.classList.add('stage-pass');
           else if (conf >= 0.5) badge.classList.add('stage-warn');
           else badge.classList.add('stage-fail');
@@ -821,13 +891,14 @@
     }
     return {
       artifacts: {
-        md: (canonical?.md ?? event.md_source ?? event.draft_text ?? '') || '',
+        md: (canonical?.md ?? event.md_source ?? event.draft_text ?? event.final_text ?? '') || '',
         mmd: (canonical?.mmd ?? event.mmd_source ?? event.compiled_source ?? '') || '',
         tla: (canonical?.tla ?? event.tla_source ?? '') || '',
         ts: (canonical?.ts ?? event.ts_source ?? '') || '',
       },
       verification: {
         sanyValid: !!event.sany_valid,
+        tlcChecked: !!event.tlc_checked,
         tsCompiled: !!(event.compile_ok || event.ts_compiled),
       },
       runId: event.run_id || null,
@@ -845,21 +916,26 @@
     md: {
       unlocks: 'mmd',
       confidence: () => CONFIDENCE.DRAFT,
+      verification: () => 'draft',
       guidance: 'Markdown spec generated from agent planning/refinement.',
     },
     mmd: {
-      unlocks: 'ts',
+      unlocks: 'tla',  // WINNING (F2): mmd unlocks the tla TAB only — never ts
       confidence: () => CONFIDENCE.COMPILED,
+      verification: () => 'compiled',
       guidance: 'Mermaid source compiled from the Markdown/architecture plan.',
     },
     tla: {
-      unlocks: 'ts',
+      // WINNING (TSRequiresVerifiedTLA): ts is granted ONLY when SANY passed
+      unlocks: (v) => (v.sanyValid ? 'ts' : 'tla'),
       confidence: (v) => (v.sanyValid ? CONFIDENCE.PASS : CONFIDENCE.FAILED),
+      verification: (v) => (v.sanyValid ? (v.tlcChecked ? 'tlc' : 'sany') : 'none'),
       guidance: 'TLA+ specification generated from the current diagram run.',
     },
     ts: {
       unlocks: 'ts',
       confidence: (v) => (v.tsCompiled ? CONFIDENCE.PASS : CONFIDENCE.FAILED),
+      verification: (v) => (v.tsCompiled ? 'compiled' : 'none'),
       guidance: 'TypeScript runtime generated from the verified TLA+ artifact.',
     },
   };
@@ -887,8 +963,11 @@
         ? ev.progressionUpdate
         : {
             stage,
-            unlockedStages: unlockedThrough(rule.unlocks),
+            unlockedStages: unlockedThrough(typeof rule.unlocks === 'function'
+              ? rule.unlocks(ev.verification)
+              : rule.unlocks),
             confidence: rule.confidence(ev.verification),
+            verification: rule.verification ? rule.verification(ev.verification) : undefined,
             guidance: rule.guidance,
           });
       if (prev.trim() !== src.trim()) {
@@ -1028,7 +1107,19 @@
       const confidence = mode === 'tla'
         ? (data.metrics?.sany_valid ? CONFIDENCE.PASS : CONFIDENCE.FAILED)
         : (data.compile_ok ? CONFIDENCE.PASS : CONFIDENCE.WEAK);
-      orchestrator.updateFromBackend({ stage: mode, unlockedStages: unlockedThrough('ts'), confidence });
+      // WINNING (F2): hydrating a failed/unverified tla artifact must not
+      // unlock ts — the gate opens only on sany_valid.
+      const unlockTarget = mode === 'tla'
+        ? (data.metrics?.sany_valid ? 'ts' : 'tla')
+        : 'ts';
+      orchestrator.updateFromBackend({
+        stage: mode,
+        unlockedStages: unlockedThrough(unlockTarget),
+        confidence,
+        verification: mode === 'tla'
+          ? (data.metrics?.sany_valid ? 'sany' : 'none')
+          : (data.compile_ok ? 'compiled' : 'none'),
+      });
 
       // Only type into the visible textarea when the user is still viewing
       // this tab; otherwise just stash the artifact + flag the tab.
@@ -1141,13 +1232,10 @@
             : `Loading TypeScript runtime for "${currentDiagramName}"…`;
           _hydratePersistedArtifact(mode).then((hydrated) => {
             if (hydrated || currentMode !== mode) return;
-            // Real pending state: the textarea stays EMPTY (data never fakes UI).
+            // Don't auto-fire expensive AI API calls — let the user press Render.
             input.placeholder = mode === 'tla'
-              ? `Generating TLA+ specification from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)} (the mastered run)\nExpected wait: ${cfg.duration.label} — Specula → SANY → TLC\nPress Render or wait for auto-start.`
-              : `Generating TypeScript runtime from "${currentDiagramName}"...\n\nSource: run ${currentRunId.slice(0, 8)} (the mastered run)\nExpected wait: ${cfg.duration.label} — compile → tsc → harness → coverage\nPress Render or wait for auto-start.`;
-            // On boot restore, show the placeholder but DON'T auto-fire
-            // an expensive AI API call — let the user press Render.
-            if (!_isBootRestore && currentMode === mode && !isLoading) render();
+              ? `No TLA+ specification found for "${currentDiagramName}".\n\nPress Render to generate one from run ${currentRunId.slice(0, 8)}.`
+              : `No TypeScript runtime found for "${currentDiagramName}".\n\nPress Render to generate one from run ${currentRunId.slice(0, 8)}.`;
           });
         }
       }
@@ -1165,7 +1253,16 @@
         clearTimeout(_autoSwitchTimer);
         _autoSwitchTimer = null;
       }
-      setMode(btn.dataset.mode);
+      const targetMode = btn.dataset.mode;
+      if (!orchestrator.isUnlocked(targetMode)) {
+        // Explicit state, never implied: a locked tab explains why (ui-eval
+        // gate 4) instead of silently ignoring the click.
+        showToast(targetMode === 'ts'
+          ? 'TypeScript is locked \u2014 verify the TLA+ specification first (SANY must pass)'
+          : `${_stageLabel(targetMode)} is locked \u2014 complete the earlier stages first`, 'info', 3500);
+        return;
+      }
+      setMode(targetMode);
     });
   });
 
@@ -1324,6 +1421,7 @@
     if (duration > 0) {
       setTimeout(() => dismissToast(toast), duration);
     }
+    return toast;
   }
 
   function dismissToast(toast) {
@@ -1333,6 +1431,27 @@
       toast.remove();
     });
   }
+
+  // ---- Storage durability alarm (WINNING HealthAlarm) ----------------------
+  // The orchestrator's _persist() dispatches these events; the UI owns the
+  // visible signal. Degraded = ONE sticky warning that stays until storage
+  // recovers — state is explicit, never implied (ui-eval gate 4).
+  let _storageToast = null;
+  window.addEventListener('mermate:storage-degraded', (e) => {
+    if (_storageToast) return; // one sticky alarm at a time
+    const d = e.detail || {};
+    _storageToast = showToast(
+      d.unavailable
+        ? 'Browser storage unavailable — your work is NOT being saved. Export or copy it now.'
+        : d.artifactsDropped
+          ? 'Browser storage is full — only session state is being saved. Download the full bundle to keep your artifacts.'
+          : 'Browser storage is full — large artifacts were trimmed to preserve your session. Download the full bundle for untrimmed output.',
+      'warning', 0);
+  });
+  window.addEventListener('mermate:storage-ok', () => {
+    if (_storageToast) { dismissToast(_storageToast); _storageToast = null; }
+    showToast('Storage recovered — your work is being saved again', 'success', 3000);
+  });
 
   // ---- Document title management ------------------------------------------
   // Reflects agent state in the browser tab so users know the run is still
@@ -1647,6 +1766,7 @@
       stage: resultStage,
       unlockedStages: unlockedUpTo,
       confidence: CONFIDENCE.RENDERED,
+      verification: resultStage === 'mmd' ? 'compiled' : undefined,
     });
 
     _persistSession();
@@ -2349,6 +2469,7 @@
         stage: 'tla',
         unlockedStages: unlockedThrough(data.sany?.valid ? 'ts' : 'tla'),
         confidence: tlaConfidence,
+        verification: data.sany?.valid ? (data.tlc?.success ? 'tlc' : 'sany') : 'none',
         nextRecommended: data.sany?.valid ? 'ts' : undefined,
       });
 
@@ -2358,7 +2479,7 @@
 
       if (data.sany?.valid) {
         if (agent && typeof agent.showTsContinuation === 'function') {
-          agent.showTsContinuation({ autoChain: true });
+          agent.showTsContinuation({ autoChain: false });
         } else {
           _showStandaloneContinuation('ts', 'TLA+ verified — SANY passed', 'Continue to TypeScript Runtime');
         }
@@ -2661,7 +2782,7 @@
     try {
       const controller = new AbortController();
       // Scale timeout with input size: ~1 KB per second + 30s base, capped at 120s
-      const timeoutMs = Math.min(120000, 30000 + Math.floor(trimmed.length / 100) * 1000);
+      const timeoutMs = Math.min(180000, 30000 + Math.floor(trimmed.length / 100) * 1000);
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       const res = await fetch(`${COPILOT_API_BASE}/enhance`, {
@@ -2876,9 +2997,11 @@
         _applyAgentArtifacts(event);
         const completedStages = event.stages_completed || [];
         if (completedStages.includes('tla')) {
+          // WINNING (F2): bundle completion only opens the ts gate when the
+          // TLA+ artifact actually passed SANY.
           orchestrator.updateFromBackend({
             stage: 'tla',
-            unlockedStages: unlockedThrough('ts'),
+            unlockedStages: unlockedThrough(event.tla_valid ? 'ts' : 'tla'),
             confidence: event.tla_valid ? CONFIDENCE.PASS : CONFIDENCE.FAILED,
           });
         }
@@ -3031,6 +3154,71 @@
   _rebuildAgentDropdown();
   updateBadges();
 
+  // ---- Recover artifacts from a completed run (WINNING F4/Reload) ---------
+  // When the agent finished while the browser was detached, the SSE events
+  // carrying stage artifacts never reached this client. The server already
+  // persists everything per-run; /api/artifacts/:run_id returns it. Only
+  // fills stages that are missing locally — newer local content always wins.
+  async function _recoverCompletedRun(runId) {
+    if (!runId) return false;
+    try {
+      const res = await fetch(`/api/artifacts/${runId}`);
+      if (!res.ok) return false;
+      const data = await res.json();
+      const stages = data.stages || {};
+      let recovered = 0;
+
+      const mmdSrc = stages.mermaid?.source;
+      if (mmdSrc?.trim() && !(orchestrator.getArtifact('mmd') || '').trim()) {
+        orchestrator.setArtifact('mmd', mmdSrc);
+        orchestrator.updateFromBackend({
+          stage: 'mmd', unlockedStages: unlockedThrough('tla'),
+          confidence: CONFIDENCE.COMPILED, verification: 'compiled',
+        });
+        recovered++;
+      }
+
+      const tlaSrc = stages.tla?.source;
+      if (tlaSrc?.trim() && !(orchestrator.getArtifact('tla') || '').trim()) {
+        const sanyOk = !!stages.tla?.metrics?.sany_valid;
+        orchestrator.setArtifact('tla', tlaSrc);
+        orchestrator.updateFromBackend({
+          stage: 'tla', unlockedStages: unlockedThrough(sanyOk ? 'ts' : 'tla'),
+          confidence: sanyOk ? CONFIDENCE.PASS : CONFIDENCE.FAILED,
+          verification: sanyOk ? (stages.tla.metrics.tlc_success ? 'tlc' : 'sany') : 'none',
+        });
+        recovered++;
+      }
+
+      const tsSrc = stages.typescript?.source;
+      if (tsSrc?.trim() && !(orchestrator.getArtifact('ts') || '').trim()) {
+        const compileOk = !!stages.typescript?.metrics?.compilePassed;
+        orchestrator.setArtifact('ts', tsSrc);
+        orchestrator.updateFromBackend({
+          stage: 'ts',
+          confidence: compileOk ? CONFIDENCE.PASS : CONFIDENCE.WEAK,
+          verification: compileOk ? 'compiled' : 'none',
+        });
+        recovered++;
+      }
+
+      if (stages.mermaid?.diagramName && !currentDiagramName) {
+        currentDiagramName = stages.mermaid.diagramName;
+        if (diagramNameInput) diagramNameInput.value = currentDiagramName;
+      }
+      if (stages.mermaid?.paths && !currentPaths) currentPaths = stages.mermaid.paths;
+
+      if (recovered > 0) {
+        _persistSession();
+        updateBadges();
+        showToast(`Recovered ${recovered} stage${recovered > 1 ? 's' : ''} from completed run ${runId.slice(0, 8)} — the agent finished while you were away`, 'success', 5000);
+      }
+      return recovered > 0;
+    } catch {
+      return false;
+    }
+  }
+
   // ---- Reattach to a live agent run after a page refresh ----
   // The server keeps agent pipelines running when the browser disconnects;
   // if we stored a session id and it's still live, reattach and replay
@@ -3043,6 +3231,10 @@
       const data = await res.json();
       const live = (data.sessions || []).find(s => s.session_id === saved.id && s.status === 'running');
       if (!live) {
+        // WINNING (F4/Reload): the run may have COMPLETED while the browser
+        // was detached — recover its artifacts from the server before
+        // dropping the session pointer, or those stages are lost.
+        await _recoverCompletedRun(currentRunId);
         window.MermaidAgent.clearSavedSession();
         return;
       }
@@ -3212,9 +3404,11 @@
     } catch { diagramsData = null; _bootBadge('Diagrams', 'fail'); }
 
     // Step 5: Complete — show Opseeq status (poll if warming up)
+    // Bounded 4×2s wait: Opseeq is optional, so boot must not stall on it.
+    // The 20s browser heartbeat keeps the badge live after boot.
     if (healthData?.opseeq?.warming && !healthData.opseeq.healthy) {
       _bootProgress('Opseeq warming up...');
-      for (let i = 0; i < 15; i++) {
+      for (let i = 0; i < 4; i++) {
         await new Promise(r => setTimeout(r, 2000));
         try {
           const pollRes = await fetch('/api/health');

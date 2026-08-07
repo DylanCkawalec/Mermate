@@ -44,7 +44,7 @@ const _useDirectFallback = OPENAI_BASE_URL !== OPENAI_DIRECT_URL;
 const OPENAI_DIRECT_FALLBACK_MODEL = process.env.OPENAI_DIRECT_FALLBACK_MODEL || 'gpt-4o';
 
 function _isMermateAlias(model) {
-  return /^gpt-5\./i.test(model || '') || /\b(sol|terra|luna)\b/i.test(model || '');
+  return /^gpt-5\.6-(sol|terra|luna)/i.test(model || '');
 }
 
 function _normalizeDirectFallbackModel(model) {
@@ -205,6 +205,23 @@ const OLLAMA_MODEL = process.env.LOCAL_LLM_MODEL    || process.env.MERMATE_OLLAM
 
 const ENHANCER_URL = process.env.MERMAID_ENHANCER_URL || 'http://localhost:8100';
 
+// ---- Idempotent-stage result cache (WINNING plan stage 5) ----------------
+// fact_extraction and diagram_plan are pure functions of (stage, prompts):
+// retries and the render -> tla / rust / ts pipelines re-derive identical
+// output on worker-tier tokens. One guard here covers every caller.
+// Repair/narration stages are excluded — their context differs per attempt.
+const INFER_CACHEABLE_STAGES = new Set(['fact_extraction', 'diagram_plan']);
+const INFER_CACHE_MAX = 50;
+const _inferCache = new Map();  // key -> { output, model }
+
+function _inferCacheKey(stage, context, systemPrompt, userPrompt) {
+  // djb2 over everything that can change the response — cheap, no crypto.
+  const s = `${stage}${context.responseFormat || ''}${context.reasoningEffort || ''}${systemPrompt}${userPrompt}`;
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return h.toString(36);
+}
+
 const INFER_TIMEOUT_MS     = parseInt(process.env.MERMATE_INFER_TIMEOUT || process.env.MERMATE_INFER_TIMEOUT_MS || '120000', 10);
 const MAX_INFER_TIMEOUT_MS = parseInt(process.env.MERMATE_MAX_INFER_TIMEOUT || process.env.MERMATE_MAX_INFER_TIMEOUT_MS || '180000', 10);
 const MAX_RETRIES          = parseInt(process.env.MERMATE_MAX_RETRIES || '2', 10);
@@ -270,7 +287,6 @@ const STAGE_JSON_SCHEMA = new Set([
 
 const STAGE_JSON_OBJECT = new Set([
   'semantic_repair',
-  'copilot_enhance',
   'compose_ts',
   'repair_ts',
 ]);
@@ -408,19 +424,26 @@ const STAGE_JSON_SCHEMAS = {
   },
 
   decompose: {
-    type: 'array',
-    items: {
-      type: 'object',
-      properties: {
-        viewName: { type: 'string' },
-        viewDescription: { type: 'string' },
-        suggestedType: { type: 'string' },
-        entities: { type: 'array', items: { type: 'string' } },
-        relationships: { type: 'array', items: { type: 'string' } },
+    type: 'object',
+    properties: {
+      views: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            viewName: { type: 'string' },
+            viewDescription: { type: 'string' },
+            suggestedType: { type: 'string' },
+            entities: { type: 'array', items: { type: 'string' } },
+            relationships: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['viewName', 'viewDescription', 'suggestedType', 'entities', 'relationships'],
+          additionalProperties: false,
+        },
       },
-      required: ['viewName', 'viewDescription', 'suggestedType', 'entities', 'relationships'],
-      additionalProperties: false,
     },
+    required: ['views'],
+    additionalProperties: false,
   },
 
   validate_ts: {
@@ -1016,6 +1039,24 @@ async function infer(stage, context = {}) {
   const stageModel = _selectModelForStage(stage);
   const stageTokenCap = STAGE_TOKEN_CAP[stage] || undefined;
 
+  // Cache lookup AFTER reasoning-memory injection so the key reflects the
+  // exact prompts that will be sent — identical input + identical context
+  // hits; any context drift misses. (Cache never sees a different prompt.)
+  const cacheKey = INFER_CACHEABLE_STAGES.has(stage)
+    ? _inferCacheKey(stage, context, systemPrompt, userPrompt)
+    : null;
+  if (cacheKey && _inferCache.has(cacheKey)) {
+    const hit = _inferCache.get(cacheKey);
+    _inferCache.delete(cacheKey);          // LRU refresh on read
+    _inferCache.set(cacheKey, hit);
+    logger.info('provider.cache_hit', { stage, len: hit.output.length, model: hit.model });
+    _emitInferenceTrace({ stage, provider: 'cache', model: hit.model, result: 'ok', latencyMs: 0, outputLen: hit.output.length });
+    return {
+      output: hit.output, provider: 'cache', noOp: false, latencyMs: 0,
+      model: hit.model, rateEvents: undefined, actionTag: null, usedDirectFallback: false,
+    };
+  }
+
   const preferLocal = LOCAL_PREFERRED_STAGES.has(stage);
 
   // Lazy health checks — skip network probes for providers we won't need
@@ -1092,6 +1133,12 @@ async function infer(stage, context = {}) {
     _emitInferenceTrace({ stage, provider: prov.name, model: resolvedModel, result: 'ok', latencyMs, outputLen: output.length });
     // Append to forward reasoning memory for downstream stages
     appendReasoningMemory(stage, resolvedModel, output);
+    if (cacheKey) {
+      if (_inferCache.size >= INFER_CACHE_MAX) {
+        _inferCache.delete(_inferCache.keys().next().value);  // evict oldest
+      }
+      _inferCache.set(cacheKey, { output: output.trim(), model: resolvedModel });
+    }
     return {
       output: output.trim(), provider: prov.name, noOp: false, latencyMs,
       model: resolvedModel,
@@ -1313,6 +1360,7 @@ function createRealInferenceProvider(config = {}) {
 }
 
 module.exports = {
+  __test: { INFER_CACHEABLE_STAGES, _inferCacheKey },
   infer, inferMax, inferWithRole, checkProviders, isMaxAvailable,
   setTraceId, setDepthTier, getDepthTier,
   getFallbackEvents, clearFallbackEvents,

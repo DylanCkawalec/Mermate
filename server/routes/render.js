@@ -696,6 +696,16 @@ router.post('/render', async (req, res) => {
       };
     } else {
       // ---- Existing route() for mmd, hybrid, and non-enhance paths ----
+      // Trace envelope symmetry: the provider branch reports render_start
+      // above; this branch must too, or local renders leave a trace with
+      // render_complete and no start (tandem readback expects both).
+      opseeq.reportStage(runId, {
+        stage: 'render_start',
+        pipeline: 'local_route',
+        input_length: source.length,
+        content_state: profile.contentState,
+        enhance: !!enhance,
+      });
       try {
         routeResult = await route(source, { enhance: !!enhance });
       } catch (err) {
