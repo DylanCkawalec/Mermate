@@ -564,11 +564,18 @@ router.post('/render', async (req, res) => {
     let routeResult;
     const isTextOrMd = profile.contentState === 'text' || profile.contentState === 'md';
     // Hybrid content (markdown prose with some Mermaid-like signals) should also
-    // use the provider-backed pipeline when enhance is requested — the agent's
-    // draft is often classified as hybrid because it contains arrows or node-like
-    // syntax in prose. Without this, hybrid falls through to route() which only
-    // uses the Python enhancer (often down) or bestEffortExtract (fails on prose).
-    const shouldUseProvider = (isTextOrMd || profile.contentState === 'hybrid') && enhance;
+    // use the provider-backed pipeline — the agent's draft is often classified
+    // as hybrid because it contains arrows or node-like syntax in prose.
+    // Without this, hybrid falls through to route() which only uses the Python
+    // enhancer (often down) or bestEffortExtract (fails on prose).
+    //
+    // The LLM pipeline (renderPrepare / HPC-GoT / decompose) is the core
+    // rendering engine for text/md/hybrid inputs — it should ALWAYS run,
+    // regardless of the enhance flag.  The enhance flag controls Python
+    // enhancer pre-processing in route() for the mmd path, not whether the
+    // LLM generates the diagram.  Without this, a text idea with Enhance OFF
+    // falls through to localTextToMmd which produces a trivial 1-node diagram.
+    const shouldUseProvider = (isTextOrMd || profile.contentState === 'hybrid');
 
     if (shouldUseProvider && profile.shadow?.entities?.length >= 2) {
       const { buildFactExtractionUserPrompt } = require('../services/axiom-prompts');

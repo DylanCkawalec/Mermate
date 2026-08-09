@@ -5,6 +5,32 @@ All notable changes to Mermate are documented here. Public releases follow
 lineage carried internal versions up to 5.0.0; public versioning starts at
 1.0.0 and supersedes that numbering.)
 
+## [1.2.1] — 2026-08-09
+
+Render fix: text/idea inputs now always use the LLM pipeline, regardless of
+the Enhance flag.  Patch release — no breaking changes.
+
+### Bug Fixes
+
+- **Render without Enhance on text/idea inputs** — the `shouldUseProvider`
+  gate in `render.js` required `enhance=true` for text/md/hybrid inputs to
+  use the LLM pipeline (renderPrepare / HPC-GoT / decompose).  Without
+  Enhance, text ideas fell through to `localTextToMmd` — a trivial local
+  heuristic that produced a 1-node diagram (`N1[microservices e-commerce
+  platform]`).  The LLM pipeline is the core rendering engine for text
+  inputs and should always run.  The `enhance` flag now only controls
+  Python enhancer pre-processing in the mmd path, not whether the LLM
+  generates the diagram.
+
+### Verified
+
+- Idea without enhance: 27 lines, 7 entities rendered as proper nodes (was
+  1 node before fix).
+- Idea with enhance: 25 lines, same quality (no regression).
+- Valid .mmd without enhance: renders fine (mmd path unchanged).
+- Short idea without enhance: 8 lines with proper nodes and edges.
+- 149 fast tests, 0 fail.
+
 ## [1.2.0] — 2026-08-09
 
 Enhance preservation + surgical render repair. No breaking changes; drop-in
