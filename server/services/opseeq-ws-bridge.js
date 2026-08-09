@@ -5,8 +5,8 @@
  *
  * Maintains a single persistent WebSocket connection from Mermate to
  * Opseeq's `/api/mermate/ws` endpoint. When the connection is healthy,
- * `reportStage` (in opseeq-bridge.js) prefers WS over HTTP, dropping the
- * per-event round-trip from ~30-150ms to <5ms.
+ * `reportStage` (in opseeq-bridge.js) prefers WS over HTTP so stage events
+ * reuse one connection instead of paying a TCP/TLS handshake per event.
  *
  * Design rules:
  *   - Fire-and-forget: failures NEVER block the pipeline.
@@ -15,7 +15,7 @@
  *     and reportStage falls through to the HTTP path.
  *   - Reconnect with capped exponential backoff (1s → 2s → 5s → 15s → 30s).
  *   - Heartbeat: ping every 15s, drop the connection if no pong arrives
- *     within the next 15s (network hangs are silent killers).
+ *     within the next 15s, since a hung socket reports no error on its own.
  *   - Auth: send a `hello` frame with `OPSEEQ_WS_TOKEN` once the socket is
  *     open. The server may reject; we treat that as "WS unavailable" and
  *     stop trying for OPSEEQ_WS_REJECT_BACKOFF_MS (default 5 minutes).

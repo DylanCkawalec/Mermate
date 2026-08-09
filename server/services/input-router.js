@@ -286,9 +286,12 @@ function _sanitizeCompileError(raw) {
  * @param {string} mmdSource
  * @param {string} outputDir
  * @param {string} baseName
+ * @param {object} [options] - { allowModelRepair: boolean } (default true). Pass false
+ *   for user-authored Mermaid rendered with Enhance OFF: deterministic repair is
+ *   safe, but an LLM rewrite would silently change the user's diagram semantics.
  * @returns {Promise<{result: object, mmdSource: string, attempts: number, repairChanges: string[]}>}
  */
-async function compileWithRetry(mmdSource, outputDir, baseName, ports = null) {
+async function compileWithRetry(mmdSource, outputDir, baseName, ports = null, options = {}) {
   const p = _resolvePorts(ports);
   const repairChanges = [];
 
@@ -311,6 +314,11 @@ async function compileWithRetry(mmdSource, outputDir, baseName, ports = null) {
   const sourceForModelRepair = repaired.changes.length > 0 ? repaired.source : mmdSource;
   const attempt2Error = _sanitizeCompileError(result.error);
   logger.warn('compile.attempt2_failed', { baseName, error: attempt2Error });
+
+  if (options.allowModelRepair === false) {
+    logger.info('compile.model_repair_skipped', { baseName, reason: 'user_authored_mmd_enhance_off' });
+    return { result, mmdSource, attempts: 2, repairChanges };
+  }
 
   // Attempt 3: model-assisted repair via provider + deterministic repair + recompile
   const repairUserPrompt = buildModelRepairUserPrompt(sourceForModelRepair, attempt2Error);

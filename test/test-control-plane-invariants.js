@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Winning-design regression tests — one check per TLC-verified invariant.
+ * Control-plane regression tests — one check per TLC-checked invariant.
  * See docs/specs/MermateOrchestrator.tla (TLC: 85,449 distinct states, no error).
  *
  * Strategy: frontend logic is tested by extracting the PRODUCTION source
@@ -34,7 +34,7 @@ function extractBalanced(src, startMarker) {
   throw new Error(`unbalanced braces after: ${startMarker}`);
 }
 
-// ---- F2 / TSRequiresVerifiedTLA -------------------------------------------
+// ---- TSRequiresVerifiedTLA --------------------------------------------------
 // The exact production rule table: mmd must never grant ts; tla grants ts
 // ONLY when sanyValid. This is the site of the original regression.
 
@@ -43,7 +43,7 @@ test('TS gate: production AGENT_ARTIFACT_RULES bars ts without verified TLA+', (
   const rules = vm.runInNewContext(`(${literal})`);
 
   assert.equal(rules.mmd.unlocks, 'tla',
-    'mmd must unlock only the tla TAB (was "ts" — the F2 regression)');
+    'mmd must unlock only the tla TAB (was "ts", which let TS render unverified)');
   assert.equal(rules.tla.unlocks({ sanyValid: false }), 'tla',
     'unverified tla must not unlock ts');
   assert.equal(rules.tla.unlocks({ sanyValid: true }), 'ts',
@@ -56,7 +56,7 @@ test('TS gate: production AGENT_ARTIFACT_RULES bars ts without verified TLA+', (
     'artifact application must resolve function unlocks with the verification block');
 });
 
-// ---- F6 / Enhance presence contract ----------------------------------------
+// ---- Enhance presence contract ----------------------------------------------
 // A failed or no-op enhance must never replace a non-empty artifact.
 
 test('Enhance contract: no-op/empty server output never overwrites content', () => {
@@ -66,13 +66,13 @@ test('Enhance contract: no-op/empty server output never overwrites content', () 
     'local fallback path must exist for failed/no-op enhances');
   assert.ok(/if \(this\.isEnhancing\) return;/.test(COPILOT_JS),
     're-entrancy guard must remain');
-  // The winning contract: the typewriter replace is only reachable with a
+  // The contract: the typewriter replace is only reachable with a
   // DIFFERENT, non-empty enhanced string.
   assert.ok(/_typewriterReplace\(enhanced/.test(COPILOT_JS),
     'replace path must operate on the enhanced string only');
 });
 
-// ---- F3 / HealthAlarm -------------------------------------------------------
+// ---- HealthAlarm ------------------------------------------------------------
 // Degraded persistence must ALWAYS surface (events), and recovery must clear.
 
 test('HealthAlarm: persist dispatches degraded + recovery events', () => {
@@ -90,7 +90,7 @@ test('HealthAlarm: persist dispatches degraded + recovery events', () => {
     `expected >=3 degraded dispatches (trim/session-only/unavailable), got ${dispatchCount}`);
 });
 
-// ---- F4 / Reload recovery ---------------------------------------------------
+// ---- Reload recovery --------------------------------------------------------
 
 test('Reload: boot recovers completed-run artifacts before dropping session', () => {
   assert.ok(/_recoverCompletedRun\(currentRunId\)/.test(APP_JS),

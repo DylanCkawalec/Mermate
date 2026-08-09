@@ -1,19 +1,22 @@
 'use strict';
 
 /**
- * Inference Provider — Self-sufficient Node.js provider chain for Mermate.
+ * Inference Provider — provider chain behind a single infer() call.
  *
- * Abstracts model inference behind a single infer() call that cascades through
- * available providers: premium API → Ollama → Python enhancer → local fallback.
+ * Default order: premium API → Ollama → QGoT → Python enhancer. Stages listed
+ * in LOCAL_PREFERRED_STAGES try the local providers before the premium API.
+ * Each provider is health-checked (cached, see HEALTH_TTL) and skipped when
+ * unavailable; every provider is optional.
  *
- * The provider layer is invisible to the UI. The user presses Render and gets
- * the best result the system can produce with whatever providers are configured.
+ * When the whole chain is exhausted, infer() resolves with output: null rather
+ * than throwing. Callers are expected to fall back to deterministic behaviour.
  */
 
 const { buildPrompt } = require('./axiom-prompts');
 const logger = require('../utils/logger');
 const rmBridge = require('./rate-master-bridge');
 const catalog = require('./model-catalog');
+const qgotBridge = require('./qgot-bridge');
 
 // ---- Configuration --------------------------------------------------------
 
@@ -57,6 +60,35 @@ function _normalizeDirectFallbackModel(model) {
 function _isReasoningModel(model) {
   return /^o[1-9]/i.test(model || '') || /^o3/i.test(model || '');
 }
+
+// ---- Optional-gateway circuit breaker -------------------------------------
+// When OPSEEQ_URL/OPENAI_BASE_URL points at a gateway that isn't running, a
+// connection refusal is NOT a transient rate limit: retrying with exponential
+// backoff burns ~6s per call before the direct-OpenAI fallback even starts.
+// One connection failure opens the circuit for GATEWAY_CIRCUIT_MS so every
+// subsequent call goes straight to api.openai.com.
+const GATEWAY_CIRCUIT_MS = parseInt(process.env.MERMATE_GATEWAY_CIRCUIT_MS || '60000', 10);
+let _gatewayDownUntil = 0;
+
+function _isConnectionError(err) {
+  const code = err?.cause?.code || err?.code || '';
+  if (['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'EHOSTUNREACH', 'ENETUNREACH'].includes(code)) return true;
+  return /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|fetch failed/i.test(err?.message || '');
+}
+
+function _openGatewayCircuit(reason) {
+  if (!_useDirectFallback) return;
+  const wasOpen = Date.now() < _gatewayDownUntil;
+  _gatewayDownUntil = Date.now() + GATEWAY_CIRCUIT_MS;
+  if (!wasOpen) {
+    logger.warn('provider.gateway_circuit_open', {
+      gateway: OPENAI_BASE_URL, fallback: OPENAI_DIRECT_URL,
+      forMs: GATEWAY_CIRCUIT_MS, reason,
+    });
+  }
+}
+
+function isGatewayCircuitOpen() { return Date.now() < _gatewayDownUntil; }
 
 // Shared trace ID — set by input-router.js via setTraceId() so every
 // inference call correlates with the MERMATE run in Opseeq's trace.
@@ -205,7 +237,7 @@ const OLLAMA_MODEL = process.env.LOCAL_LLM_MODEL    || process.env.MERMATE_OLLAM
 
 const ENHANCER_URL = process.env.MERMAID_ENHANCER_URL || 'http://localhost:8100';
 
-// ---- Idempotent-stage result cache (WINNING plan stage 5) ----------------
+// ---- Idempotent-stage result cache ---------------------------------------
 // fact_extraction and diagram_plan are pure functions of (stage, prompts):
 // retries and the render -> tla / rust / ts pipelines re-derive identical
 // output on worker-tier tokens. One guard here covers every caller.
@@ -580,6 +612,7 @@ const _healthCache = {
   premium: { ok: false, checkedAt: 0 },
   ollama:  { ok: false, checkedAt: 0 },
   enhancer:{ ok: false, checkedAt: 0 },
+  qgot:    { ok: false, checkedAt: 0 },
 };
 const HEALTH_TTL = 30_000;
 
@@ -602,6 +635,8 @@ async function _checkHealth(provider) {
     } else if (provider === 'enhancer') {
       const res = await fetch(`${ENHANCER_URL}/health`, { signal: controller.signal });
       ok = res.ok;
+    } else if (provider === 'qgot') {
+      ok = (await qgotBridge.health(2000)).healthy;
     }
   } catch {
     ok = false;
@@ -767,6 +802,14 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
           rateEvents.push(rateEvent);
         }
         logger.warn(`${logPrefix}.error`, { model, error: err.message, attempt: attempt + 1 });
+        // An optional gateway that isn't running refuses the connection.
+        // That is permanent for this call — backing off 2s/4s before the
+        // direct-OpenAI fallback just wastes the user's time. Bail out now
+        // and open the circuit so later calls skip the gateway entirely.
+        if (_useDirectFallback && url.startsWith(OPENAI_BASE_URL) && _isConnectionError(err)) {
+          _openGatewayCircuit(err?.cause?.code || err.message);
+          return null;
+        }
         if (attempt < MAX_RETRIES) {
           await _sleep(Math.pow(2, attempt + 1) * 1000);
           continue;
@@ -782,14 +825,22 @@ async function _fetchWithRetry({ url, headers, body, timeoutMs, model, logPrefix
   };
 
   // Route through rate-master's adaptive queue
-  try {
-    const executed = await rmBridge.execute(stage || logPrefix, model, inputText, rawFetch);
-    actionTag = executed.actionTag;
-    if (executed.result) return { content: executed.result, actionTag };
-  } catch (rmErr) {
-    logger.warn('provider.rate_master_fallback', { stage, model, error: rmErr?.message || 'unknown' });
-    const content = await rawFetch();
-    if (content) return { content, actionTag };
+  // Circuit open — the gateway is known-down, so don't pay another connection
+  // timeout for it. Fall through directly to the api.openai.com path below.
+  const _skipGateway = _useDirectFallback
+    && url.startsWith(OPENAI_BASE_URL)
+    && isGatewayCircuitOpen();
+
+  if (!_skipGateway) {
+    try {
+      const executed = await rmBridge.execute(stage || logPrefix, model, inputText, rawFetch);
+      actionTag = executed.actionTag;
+      if (executed.result) return { content: executed.result, actionTag };
+    } catch (rmErr) {
+      logger.warn('provider.rate_master_fallback', { stage, model, error: rmErr?.message || 'unknown' });
+      const content = await rawFetch();
+      if (content) return { content, actionTag };
+    }
   }
 
   // Direct-OpenAI fallback: if the primary gateway exhausted, retry once against api.openai.com
@@ -951,11 +1002,17 @@ async function _callOllama(systemPrompt, userPrompt) {
       body: JSON.stringify({
         model: OLLAMA_MODEL,
         stream: false,
+        // keep_alive pins gpt-oss:20b in memory between stages — a cold
+        // reload of a 20b model is the dominant local-inference latency.
+        keep_alive: process.env.MERMATE_OLLAMA_KEEP_ALIVE || '30m',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
-        options: { temperature: 0 },
+        options: {
+          temperature: 0,
+          num_ctx: parseInt(process.env.MERMATE_OLLAMA_NUM_CTX || '8192', 10),
+        },
       }),
       signal: controller.signal,
     });
@@ -968,6 +1025,10 @@ async function _callOllama(systemPrompt, userPrompt) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function _callQgot(systemPrompt, userPrompt) {
+  return qgotBridge.chat(systemPrompt, userPrompt, { timeoutMs: INFER_TIMEOUT_MS });
 }
 
 async function _callEnhancer(systemPrompt, userPrompt, stage, extra) {
@@ -1061,42 +1122,49 @@ async function infer(stage, context = {}) {
 
   // Lazy health checks — skip network probes for providers we won't need
   const premiumOk = await _checkHealth('premium');
-  let ollamaOk, enhancerOk;
+  let ollamaOk, enhancerOk, qgotOk;
   if (premiumOk && !preferLocal) {
     // Premium is first in chain and available — defer local checks until needed
     ollamaOk = false;
     enhancerOk = false;
+    qgotOk = false;
   } else {
-    [ollamaOk, enhancerOk] = await Promise.all([
+    [ollamaOk, enhancerOk, qgotOk] = await Promise.all([
       _checkHealth('ollama'),
       _checkHealth('enhancer'),
+      _checkHealth('qgot'),
     ]);
   }
 
   const providers = [
-    { name: 'premium',  ok: premiumOk,  call: () => _callPremium(systemPrompt, userPrompt, stageModel, undefined, stageTokenCap, rateEvents, stage, context.reasoningEffort, context.responseFormat), isPremium: true },
-    { name: 'ollama',   ok: ollamaOk,   call: () => _callOllama(systemPrompt, userPrompt), isPremium: false },
-    { name: 'enhancer', ok: enhancerOk, call: () => _callEnhancer(systemPrompt, userPrompt, stage, context.extra), isPremium: false },
+    { name: 'premium',  ok: premiumOk,  call: () => _callPremium(systemPrompt, userPrompt, stageModel, undefined, stageTokenCap, rateEvents, stage, context.reasoningEffort, context.responseFormat), isPremium: true, model: stageModel },
+    { name: 'ollama',   ok: ollamaOk,   call: () => _callOllama(systemPrompt, userPrompt), isPremium: false, model: OLLAMA_MODEL },
+    { name: 'qgot',     ok: qgotOk,     call: () => _callQgot(systemPrompt, userPrompt), isPremium: false, model: qgotBridge.getModel() },
+    { name: 'enhancer', ok: enhancerOk, call: () => _callEnhancer(systemPrompt, userPrompt, stage, context.extra), isPremium: false, model: 'enhancer' },
   ];
+
+  const _recheckLocal = async () => {
+    [ollamaOk, enhancerOk, qgotOk] = await Promise.all([_checkHealth('ollama'), _checkHealth('enhancer'), _checkHealth('qgot')]);
+    providers[1].ok = ollamaOk;
+    providers[2].ok = qgotOk;
+    providers[3].ok = enhancerOk;
+  };
 
   // Reorder: local-first for copilot stages, premium-first otherwise
   const chain = preferLocal
-    ? [providers[1], providers[2], providers[0]]
+    ? [providers[1], providers[2], providers[3], providers[0]]
     : providers;
 
-  let _localChecked = ollamaOk || enhancerOk;
+  let _localChecked = ollamaOk || enhancerOk || qgotOk;
 
   for (const prov of chain) {
     // Lazy fallback: if premium exhausted without result, check local providers on demand
     if (!prov.ok && !prov.isPremium && !_localChecked) {
       _localChecked = true;
-      [ollamaOk, enhancerOk] = await Promise.all([_checkHealth('ollama'), _checkHealth('enhancer')]);
-      providers[1].ok = ollamaOk;
-      providers[2].ok = enhancerOk;
-      if (!prov.ok) prov.ok = prov.name === 'ollama' ? ollamaOk : enhancerOk;
+      await _recheckLocal();
     }
     if (!prov.ok) {
-      _emitInferenceTrace({ stage, provider: prov.name, model: prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer'), result: 'skipped', latencyMs: 0, error: 'provider not available' });
+      _emitInferenceTrace({ stage, provider: prov.name, model: prov.model, result: 'skipped', latencyMs: 0, error: 'provider not available' });
       continue;
     }
 
@@ -1110,26 +1178,24 @@ async function infer(stage, context = {}) {
 
     if (!output || !output.trim()) {
       logger.warn('provider.empty', { provider: prov.name, stage, ms: latencyMs });
-      _emitInferenceTrace({ stage, provider: prov.name, model: prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer'), result: 'empty', latencyMs });
+      _emitInferenceTrace({ stage, provider: prov.name, model: prov.model, result: 'empty', latencyMs });
       // On premium failure, trigger lazy local check for remaining chain items
       if (prov.isPremium && !_localChecked) {
         _localChecked = true;
-        [ollamaOk, enhancerOk] = await Promise.all([_checkHealth('ollama'), _checkHealth('enhancer')]);
-        providers[1].ok = ollamaOk;
-        providers[2].ok = enhancerOk;
+        await _recheckLocal();
       }
       continue;
     }
 
     if (output.trim() === userPrompt.trim()) {
       logger.warn('provider.noop', { provider: prov.name, stage, ms: latencyMs });
-      _emitInferenceTrace({ stage, provider: prov.name, model: prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer'), result: 'noop', latencyMs, outputLen: output.length });
+      _emitInferenceTrace({ stage, provider: prov.name, model: prov.model, result: 'noop', latencyMs, outputLen: output.length });
       continue;
     }
 
     const usedFallback = !!(prov.isPremium && callResult?.usedDirectFallback);
     logger.info('provider.ok', { provider: prov.name, stage, len: output.length, ms: latencyMs, model: prov.isPremium ? stageModel : undefined, tag: actionTag?.tag, usedDirectFallback: usedFallback || undefined });
-    const resolvedModel = prov.isPremium ? stageModel : (prov.name === 'ollama' ? OLLAMA_MODEL : 'enhancer');
+    const resolvedModel = prov.model;
     _emitInferenceTrace({ stage, provider: prov.name, model: resolvedModel, result: 'ok', latencyMs, outputLen: output.length });
     // Append to forward reasoning memory for downstream stages
     appendReasoningMemory(stage, resolvedModel, output);
@@ -1227,15 +1293,16 @@ function isMaxAvailable() {
 
 /**
  * Check which providers are currently available.
- * @returns {Promise<{premium: boolean, ollama: boolean, enhancer: boolean}>}
+ * @returns {Promise<{premium: boolean, ollama: boolean, enhancer: boolean, qgot: boolean}>}
  */
 async function checkProviders() {
-  const [premium, ollama, enhancer] = await Promise.all([
+  const [premium, ollama, enhancer, qgot] = await Promise.all([
     _checkHealth('premium'),
     _checkHealth('ollama'),
     _checkHealth('enhancer'),
+    _checkHealth('qgot'),
   ]);
-  return { premium, ollama, enhancer };
+  return { premium, ollama, enhancer, qgot };
 }
 
 // ---- Allowed stages for role-based inference --------------------------------

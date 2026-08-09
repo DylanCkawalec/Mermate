@@ -1,15 +1,14 @@
-# Mermaid-GPT Intelligence Model and Axiom Framework
+# Mermate Intelligence Model and Axiom Framework
 
 Version: 2026-03-09 | Status: Authoritative specification
-Reference implementation: `enterprise_ai_agent_architecture_aad.mmd`
 
 ---
 
 ## 1. Executive objective
 
-Mermaid-GPT must convert any level of user intent into structurally correct, readable, architecturally disciplined Mermaid output. The input may range from a single sentence of natural language ("build me an auth system") to a detailed multi-paragraph architecture specification to raw Mermaid source that needs normalization.
+Mermate must convert any level of user intent into structurally correct, readable, architecturally disciplined Mermaid output. The input may range from a single sentence of natural language ("build me an auth system") to a detailed multi-paragraph architecture specification to raw Mermaid source that needs normalization.
 
-The system must feel effortless for the user. Internally it must be deeply structured, logically rigorous, and capable of handling complex architectures with dozens of components, multiple abstraction layers, temporal logic, failure paths, and cross-cutting concerns.
+The user supplies intent only — no syntax knowledge, no layout decisions, no manual repair. Internally the system must remain structured and rigorous enough to handle architectures with dozens of components, multiple abstraction layers, temporal logic, failure paths, and cross-cutting concerns.
 
 **Quality bar:** the output should be indistinguishable from what a senior systems architect would produce by hand given the same brief. The system must never produce blank diagrams, syntactically invalid Mermaid, diagrams that misrepresent the user's intent, or diagrams that are technically correct but unreadable.
 

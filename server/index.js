@@ -138,6 +138,7 @@ app.get('/api/health', async (_req, res) => {
         premium: providers.premium,
         ollama: providers.ollama,
         enhancer: providers.enhancer,
+        qgot: providers.qgot || false,
         maxAvailable,
       },
       agents: {
@@ -150,7 +151,7 @@ app.get('/api/health', async (_req, res) => {
       },
     };
 
-    const anyProvider = providers.premium || providers.ollama || providers.enhancer;
+    const anyProvider = providers.premium || providers.ollama || providers.enhancer || providers.qgot;
     health.status = anyProvider ? 'ok' : 'degraded';
 
     // Opseeq gateway health — AI features depend on this being ready
@@ -169,6 +170,14 @@ app.get('/api/health', async (_req, res) => {
       }
     } catch {
       health.opseeq = { url: null, healthy: false, warming: false };
+    }
+
+    // QGoT local reasoning server — optional local provider over Ollama
+    try {
+      const qgot = require('./services/qgot-bridge');
+      health.qgot = { url: qgot.getUrl(), model: qgot.getModel(), healthy: !!providers.qgot };
+    } catch {
+      health.qgot = { url: null, healthy: false };
     }
 
     return res.status(200).json(health);
@@ -209,31 +218,66 @@ const _OPSEEQ_HEARTBEAT_TIMEOUT_MS = 60_000;
 const _OPSEEQ_DOCKER_COMPOSE = process.env.OPSEEQ_DOCKER_COMPOSE
   || '../opseeq/docker-compose.yml';
 
-function _opseeqExec(cmd) {
+function _opseeqExec(cmd, timeout = 15000) {
   try {
-    return execSync(cmd, { timeout: 15000, stdio: 'pipe' }).toString().trim();
+    return execSync(cmd, { timeout, stdio: 'pipe' }).toString().trim();
   } catch {
     return null;
   }
 }
 
+// Opseeq is OPTIONAL. Container management only makes sense when both the
+// compose file and the docker CLI exist. Memoized so a machine without
+// either never pays a subprocess spawn again (the heartbeat runs every 20s
+// and execSync blocks the event loop).
+let _opseeqManaged = null;
+function _opseeqIsManaged() {
+  if (_opseeqManaged !== null) return _opseeqManaged;
+  const composeFile = path.resolve(__dirname, '..', _OPSEEQ_DOCKER_COMPOSE);
+  const hasCompose = _fs.existsSync(composeFile);
+  const hasDocker = hasCompose && !!_opseeqExec('command -v docker 2>/dev/null', 3000);
+  _opseeqManaged = hasCompose && hasDocker;
+  logger.info('opseeq.lifecycle.mode', {
+    managed: _opseeqManaged,
+    composeFile: hasCompose ? composeFile : null,
+    docker: hasDocker,
+    note: _opseeqManaged ? 'container lifecycle enabled' : 'opseeq optional — telemetry only, no container management',
+  });
+  return _opseeqManaged;
+}
+
 function _opseeqEnsureRunning() {
   if (_opseeqContainerStarted) return true;
-  const status = _opseeqExec(`docker inspect -f '{{.State.Running}}' opseeq 2>/dev/null`);
+  if (!_opseeqIsManaged()) return false;
+  // 3s cap: a stopped docker daemon must not block the event loop for 15s.
+  const status = _opseeqExec(`docker inspect -f '{{.State.Running}}' opseeq 2>/dev/null`, 3000);
   if (status === 'true') {
     _opseeqContainerStarted = true;
     return true;
   }
   const composeFile = path.resolve(__dirname, '..', _OPSEEQ_DOCKER_COMPOSE);
-  _opseeqExec(`docker compose -f ${composeFile} up -d opseeq 2>/dev/null`);
-  _opseeqContainerStarted = true;
-  logger.info('opseeq.lifecycle.start', { composeFile });
-  return true;
+  const started = _opseeqExec(`docker compose -f ${composeFile} up -d opseeq 2>/dev/null`) !== null;
+  // Only claim 'started' when it actually started — otherwise /api/health
+  // reports warming:true forever and the frontend boot waits on a gateway
+  // that is never coming.
+  _opseeqContainerStarted = started;
+  logger[started ? 'info' : 'warn']('opseeq.lifecycle.start', { composeFile, started });
+  return started;
 }
 
 // Boot-time health gate: poll Opseeq until healthy or timeout.
 // This ensures the first user request gets a ready gateway, not a cold-start.
 async function _opseeqBootGate(maxWaitMs = 30_000, intervalMs = 2000) {
+  // Nothing is starting the gateway, so polling for it is pure dead time.
+  // One probe records the status and boot proceeds.
+  if (!_opseeqContainerStarted) {
+    const h = await opseeqBridge.health();
+    logger.info('opseeq.boot_gate.skipped', {
+      healthy: h.healthy,
+      reason: 'container not managed by mermate — no warm-up expected',
+    });
+    return h.healthy;
+  }
   const deadline = Date.now() + maxWaitMs;
   let attempt = 0;
   while (Date.now() < deadline) {
@@ -263,6 +307,7 @@ function _opseeqStopIfIdle() {
   const idleMs = Date.now() - lastActivity;
   if (idleMs < _OPSEEQ_HEARTBEAT_TIMEOUT_MS) return;
   if (!_opseeqContainerStarted) return;
+  if (!_opseeqIsManaged()) return;
   const composeFile = path.resolve(__dirname, '..', _OPSEEQ_DOCKER_COMPOSE);
   _opseeqExec(`docker compose -f ${composeFile} stop opseeq 2>/dev/null`);
   _opseeqContainerStarted = false;
@@ -348,7 +393,11 @@ if (require.main === module) {
         const h = await opseeqBridge.health();
         logger.info('opseeq.boot_ready', { url: opseeqBridge.getUrl(), version: h.version });
       } else {
-        logger.warn('opseeq.boot_unhealthy', { url: opseeqBridge.getUrl(), reason: 'boot_gate_timeout' });
+        logger.warn('opseeq.boot_unhealthy', {
+          url: opseeqBridge.getUrl(),
+          reason: _opseeqContainerStarted ? 'boot_gate_timeout' : 'gateway_offline_optional',
+          note: 'Opseeq is optional — pipeline telemetry falls back to the local trace store',
+        });
       }
     } catch { /* non-fatal — gateway may start later via heartbeat */ }
   });

@@ -197,7 +197,7 @@
         this.state.completed[payload.stage] = true;
       }
       if (typeof payload.confidence === 'number' && payload.stage) {
-        // Two-axis confidence (F1): numeric score drives badges; the formal
+        // Two-axis confidence: numeric score drives badges; the formal
         // verification level is an independent axis so a rendered-but-
         // unverified artifact can never masquerade as a verified one.
         // verification: 'none' | 'draft' | 'compiled' | 'sany' | 'tlc' | 'tests'
@@ -920,13 +920,13 @@
       guidance: 'Markdown spec generated from agent planning/refinement.',
     },
     mmd: {
-      unlocks: 'tla',  // WINNING (F2): mmd unlocks the tla TAB only — never ts
+      unlocks: 'tla',  // A compiled diagram unlocks the tla tab only, never ts
       confidence: () => CONFIDENCE.COMPILED,
       verification: () => 'compiled',
       guidance: 'Mermaid source compiled from the Markdown/architecture plan.',
     },
     tla: {
-      // WINNING (TSRequiresVerifiedTLA): ts is granted ONLY when SANY passed
+      // ts is granted only when SANY passed — an unparseable spec unlocks nothing
       unlocks: (v) => (v.sanyValid ? 'ts' : 'tla'),
       confidence: (v) => (v.sanyValid ? CONFIDENCE.PASS : CONFIDENCE.FAILED),
       verification: (v) => (v.sanyValid ? (v.tlcChecked ? 'tlc' : 'sany') : 'none'),
@@ -980,9 +980,9 @@
     // Track metrics from the most recent render event for the completion banner
     if (ev.metrics) _agentRunMetrics = ev.metrics;
 
-    // Deterministic auto-switch — guarantees the user lands on the tab
-    // that just received new content, even if the animated walk in
-    // _agenticallyReviewArtifacts gets cancelled by a subsequent event.
+    // Deterministic auto-switch — lands the user on the tab that just
+    // received new content even if the animated walk in
+    // _agenticallyReviewArtifacts is cancelled by a subsequent event.
     if (highestNewStage && orchestrator.isUnlocked(highestNewStage)) {
       _scheduleAutoSwitchToStage(highestNewStage);
     }
@@ -1107,8 +1107,8 @@
       const confidence = mode === 'tla'
         ? (data.metrics?.sany_valid ? CONFIDENCE.PASS : CONFIDENCE.FAILED)
         : (data.compile_ok ? CONFIDENCE.PASS : CONFIDENCE.WEAK);
-      // WINNING (F2): hydrating a failed/unverified tla artifact must not
-      // unlock ts — the gate opens only on sany_valid.
+      // Hydrating a failed or unverified tla artifact must not unlock ts —
+      // the gate opens only on sany_valid.
       const unlockTarget = mode === 'tla'
         ? (data.metrics?.sany_valid ? 'ts' : 'tla')
         : 'ts';
@@ -1255,8 +1255,8 @@
       }
       const targetMode = btn.dataset.mode;
       if (!orchestrator.isUnlocked(targetMode)) {
-        // Explicit state, never implied: a locked tab explains why (ui-eval
-        // gate 4) instead of silently ignoring the click.
+        // A locked tab explains why it is locked instead of silently
+        // ignoring the click.
         showToast(targetMode === 'ts'
           ? 'TypeScript is locked \u2014 verify the TLA+ specification first (SANY must pass)'
           : `${_stageLabel(targetMode)} is locked \u2014 complete the earlier stages first`, 'info', 3500);
@@ -1432,10 +1432,10 @@
     });
   }
 
-  // ---- Storage durability alarm (WINNING HealthAlarm) ----------------------
+  // ---- Storage durability alarm ------------------------------------------
   // The orchestrator's _persist() dispatches these events; the UI owns the
-  // visible signal. Degraded = ONE sticky warning that stays until storage
-  // recovers — state is explicit, never implied (ui-eval gate 4).
+  // visible signal. Degraded state raises one sticky warning that stays until
+  // storage recovers, so the user is never silently losing work.
   let _storageToast = null;
   window.addEventListener('mermate:storage-degraded', (e) => {
     if (_storageToast) return; // one sticky alarm at a time
@@ -1758,16 +1758,21 @@
     resultSection.classList.add('is-revealing');
     window.setTimeout(() => resultSection.classList.remove('is-revealing'), 220);
 
-    const resultStage = INPUT_STAGES.has(currentMode) ? 'mmd' : currentMode;
-    const unlockedUpTo = resultStage === 'mmd'
-      ? unlockedThrough('tla')
-      : STAGES.filter(s => orchestrator.isUnlocked(s));
-    orchestrator.updateFromBackend({
-      stage: resultStage,
-      unlockedStages: unlockedUpTo,
-      confidence: CONFIDENCE.RENDERED,
-      verification: resultStage === 'mmd' ? 'compiled' : undefined,
-    });
+    // Progression is only written for real runs (sidebar restore, render,
+    // session restore all pass runId). Display-only calls — subview browsing,
+    // back-to-main — must not mark stages complete or inflate confidence.
+    if (runId) {
+      const resultStage = INPUT_STAGES.has(currentMode) ? 'mmd' : currentMode;
+      const unlockedUpTo = resultStage === 'mmd'
+        ? unlockedThrough('tla')
+        : STAGES.filter(s => orchestrator.isUnlocked(s));
+      orchestrator.updateFromBackend({
+        stage: resultStage,
+        unlockedStages: unlockedUpTo,
+        confidence: CONFIDENCE.RENDERED,
+        verification: resultStage === 'mmd' ? 'compiled' : undefined,
+      });
+    }
 
     _persistSession();
     syncUiGuidance();
@@ -2322,6 +2327,11 @@
         : (data.render_meta && (data.render_meta.depth_score != null || data.render_meta.depth_tier != null))
           ? { score: data.render_meta.depth_score, tier: data.render_meta.depth_tier }
           : null;
+
+      // New mastered run: invalidate downstream BEFORE showResult grants
+      // fresh unlocks, so subscribers never see grant→strip→re-grant flap.
+      orchestrator.resetDownstream(currentMode);
+
       showResult(data.paths, data.diagram_name, data.run_id, data.metrics, depthMeta);
 
       // Surface direct-provider fallback events
@@ -2329,10 +2339,26 @@
         _showFallbackBanner(data.fallback_events);
       }
 
-      const finalText = shouldAnimate ? data.compiled_source : source;
+      let finalText = shouldAnimate ? data.compiled_source : source;
+      if (!shouldAnimate && data.compiled_source && data.compiled_source.trim() !== source) {
+        const repairs = data.render_meta?.repair_changes || [];
+        finalText = data.compiled_source;
+        input.value = finalText;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        orchestrator.setArtifact(currentMode, finalText);
+        showToast(
+          repairs.length > 0
+            ? `Source auto-repaired (${repairs.length} change${repairs.length === 1 ? '' : 's'}) — editor now shows the rendered version`
+            : 'Source normalized to the rendered version — editor updated',
+          'info',
+          4500,
+        );
+      }
       if (copilot) copilot.setRenderedHash(finalText);
 
-      orchestrator.resetDownstream(currentMode);
+      if (data.enhance_note) {
+        showToast(data.enhance_note, 'info', 5000);
+      }
 
       if (data.progressionUpdate) {
         orchestrator.updateFromBackend(data.progressionUpdate);
@@ -2367,15 +2393,39 @@
     setLoading(true, 'tla');
 
     try {
-      const res = await fetch('/api/render/tla', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ diagram_name: currentDiagramName, run_id: currentRunId }),
-      });
+      // Role split (STAGE_REGISTRY promise: "Edit the specification, then
+      // press Render to verify"): a non-empty editor means verify THIS text
+      // via /edit — never silently regenerate over the user's edits. An
+      // empty editor generates from the mastered run. A paste with no
+      // generated artifacts (edit → 422) gets a SANY-only /check.
+      const editedSource = input.value.trim();
+      let res;
+      if (editedSource) {
+        res = await fetch('/api/render/tla/edit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ run_id: currentRunId, tla_source: editedSource }),
+        });
+        if (res.status === 422) {
+          res = await fetch('/api/render/tla/check', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tla_source: editedSource }),
+          });
+        }
+      } else {
+        res = await fetch('/api/render/tla', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ diagram_name: currentDiagramName, run_id: currentRunId }),
+        });
+      }
       const data = await res.json();
 
-      orchestrator.setArtifact('tla', data.tla_source || '');
-      input.value = data.tla_source || '';
+      // /check returns no tla_source — keep the user's text in that case.
+      const effectiveTlaSource = data.tla_source || editedSource || '';
+      orchestrator.setArtifact('tla', effectiveTlaSource);
+      input.value = effectiveTlaSource;
       input.readOnly = false;
 
       const statusEl = document.getElementById('tla-status');
@@ -2390,7 +2440,9 @@
       if (tlaResultsEl) tlaResultsEl.hidden = false;
       resultSection.hidden = false;
 
-      if (!data.success) {
+      // Hard failure = no verification data at all. A SANY-fail on a user
+      // edit (success:false but sany present) still renders badges + errors.
+      if (!data.success && !data.sany) {
         const errMsg = data.error || 'TLA+ generation failed';
         if (statusEl) statusEl.innerHTML = `<span class="tla-badge tla-fail">Error: ${errMsg}</span>`;
         if (sourceEl) sourceEl.textContent = '';
@@ -2438,9 +2490,9 @@
         provenanceEl.innerHTML = `${verifiedBadge}<span class="tla-provenance-chip">${chipParts.join(' \u00b7 ')}</span>`;
       }
 
-      if (sourceEl) sourceEl.textContent = data.tla_source || '';
+      if (sourceEl) sourceEl.textContent = effectiveTlaSource;
 
-      const invItems = (data.tlc?.invariantsChecked || []).map(inv =>
+      const invItems = (data.tlc?.invariantsChecked || data.verification?.tlc?.invariantsChecked || []).map(inv =>
         `<div class="tla-inv-item">${inv} <span class="tla-badge tla-pass">checked</span></div>`
       ).join('');
       if (invEl) invEl.innerHTML = invItems || '<span class="tla-muted">No invariants checked</span>';
@@ -2462,22 +2514,13 @@
         metricsEl.innerHTML = `<span>Variables: ${m.variableCount}</span><span>Actions: ${m.actionCount}</span><span>Invariants: ${m.invariantCount}</span><span>Entity coverage: ${(m.entityCoverage * 100).toFixed(0)}%</span><span>State space: ~${m.stateSpaceEstimate}</span>`;
       }
 
-      const tlaConfidence = data.sany?.valid
-        ? (data.tlc?.success ? CONFIDENCE.VERIFIED : CONFIDENCE.PARTIAL)
-        : CONFIDENCE.BROKEN;
-      orchestrator.updateFromBackend({
-        stage: 'tla',
-        unlockedStages: unlockedThrough(data.sany?.valid ? 'ts' : 'tla'),
-        confidence: tlaConfidence,
-        verification: data.sany?.valid ? (data.tlc?.success ? 'tlc' : 'sany') : 'none',
-        nextRecommended: data.sany?.valid ? 'ts' : undefined,
-      });
-
       if (data.progressionUpdate) {
         orchestrator.updateFromBackend(data.progressionUpdate);
       }
 
-      if (data.sany?.valid) {
+      // Continuation only when the server actually opened the ts gate —
+      // a bare /check pass has no run lineage and unlocks nothing.
+      if (data.sany?.valid && data.progressionUpdate) {
         if (agent && typeof agent.showTsContinuation === 'function') {
           agent.showTsContinuation({ autoChain: false });
         } else {
@@ -2515,10 +2558,18 @@
     setLoading(true, 'ts');
 
     try {
+      // Same edit contract as the TLA+ tab: a non-empty editor means
+      // "compile and test THIS source" — the backend validates it against
+      // the run's harness instead of regenerating over the user's edits.
+      const editedTsSource = input.value.trim();
       const res = await fetch('/api/render/ts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ diagram_name: currentDiagramName, run_id: currentRunId }),
+        body: JSON.stringify({
+          diagram_name: currentDiagramName,
+          run_id: currentRunId,
+          ts_source: editedTsSource || undefined,
+        }),
       });
       const data = await res.json();
 
@@ -2572,11 +2623,6 @@
         if (tracesEl) tracesEl.textContent = 'No failure traces.';
       }
 
-      const tsConfidence = data.success
-        ? CONFIDENCE.VERIFIED
-        : (compileOk ? CONFIDENCE.WEAK : CONFIDENCE.REJECTED);
-      orchestrator.updateFromBackend({ stage: 'ts', confidence: tsConfidence });
-
       if (data.progressionUpdate) {
         orchestrator.updateFromBackend(data.progressionUpdate);
       }
@@ -2627,10 +2673,8 @@
     if (currentMode === 'tla') return renderTla();
     if (currentMode === 'ts') return renderTs();
 
-    if (INPUT_STAGES.has(currentMode)) {
-      orchestrator.resetDownstream(currentMode);
-    }
-
+    // Downstream reset happens in renderMermaid's SUCCESS path only —
+    // a failed render must never wipe existing TLA+/TS artifacts.
     return renderMermaid();
   }
 
@@ -2997,8 +3041,8 @@
         _applyAgentArtifacts(event);
         const completedStages = event.stages_completed || [];
         if (completedStages.includes('tla')) {
-          // WINNING (F2): bundle completion only opens the ts gate when the
-          // TLA+ artifact actually passed SANY.
+          // Bundle completion opens the ts gate only when the TLA+ artifact
+          // actually passed SANY.
           orchestrator.updateFromBackend({
             stage: 'tla',
             unlockedStages: unlockedThrough(event.tla_valid ? 'ts' : 'tla'),
@@ -3154,7 +3198,7 @@
   _rebuildAgentDropdown();
   updateBadges();
 
-  // ---- Recover artifacts from a completed run (WINNING F4/Reload) ---------
+  // ---- Recover artifacts from a completed run -----------------------------
   // When the agent finished while the browser was detached, the SSE events
   // carrying stage artifacts never reached this client. The server already
   // persists everything per-run; /api/artifacts/:run_id returns it. Only
@@ -3231,9 +3275,9 @@
       const data = await res.json();
       const live = (data.sessions || []).find(s => s.session_id === saved.id && s.status === 'running');
       if (!live) {
-        // WINNING (F4/Reload): the run may have COMPLETED while the browser
-        // was detached — recover its artifacts from the server before
-        // dropping the session pointer, or those stages are lost.
+        // The run may have completed while the browser was detached —
+        // recover its artifacts from the server before dropping the session
+        // pointer, otherwise those stages are lost.
         await _recoverCompletedRun(currentRunId);
         window.MermaidAgent.clearSavedSession();
         return;
@@ -3421,7 +3465,7 @@
       }
     }
     const providerCount = healthData
-      ? ['premium', 'ollama', 'enhancer'].filter(k => healthData.providers?.[k]).length
+      ? ['premium', 'ollama', 'enhancer', 'qgot'].filter(k => healthData.providers?.[k]).length
       : 0;
     const opseeqStatus = healthData?.opseeq
       ? (healthData.opseeq.healthy ? 'Opseeq ready' : (healthData.opseeq.warming ? 'Opseeq warming' : 'Opseeq offline'))

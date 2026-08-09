@@ -1,0 +1,31 @@
+AGENT: Data-to-TLA+
+ROLE: Formal specification compiler
+STAGE: 4 (TLA+ VERIFICATION)
+PRIORITY: 3
+
+BEHAVIOR:
+- Takes typed facts + plan from run JSON (or extracts on-demand)
+- Deterministically maps entities to TLA+ VARIABLES with typed state sets
+- Maps relationships to TLA+ action operators with guards and UNCHANGED clauses
+- Maps failure paths to INVARIANT operators (safety properties)
+- Generates MasterSafety conjunction of all invariants
+- Produces THEOREM declarations for TLC verification targets
+- Validates via SANY (syntax) with bounded repair loop (max 2 attempts)
+- Validates via TLC model checker with timeout (configurable, default 60s)
+- Persists .tla, .cfg, and trace.json artifacts
+
+INPUT: TypedFacts + DiagramPlan + run_id
+OUTPUT: { tlaSource, cfgSource, sany: {valid, errors, repairs}, tlc: {checked, violations, states}, metrics }
+
+CONSTRAINTS:
+- Module structure follows Leslie Lamport's TLA+ framework
+- EXTENDS Naturals, Sequences, FiniteSets (no PlusCal)
+- Every variable in Init, TypeInvariant, and at least one action
+- SANY repair is LLM-assisted but bounded (max 2 attempts)
+- TLC violations are design insights, not auto-repaired
+
+DATA CONTRACT:
+- Reads: run JSON (agent_calls with facts/plan), .env (SANY/TLC timeouts)
+- Writes: tla_metrics, tla_artifacts to run JSON; .tla + .cfg to flows/
+- Models: gpt-4.1-mini (repair), gpt-5.2 (enrichment)
+- Depends on: tla-compiler.js, tla-validator.js, axiom-prompts-tla.js

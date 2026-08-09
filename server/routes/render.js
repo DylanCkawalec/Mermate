@@ -128,12 +128,12 @@ async function callEnhancer(body) {
 /**
  * GET /api/copilot/health
  * Frontend-safe health probe: reports available if ANY provider in the chain
- * can serve copilot requests (Ollama, premium API, or Python enhancer).
+ * can serve copilot requests (Ollama, QGoT, premium API, or Python enhancer).
  */
 router.get('/copilot/health', async (_req, res) => {
   try {
     const providers = await provider.checkProviders();
-    const available = providers.ollama || providers.premium || providers.enhancer;
+    const available = providers.ollama || providers.premium || providers.enhancer || providers.qgot;
     const maxAvailable = provider.isMaxAvailable();
     const visualAvailable = visualProvider.isAvailable();
     return res.status(available ? 200 : 503).json({
@@ -266,7 +266,7 @@ router.post('/copilot/enhance', async (req, res) => {
     }
   }
 
-  // ---- Provider chain fallback (Ollama / premium API) ----
+  // ---- Provider chain fallback (see inference-provider.js for the order) ----
   // Build a user prompt that includes shadow context
   let userPrompt = sourceText;
   if (shadowContext) {
@@ -745,12 +745,15 @@ router.post('/render', async (req, res) => {
     // 3. Derive name
     const diagramName = deriveDiagramName(mmdSource, diagram_name);
 
-    // 4+5. Archive and compile in parallel — they write to different directories
+    // 4+5. Archive and compile in parallel — they write to different directories.
+    // Role split: Render compiles; Enhance transforms. A user-pasted .mmd with
+    // Enhance OFF gets deterministic repair only — no silent LLM rewrite.
+    const allowModelRepair = !(contentState === 'mmd' && !enhance);
     const outputDir = path.join(FLOWS_DIR, diagramName);
     const _acStart = Date.now();
     const [archivePaths, compileOutcome] = await Promise.all([
       archive(source, diagramName, diagramType),
-      compileWithRetry(mmdSource, outputDir, diagramName),
+      compileWithRetry(mmdSource, outputDir, diagramName, null, { allowModelRepair }),
     ]);
     _dbgPipeline('H-C', 'render.js:/render', 'phase_archive_compile', {
       runId: runId ? runId.slice(0, 8) : null,
@@ -882,7 +885,7 @@ router.post('/render', async (req, res) => {
       structurallyValid: postRenderValidation.valid,
     };
 
-    // 7. Optional: generate polished visual via Gemini (nanobanana layer)
+    // 7. Optional: presentation-oriented image via the Gemini visual provider
     let visualResult = null;
     if (visual && visualProvider.isAvailable()) {
       try {
@@ -984,6 +987,9 @@ router.post('/render', async (req, res) => {
         provider: enhanceMeta?.provider || null,
       } : null,
       content_state: contentState,
+      enhance_note: (enhance && contentState === 'mmd' && !wasEnhanced)
+        ? 'Render compiles Mermaid source as-is. To optimize it with AI, use the Enhance button before rendering.'
+        : undefined,
       paths: {
         png: `/flows/${diagramName}/${diagramName}.png`,
         svg: `/flows/${diagramName}/${diagramName}.svg`,

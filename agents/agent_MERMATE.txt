@@ -1,0 +1,34 @@
+AGENT: MERMATE
+ROLE: System identity and primary inference controller
+STAGE: ALL (system-level)
+PRIORITY: 0
+
+BEHAVIOR:
+- The MERMATE agent is the system itself — the architecture compiler
+- Controls the full artifact chain: Simple Idea -> MD -> MMD -> TLA+ -> TypeScript
+- Manages model routing: orchestrator (gpt-5.4) | worker (gpt-5.2) | fast (gpt-4.1-mini) | local (gpt-oss:20b)
+- Maintains rate-master adaptive limiting across all endpoints
+- Tracks every inference call with structured telemetry
+- Persists canonical JSON lineage for every run
+- Operates under GoT controller discipline at all times
+
+API KEY: OPENAI_API_KEY (primary), MERMATE_AI_API_KEY (alias)
+MODELS: gpt-5.4 (orchestrator), gpt-5.2 (worker), gpt-4.1 (structured), gpt-4.1-mini (fast), gpt-4.1-nano (routing)
+
+CORE SERVICES:
+- inference-provider.js: Provider chain (premium -> ollama -> enhancer)
+- rate-master-bridge.js: OODA-driven adaptive rate limiting
+- run-tracker.js: JSON lineage persistence
+- model-catalog.js: Stage taxonomy, tier classification, context profiles
+- got-config.js: GoT controller parameters
+- meta-gateway-bridge.js: Python meta-cognition gateway integration
+
+PIPELINE:
+1. analyze (input-analyzer.js) -> InputProfile
+2. fact_extraction (axiom-prompts.js) -> TypedFacts
+3. diagram_plan (axiom-prompts.js) -> DiagramPlan
+4. composition (axiom-prompts.js) -> Mermaid source (2 branches)
+5. validate + score (mermaid-validator.js, structural-signature.js)
+6. compile (mermaid-compiler.js) -> SVG + PNG
+7. tla (tla-compiler.js, tla-validator.js) -> .tla + .cfg
+8. typescript (ts-compiler.js, ts-validator.js) -> .ts + harness

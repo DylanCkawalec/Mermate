@@ -5,10 +5,10 @@
 **AI architecture copilot for Mermaid — raw ideas in, verified systems out.**
 
 ![node >=20](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)
-![tests — 205 passing](https://img.shields.io/badge/tests-205%20passing-brightgreen)
-![design — TLC verified](https://img.shields.io/badge/design-TLC%20verified-blueviolet)
+![tests — node --test](https://img.shields.io/badge/tests-node%20--test-brightgreen)
+![design — TLC checked](https://img.shields.io/badge/design-TLC%20checked-blueviolet)
 
-Describe a system in plain English. Mermate compiles it into High-quality Mermaid diagrams — flowcharts, state machines, sequence diagrams, ER diagrams, and more — then keeps going: **simple idea's → Markdown spec's → Mermaid Diagrams → TLA+ specifications → TypeScript runtime Modules → downloadable bundle**.
+Describe a system in plain English. Mermate compiles it into Mermaid diagrams — flowcharts, state machines, sequence diagrams, ER diagrams, and more — then keeps going: **simple idea → Markdown spec → Mermaid diagram → TLA+ specification → TypeScript runtime module → downloadable bundle**.
 
 Mermate ships **without an AI model**. It is a compilation engine with a copilot layer — you bring the model (OpenAI-compatible API, local Ollama, or any endpoint that speaks the enhancer contract). With no model connected it still works as a full Mermaid compiler.
 
@@ -32,7 +32,7 @@ Open [http://localhost:3333](http://localhost:3333). That's it.
 
 **Requirements:** Node.js ≥ 20, npm ≥ 9. Python ≥ 3.9 only if you run the optional local enhancer.
 
-Full component-by-component setup — optional providers, TLA+/TLC toolchain, Rust + **desktop `.app` packaging**, MCP bridge.
+Component-by-component setup — optional providers, TLA+/TLC toolchain, Rust and desktop `.app` packaging, MCP bridge — is documented in [`docs/installation.md`](docs/installation.md).
 
 **Try these first prompts** (paste into *Simple Idea*, press **Render**):
 
@@ -58,17 +58,17 @@ On OOM kill → Failed. On graceful shutdown → Succeeded.
 | **Enhance** — ghost-text copilot + full-text refinement of your idea | Yes |
 | Text → Mermaid compilation with repair budgets | Yes |
 | **Agent mode** — staged planning → preview render → your notes → final render, over SSE | Yes |
-| **TLA+ specification** generated from your diagram, SANY-parsed and TLC-checked by Specula which prefers Sonnet API key over other LLM keys | Yes (+ Java for TLC) |
+| **TLA+ specification** generated from your diagram, then SANY-parsed and TLC-checked | Yes (+ Java for TLC) |
 | **TypeScript runtime** compiled from the verified TLA+ artifact, tested | Yes |
 | Run lineage: every LLM call audited, per-stage cost/token summaries, trace JSON | No |
 | Optional Rust binary + macOS `.app` packaging with landing page | Yes |
 
-just ask for the desktop version from your coding agent on installation and you should see a mermaid appear on your desktop.
-..Double click it and you're using mermate.
+The optional macOS packaging step produces a double-clickable `.app`; see
+[`docs/installation.md`](docs/installation.md) for the build steps.
 
 ## Connecting a model
 
-Three provider paths, automatically chained with fallback — if one is offline, Mermate falls through to the next:
+Provider paths are chained with fallback — if one is offline, Mermate falls through to the next:
 
 | Provider | Configure | Best for |
 |---|---|---|
@@ -84,7 +84,7 @@ OPENAI_API_KEY=sk-proj-YOUR_KEY_HERE
 # MERMATE_ORCHESTRATOR_MODEL=gpt-5.6-sol
 # MERMATE_WORKER_MODEL=gpt-5.6-terra
 # MERMATE_FAST_STRUCTURED_MODEL=gpt-5.6-luna
-# CLAUDE_API_KEY=sk-ant-...          # Anthropic (Sonnet) for TLA+ authoring
+# CLAUDE_API_KEY=sk-ant-...          # Optional Anthropic fallback for TLA+ authoring
 ```
 
 The enhancer contract is one endpoint: Mermate POSTs `{ stage, raw_source, system_prompt, temperature }` and expects `{ enhanced_source }` (or `{ suggestion }` for copilot stages). Any model server that honors it works — see `archs/mermaid_axioms.md` for the prompt framework it plugs into.
@@ -118,7 +118,7 @@ Key environment variables (full list in `.env.example`):
 ```bash
 PORT=3333                                # App server port
 OPENAI_API_KEY=<key>                     # Hosted-model key
-CLAUDE_API_KEY=<key>                     # Anthropic (TLA+ authoring)
+CLAUDE_API_KEY=<key>                     # Optional Anthropic fallback (TLA+ authoring)
 MERMATE_OLLAMA_URL=http://localhost:11434
 MERMAID_ENHANCER_URL=http://localhost:8100
 MERMATE_MAX_REPAIR_CALLS=5               # Repair budget per stage
@@ -128,6 +128,6 @@ MERMATE_DUMP_DIR=~/Desktop/MERMATE/dumps # Optional completed-run exports
 
 ## ⚠️ Important
 
-Mermate does not ship an AI model. The copilot, enhancement, agent, and formal-spec features work with a model **you** choose and run locally, scripts are included in the repo for how to create the enhancement for the model you chose to use. Output quality depends on your model; Mermate's job is excellent system prompts, a structured reasoning pipeline, a verified control plane, and a clean compilation layer.
+Mermate does not ship an AI model. The copilot, enhancement, agent, and formal-spec features require a model **you** choose and run; the repo includes scripts for standing up the enhancer contract against that model. Output quality depends on your model. Mermate supplies the system prompts, the staged pipeline, the verification gates, and the compilation layer.
 
 Run it without any model and it is a fully usable standalone Mermaid compiler.

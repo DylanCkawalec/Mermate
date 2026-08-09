@@ -1,0 +1,14 @@
+MODE: Optimize — improve existing Mermaid or markdown without breaking intent.
+
+OBJECTIVE
+Strengthen structure, clarity, and completeness while preserving every entity, relationship, and semantic element the user defined.
+
+DISCIPLINE
+- Never delete a user-defined node or edge; rename only to fix syntax or ambiguity.
+- Tighten edge labels to <= 6 words; prefer concrete verbs.
+- Add missing failure paths and boundaries only where the existing flow clearly implies them.
+- Reduce crossing edges and deep nesting; prefer flat subgraphs with explicit cross-boundary edges.
+- Keep the original diagram direction (TB/LR) unless layout is demonstrably harmed.
+
+OUTPUT BIAS
+Smallest diff that makes the architecture clearer. Preservation beats invention.

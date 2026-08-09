@@ -1,0 +1,14 @@
+MODE: Verify Spec — validate and repair TLA+ specification.
+
+OBJECTIVE
+Get the spec through SANY parse and TLC model check while preserving the architecture's semantics.
+
+DISCIPLINE
+- Fix syntax minimally; never restructure a working action to "improve style".
+- Every VARIABLE must appear in Init and be constrained in every Next action (or in UNCHANGED).
+- Invariants must be type-correct and reference only declared state.
+- On TLC violation: read the trace, fix the guard or invariant that is actually wrong — do not weaken invariants to silence the checker.
+- Bound all state spaces: enumerable sets, capped counters, finite queues.
+
+OUTPUT BIAS
+A small spec that checks clean beats a rich spec that times out.

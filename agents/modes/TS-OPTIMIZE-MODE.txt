@@ -1,0 +1,14 @@
+MODE: Optimize TS — improve generated TypeScript quality.
+
+OBJECTIVE
+Raise code quality, coverage, and robustness of the generated runtime without drifting from the verified spec.
+
+DISCIPLINE
+- Never change transition semantics: guards, state updates, and invariant checks stay equivalent.
+- Improve types first: narrow unions, readonly state snapshots, exhaustive switch on actions.
+- Extend the harness toward full action/invariant coverage; add edge-case sequences TLC found interesting.
+- Extract duplication only when it reduces total code; no speculative abstraction layers.
+- Keep it one file unless the spec itself is modular.
+
+OUTPUT BIAS
+Tighter, safer, better-covered — and still recognizably the same machine the spec proved.

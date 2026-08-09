@@ -1,0 +1,14 @@
+MODE: Generate Runtime — compile TLA+ spec to TypeScript.
+
+OBJECTIVE
+Produce a single TypeScript runtime that is a faithful executable refinement of the verified spec: same states, same transitions, same invariants.
+
+DISCIPLINE
+- One class per spec module; each TLA+ action becomes a method with its guard checked first.
+- Encode invariants as runtime assertions executed after every transition.
+- State types mirror the spec's variables exactly — no extra mutable state.
+- The harness must exercise every action and verify every invariant at least once.
+- Compile clean under strict tsc; no `any` where the spec gives a concrete type.
+
+OUTPUT BIAS
+Conformance to the spec over idiomatic flourish. The runtime is a proof artifact.

@@ -432,7 +432,8 @@ router.post('/render/tla', async (req, res) => {
       verifiedAt,
     };
 
-    // IPO summary log line — measurable flawlessness over time.
+    // Input/process/output summary — one structured line per run so verification
+    // outcomes can be compared across runs.
     logger.info('tla.ipo_summary', {
       run_id: run_id.slice(0, 8),
       moduleName,
@@ -625,6 +626,7 @@ router.post('/render/tla', async (req, res) => {
           : ['idea', 'md', 'mmd', 'tsx', 'tla'],
         nextRecommended: validation.sany.valid ? 'ts' : undefined,
         confidence: tlaConfidence,
+        verification: validation.sany.valid ? (validation.tlc.success ? 'tlc' : 'sany') : 'none',
       },
     });
   } catch (err) {
@@ -903,6 +905,7 @@ router.post('/render/tla/edit', async (req, res) => {
         tlc: {
           checked: validation.tlc.checked,
           success: validation.tlc.success,
+          invariantsChecked: validation.tlc.invariantsChecked || [],
           violations: validation.tlc.violations,
           errors: validation.tlc.errors || [],
           statesExplored: validation.tlc.statesExplored,
@@ -910,6 +913,15 @@ router.post('/render/tla/edit', async (req, res) => {
         },
         tla_source: validation.tlaSource,
         cfg_source: effectiveCfg,
+        progressionUpdate: {
+          stage: 'tla',
+          unlockedStages: validation.sany.valid
+            ? ['idea', 'md', 'mmd', 'tsx', 'tla', 'ts']
+            : ['idea', 'md', 'mmd', 'tsx', 'tla'],
+          nextRecommended: validation.sany.valid ? 'ts' : undefined,
+          confidence: validation.sany.valid ? (validation.tlc.success ? 0.95 : 0.7) : 0.3,
+          verification: validation.sany.valid ? (validation.tlc.success ? 'tlc' : 'sany') : 'none',
+        },
       });
     } finally {
       provider.setTraceId(null);

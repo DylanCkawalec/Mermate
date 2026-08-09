@@ -13,7 +13,7 @@ is complete, formally specified, and test-locked.
 
 ### Features
 
-- **Winning Design control plane** — TLC-verified TLA+ specification
+- **Formally specified control plane** — TLC-checked TLA+ specification
   (`docs/specs/MermateOrchestrator.tla`) implemented across seven stages:
   TypeScript tab gated on verified TLA+; dual-axis confidence (value +
   verification); storage-degraded alarm with sticky banner; boot recovery
@@ -61,7 +61,7 @@ is complete, formally specified, and test-locked.
 ### Quality
 
 - **Tests**: 206 total / 200 pass / 0 fail (6 pre-existing dev-mode-only
-  skips) — 13 invariant tests lock the winning design; tandem e2e
+  skips) — 13 invariant tests lock the control-plane design; tandem e2e
   self-spawns a server and exercises render → TLA+ → TS → Rust `.app`.
 - **Security**: `npm audit` 0 high / 0 critical — exact dependency pins,
   multer 2.2.0, tar 7.5.22 override; no runtime secrets; path guards;

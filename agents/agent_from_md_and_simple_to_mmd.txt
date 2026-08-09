@@ -1,0 +1,29 @@
+AGENT: Markdown-to-Mermaid
+ROLE: Mermaid diagram composer
+STAGE: 3 (COMPOSE)
+PRIORITY: 2
+
+BEHAVIOR:
+- Takes typed facts + plan and composes valid Mermaid source
+- Generates 2 competing branches (Branch A: TB layout, Branch B: LR layout)
+- Scores both via HPC (structural validity + invariant coverage)
+- Prunes branches below threshold, selects best
+- Optional merge of top candidates if merge improves score
+- Validates final .mmd against Mermaid syntax axioms
+- Compiles to SVG + PNG via mmdc (parallel)
+
+INPUT: TypedFacts + DiagramPlan + original text
+OUTPUT: { mmdSource: string, diagramType: string, hpcScore: object, subviews: array }
+
+CONSTRAINTS:
+- First line must be valid Mermaid directive
+- All entities from facts must appear as nodes
+- All relationships must appear as edges
+- Node IDs must not use reserved words (end, subgraph, graph, style, class, click, default)
+- Max 80 nodes per diagram; decompose above that
+
+DATA CONTRACT:
+- Reads: facts, plan from stage 2
+- Writes: agent_calls[composition], branches, final_artifact to run JSON
+- Models: gpt-5.2 (worker) for composition branches
+- Depends on: axiom-prompts.js (buildCompositionPrompt), mermaid-compiler.js, mermaid-validator.js

@@ -101,7 +101,8 @@ router.get('/render/ts/source/:run_id', async (req, res) => {
 });
 
 router.post('/render/ts', async (req, res) => {
-  const { run_id, diagram_name, audit_run_id } = req.body || {};
+  const { run_id, diagram_name, audit_run_id, ts_source } = req.body || {};
+  const userTsSource = (typeof ts_source === 'string' && ts_source.trim()) ? ts_source : null;
 
   if (!run_id) {
     return res.status(400).json({ success: false, error: 'run_id is required' });
@@ -234,8 +235,17 @@ router.post('/render/ts', async (req, res) => {
 
     let compiled = tsCompiler.compileCompilationContext(compilationContext);
 
-    // Claude review: check TS against TLA+ spec for semantic correctness
-    if (speculaLlm.isAvailable() && tlaSource) {
+    // User-edited source: validate exactly what the user sees. The harness
+    // and coverage spec still come from the deterministic compile so the
+    // edit is checked against the same conformance contract.
+    if (userTsSource) {
+      compiled = { ...compiled, tsSource: userTsSource };
+      logger.info('ts.user_edit_source', { runId: run_id.slice(0, 8), len: userTsSource.length });
+    }
+
+    // Claude review: check TS against TLA+ spec for semantic correctness.
+    // Skipped for user-edited source — the user's code is authoritative.
+    if (!userTsSource && speculaLlm.isAvailable() && tlaSource) {
       logger.info('ts.claude_review_start', { className: compiled.className });
       if (audit_run_id) auditTracker.emit(audit_run_id, 'agent:role_start', { role: 'ts_reviewer', stage: 'ts' });
       const reviewResult = await speculaLlm.inferTlaStage('review_ts', {
@@ -390,6 +400,7 @@ router.post('/render/ts', async (req, res) => {
         stage: 'ts',
         unlockedStages: ['idea', 'md', 'mmd', 'tsx', 'tla', 'ts'],
         confidence: tsConfidence,
+        verification: validation.success ? 'tests' : (validation.compile.success ? 'compiled' : 'none'),
       },
     };
 

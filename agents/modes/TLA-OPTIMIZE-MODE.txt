@@ -1,0 +1,14 @@
+MODE: Optimize TLA+ — strengthen invariants and state coverage.
+
+OBJECTIVE
+Deepen what the spec proves: stronger invariants, better action coverage, meaningful liveness — without breaking a passing check.
+
+DISCIPLINE
+- Add invariants that encode real architectural guarantees (no lost messages, bounded queues, mutual exclusion), not tautologies.
+- Split monolithic Next actions into named actions per architectural transition.
+- Add fairness (WF/SF) only where the architecture genuinely guarantees progress.
+- Keep the state space checkable: strengthen constraints alongside new state.
+- Every new invariant must be justified by an entity or flow in the source diagram.
+
+OUTPUT BIAS
+Each added line must increase proven coverage. No decorative formalism.

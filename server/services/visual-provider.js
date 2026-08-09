@@ -1,14 +1,12 @@
 'use strict';
 
 /**
- * Visual Provider — Gemini Image Generation layer for Mermate.
+ * Visual Provider — optional image-generation layer for Mermate.
  *
- * After Mermate compiles a Mermaid diagram (structural/logical), this service
- * optionally generates a polished, presentation-quality visual version using
- * Google's Gemini image generation API (the engine behind nanobanana).
- *
- * The visual layer turns technical Mermaid diagrams into beautiful architecture
- * visuals suitable for pitch decks, grant applications, and documentation.
+ * After Mermate compiles a Mermaid diagram, this service can render an
+ * alternative presentation-oriented image of the same structure via Google's
+ * Gemini image generation API. It is additive: the compiled Mermaid SVG/PNG
+ * remains the canonical artifact, and a failure here does not fail the render.
  *
  * Environment variables:
  *   GEMINI_API_KEY          - Google AI Studio API key (required)

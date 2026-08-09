@@ -30,6 +30,7 @@ const runTracker = require('../services/run-tracker');
 const rmBridge = require('../services/rate-master-bridge');
 const catalog = require('../services/model-catalog');
 const opseeq = require('../services/opseeq-bridge');
+const agentLoader = require('../services/agent-loader');
 const logger = require('../utils/logger');
 
 // Render timeout: separate from inference timeout so long HPC-GoT pipelines
@@ -52,7 +53,12 @@ function _withArtifactsEnvelope(data) {
   return { ...data, artifacts: { md, mmd, tla, ts } };
 }
 
-const ASSETS_DIR = path.resolve(__dirname, '..', '..', '.cursor', 'assets');
+// Mode prompt briefs: repo-tracked agents/modes/ is primary; legacy
+// .cursor/assets kept as fallback for older local setups.
+const MODE_PROMPT_DIRS = [
+  path.resolve(__dirname, '..', '..', 'agents', 'modes'),
+  path.resolve(__dirname, '..', '..', '.cursor', 'assets'),
+];
 
 const AGENT_MODES = {
   'code-review': {
@@ -121,14 +127,21 @@ const AGENT_MODES = {
   },
 };
 
+const _modePromptCache = new Map();
+
 async function _loadModePrompt(modeId) {
   const mode = AGENT_MODES[modeId];
   if (!mode) return null;
-  try {
-    return await fsp.readFile(path.join(ASSETS_DIR, mode.file), 'utf-8');
-  } catch {
-    return null;
+  if (_modePromptCache.has(modeId)) return _modePromptCache.get(modeId);
+  let prompt = null;
+  for (const dir of MODE_PROMPT_DIRS) {
+    try {
+      prompt = await fsp.readFile(path.join(dir, mode.file), 'utf-8');
+      break;
+    } catch { /* try next dir */ }
   }
+  _modePromptCache.set(modeId, prompt);
+  return prompt;
 }
 
 /**
@@ -146,7 +159,15 @@ function _buildAgentRoleHeader(role, stage, modePromptSkeleton) {
     const shortName = role.name.replace(/^Doctor_/, 'Dr. ').replace(/_/g, ' ');
     const domain = (role.domain || 'general').replace(/_/g, ' ');
     parts.push(`[REASONING ROLE: ${shortName} — domain: ${domain}]`);
-    parts.push(`Reason as a specialist in ${domain}. Apply deep expertise in this domain when analysing the architecture.`);
+    // Agent doctrine: the compact behavior block from agents/agent_*.txt,
+    // matched by domain. Precomputed at load time (~120 tokens max) — this
+    // is where the agent spec corpus actually shapes inference.
+    const doctrine = agentLoader.getAgentByDomain(role.domain);
+    if (doctrine?.promptBlock) {
+      parts.push(doctrine.promptBlock);
+    } else {
+      parts.push(`Reason as a specialist in ${domain}. Apply deep expertise in this domain when analysing the architecture.`);
+    }
   }
   if (stage === 'planning') {
     parts.push(`[STAGE: Architecture Planning — analyse structure, constraints, entities, failure paths, and boundaries.]`);

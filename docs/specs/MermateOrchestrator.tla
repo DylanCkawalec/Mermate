@@ -1,6 +1,6 @@
 ---- MODULE MermateOrchestrator ----
 (***************************************************************************)
-(* Mermate Orchestrator — the WINNING control-plane design.                  *)
+(* Mermate Orchestrator — control-plane design specification.              *)
 (*                                                                         *)
 (* System modeled: the Mermate session control plane — the client-side     *)
 (* workflow FSM (stages idea -> md -> mmd -> tla -> ts), the SSE agent     *)
@@ -33,7 +33,7 @@
 (*    only after it succeeds.                                              *)
 (*                                                                         *)
 (* 4. Persistence is modeled as volatile memory (mem) vs durable store     *)
-(*    (disk) with an explicit health flag. The WINNING contract — every    *)
+(*    (disk) with an explicit health flag. The contract — every            *)
 (*    mutation is synchronously durable while healthy, and any failure     *)
 (*    is surfaced to the user — is stated ONCE, in SyncDisks, and shared   *)
 (*    by every mutating action. The previous implementation's silent       *)
@@ -145,7 +145,7 @@ SyncDisks ==
   /\ verifiedDisk'   = IF health = "ok" THEN verified'   ELSE verifiedDisk
 
 UnlocksFor(s, v) ==
-  \* The winning unlock rule. Compare the implementation's
+  \* The unlock rule. Compare the implementation's
   \* AGENT_ARTIFACT_RULES, whose mmd -> ts edge let TS render without any
   \* TLA+ verification. Here mmd unlocks the tla TAB (user may paste and
   \* request verification) but ts is granted ONLY by VerifyTLA — or by a
@@ -195,7 +195,7 @@ RequestVerify == \* explicit authorization — a user gesture on the tla
   /\ UNCHANGED <<agent, health, notified>>
   /\ SyncDisks
 
-VerifyTLA ==    \* SANY+TLC succeeds; THE ts gate (winning rule)
+VerifyTLA ==    \* SANY+TLC succeeds; this is the only action that opens the ts gate
   /\ verifyRequested
   /\ art["tla"]
   /\ ~verified["tla"]
@@ -222,7 +222,7 @@ AgentEmit(s) ==  \* one pipeline stage completes and ships its artifact
   /\ s \in AgentStages
   /\ s \notin completed
   /\ (s = "ts") => ("ts" \in unlocked)   \* the pipeline cannot emit TS
-                                         \* before the gate — F2 barred
+                                         \* before the gate has opened
   /\ completed' = completed \cup {s}
   /\ art'       = [art EXCEPT ![s] = TRUE]
   /\ unlocked'  = unlocked \cup UnlocksFor(s, verified)
@@ -322,19 +322,19 @@ SyncSound ==  \* the durable mirror is a PREFIX of volatile history:
 
 VolatilePresenceAlarmed ==  \* NO SILENT LOSS: volatile-only presence
                             \* implies the user has been told durability
-                            \* is degraded (finding F3, barred)
+                            \* is degraded (never silently)
   \A s \in Stages : (art[s] /\ ~artDisk[s]) => notified
 
 VerifiedAlarmed ==          \* same contract for volatile-only verification
   (verified["tla"] /\ ~verifiedDisk["tla"]) => notified
 
-TSRequiresVerifiedTLA ==    \* THE winning gate (finding F2, barred)
+TSRequiresVerifiedTLA ==    \* ts is reachable only after a SANY-verified spec
   ("ts" \in unlocked) => verified["tla"]
 
 VerifySound ==              \* cannot verify what does not exist
   verified["tla"] => art["tla"]
 
-HealthAlarm ==              \* degradation is always surfaced (F3)
+HealthAlarm ==              \* persistence degradation is always surfaced
   (health = "degraded") => notified
 
 DiskGate ==                 \* auxiliary: the gate survives Reload

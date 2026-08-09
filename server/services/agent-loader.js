@@ -21,6 +21,7 @@ const logger = require('../utils/logger');
 const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const DEFAULT_AGENT_DIRS = [
   process.env.MERMATE_AGENTS_DIR,
+  path.join(PROJECT_ROOT, 'agents'),
   path.join(PROJECT_ROOT, '.cursor', 'agents'),
   path.resolve(os.homedir(), 'Desktop', 'MERMATE'),
 ].filter(Boolean);
@@ -51,8 +52,42 @@ function _parseAgentFile(content, filename) {
 
   agent.priority = parseInt(agent.priority || '5', 10);
   agent.enabled = agent.enabled !== 'false';
+  agent.promptBlock = _buildPromptBlock(agent);
 
   return agent;
+}
+
+// Compact, token-efficient doctrine block for prompt injection.
+// Behavior bullets only (the operational core), capped at 600 chars —
+// roughly 120 tokens. Built once at load time, never per-call.
+function _buildPromptBlock(agent) {
+  if (!agent.behavior) return '';
+  const bullets = agent.behavior
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l.startsWith('-'))
+    .join('\n');
+  const block = bullets || agent.behavior.trim();
+  return block.length > 600 ? block.slice(0, 597) + '...' : block;
+}
+
+// Fuzzy domain match: role-registry domains (e.g. `computational_ecology`)
+// and agent-file domains (e.g. `computational_material_ecology`) drifted
+// apart historically. Exact match first, then token-overlap.
+function getAgentByDomain(domain) {
+  if (!_agents || !domain) return null;
+  const want = domain.toLowerCase();
+  const agents = [..._agents.values()].filter(a => a.enabled && a.domain);
+  const exact = agents.find(a => a.domain.toLowerCase() === want);
+  if (exact) return exact;
+  const wantTokens = new Set(want.split('_'));
+  let best = null;
+  let bestOverlap = 1; // require at least 2 shared tokens
+  for (const a of agents) {
+    const overlap = a.domain.toLowerCase().split('_').filter(t => wantTokens.has(t)).length;
+    if (overlap > bestOverlap) { best = a; bestOverlap = overlap; }
+  }
+  return best;
 }
 
 async function loadAgents() {
@@ -121,6 +156,7 @@ function getAllAgents() {
 module.exports = {
   loadAgents,
   getAgent,
+  getAgentByDomain,
   getAgentsByStage,
   getAllAgents,
   AGENTS_DIRS: DEFAULT_AGENT_DIRS,

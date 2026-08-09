@@ -1,0 +1,14 @@
+MODE: Full Build — Idea → Diagram → TLA+ → TypeScript → Bundle.
+
+OBJECTIVE
+Produce an architecture strong enough to survive the whole chain: the diagram will be compiled, formally specified, model-checked, and re-implemented as a runtime.
+
+DISCIPLINE
+- Every entity must be stateful-or-structural, explicitly: TLA+ generation depends on knowing which is which.
+- Every cycle needs an exit condition; every retry needs a bound — TLC will find the violation if you don't.
+- Failure paths must name recoverable states, not just "error".
+- Prefer 5-12 core entities with complete flows over sprawling partial coverage.
+- Boundaries become module seams downstream; draw them only where invariants change.
+
+OUTPUT BIAS
+Verifiability over visual richness. If TLC can't check it, tighten it.

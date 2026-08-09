@@ -67,16 +67,22 @@ async function inference(messages, { model, temperature = 0, maxTokens = 500 } =
 
 function getUrl() { return OPSEEQ_URL; }
 
+// Opseeq >= v7.5 removed the push-ingestion endpoint (`/api/mermate/stage`)
+// in favour of polling mermate directly. Detect the 404 once and stop
+// pushing — local trace persistence (traceStore) remains the lineage record.
+let _stagePushUnsupported = false;
+
 /**
  * Report a pipeline stage event to Opseeq for trace correlation.
  * Fire-and-forget — never blocks the pipeline on Opseeq availability.
  *
  * Transport selection:
- *   1. WS bridge (if connected) — sub-millisecond dispatch, queued on
- *      transient disconnects.
- *   2. HTTP fallback (always tried regardless of WS) — Opseeq deduplicates
- *      events server-side via the (run_id, stage, ts) tuple, so dual
- *      transport is safe and gives us full at-least-once delivery.
+ *   1. WS bridge (if connected) — queued on transient disconnects.
+ *   2. HTTP fallback, only against Opseeq builds that still ingest pushes.
+ *
+ * Both transports may fire for the same event; Opseeq deduplicates by the
+ * (run_id, stage, ts) tuple. Neither transport is retried, so the local
+ * trace store is the durable record.
  */
 function reportStage(runId, stageEvent) {
   if (!runId) return;
@@ -91,20 +97,32 @@ function reportStage(runId, stageEvent) {
   // Best-effort WS dispatch — does not block the HTTP path.
   try { wsBridge.sendStage(runId, event); } catch { /* WS bridge is fire-and-forget */ }
 
-  // Best-effort HTTP forward — guaranteed at-least-once delivery for clients
-  // that haven't enabled WS. When both transports are active, the Opseeq
-  // server deduplicates by (run_id, stage, ts).
-  // FIRE-AND-FORGET: never block the calling agent flow on Opseeq availability.
-  // When Opseeq is offline, the await would still complete fast (ECONNREFUSED),
-  // but the timeout-based fallback could add 3s of latency. Detaching ensures
-  // the agent stage progression is independent of Opseeq health.
-  void _fetch('/api/mermate/stage', {
-    method: 'POST',
-    body: JSON.stringify({ run_id: runId, ...event }),
-    timeoutMs: 3000,
-  }).catch((err) => {
-    logger.debug('opseeq.report_stage_failed', { runId: runId.slice(0, 8), stage: stageEvent?.stage, error: err.message });
-  });
+  if (_stagePushUnsupported) return;
+
+  // Best-effort HTTP forward for clients that haven't enabled WS. Not retried,
+  // so delivery is not assured; the local trace store remains the durable
+  // record. When both transports are active the Opseeq server deduplicates by
+  // (run_id, stage, ts). Fire-and-forget: never blocks the calling agent flow.
+  void (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    try {
+      const res = await fetch(`${OPSEEQ_URL}/api/mermate/stage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ run_id: runId, ...event }),
+        signal: controller.signal,
+      });
+      if (res.status === 404) {
+        _stagePushUnsupported = true;
+        logger.info('opseeq.stage_push_unsupported', { note: 'opseeq is pull-based; stage events stay in local trace' });
+      }
+    } catch (err) {
+      logger.debug('opseeq.report_stage_failed', { runId: runId.slice(0, 8), stage: stageEvent?.stage, error: err.message });
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
 }
 
 /**

@@ -1,0 +1,24 @@
+AGENT: General Purpose
+ROLE: Fallback inference handler and utility agent
+STAGE: ANY (on-demand)
+PRIORITY: 5
+
+BEHAVIOR:
+- Handles inference requests that don't map to a specific stage agent
+- Provides general-purpose text enhancement, summarization, and repair
+- Acts as the narrator for terminal UX (via terminal-narrator.js)
+- Compresses audit events into human-readable summaries
+- Handles copilot suggestions and enhancements
+
+INPUT: Arbitrary text + stage context
+OUTPUT: Enhanced/summarized/repaired text
+
+CONSTRAINTS:
+- Always uses the cheapest appropriate model (gpt-4.1-nano for suggestions, gpt-4.1-mini for enhancement)
+- Never overrides stage-specific agents when they are available
+- Summarization must be truthful (no theater)
+
+DATA CONTRACT:
+- Reads: audit event stream, user input
+- Writes: narration events, copilot suggestions
+- Models: gpt-4.1-nano (copilot_suggest), gpt-4.1-mini (copilot_enhance)

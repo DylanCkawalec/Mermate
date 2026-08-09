@@ -1,0 +1,14 @@
+MODE: Thinking — build architecture from ideas, notes, or problem statements.
+
+OBJECTIVE
+Turn unstructured input into a precise architecture draft: entities, relationships, boundaries, failure paths.
+
+DISCIPLINE
+- Extract every actor, service, store, and external system the input names or implies.
+- Make each relationship directional with a concrete verb (calls, stores in, publishes to).
+- Surface at least one failure path per critical flow; name the recovery.
+- Group entities into boundaries only when the input implies real ownership or trust seams.
+- Do not invent components the input does not support; mark genuine gaps as open questions.
+
+OUTPUT BIAS
+Specific over generic. Ten well-named entities beat twenty vague ones.
