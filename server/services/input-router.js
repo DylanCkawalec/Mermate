@@ -272,8 +272,10 @@ function _sanitizeCompileError(raw) {
     .replace(/at\s+\S+\s+\([^)]+\)/g, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
-  const mermaidErr = cleaned.match(/((?:UnknownDiagramError|Error|Parse error)[^\n]+)/);
-  if (mermaidErr) return mermaidErr[1].trim();
+  // Keep the parse-error context lines (offending text, caret, "Expecting …")
+  // — the first line alone ("Parse error on line N:") is useless to the user.
+  const mermaidErr = cleaned.match(/((?:UnknownDiagramError|Error|Parse error)[^\n]*(?:\n(?!\s*at\s)[^\n]+){0,3})/);
+  if (mermaidErr) return mermaidErr[1].trim().slice(0, 500);
   return cleaned.slice(0, 300) || 'Compilation failed';
 }
 

@@ -1,8 +1,8 @@
 # Mermate — Mermaid-GPT Architecture Pipeline
 # Idea -> Diagram -> TLA+ -> TypeScript -> Bundle
 #
-# Build:  docker build -t mermate:1.0.0 .
-# Run:    docker run -p 3333:3333 --env-file .env mermate:1.0.0
+# Build:  docker build -t mermate:1.1.0 .
+# Run:    docker run -p 3333:3333 --env-file .env mermate:1.1.0
 
 FROM node:22-slim AS builder
 
@@ -36,8 +36,11 @@ WORKDIR /app
 
 COPY --from=builder /build/node_modules/ ./node_modules/
 COPY package.json ./
+COPY puppeteer-config.json ./
 COPY server/ ./server/
 COPY public/ ./public/
+COPY agents/ ./agents/
+COPY archs/ ./archs/
 
 # TLA+ toolchain
 COPY vendor/ ./vendor/
@@ -61,7 +64,7 @@ HEALTHCHECK --interval=15s --timeout=5s --retries=3 --start-period=8s \
 
 LABEL org.opencontainers.image.title="Mermate" \
       org.opencontainers.image.description="Mermaid-GPT: Idea to Architecture to TLA+ to TypeScript" \
-      org.opencontainers.image.version="1.0.0" \
+      org.opencontainers.image.version="1.1.0" \
       org.opencontainers.image.source="https://github.com/DylanCkawalec/mermaid"
 
 CMD ["node", "server/index.js"]

@@ -44,10 +44,24 @@ function _parseAgentFile(content, filename) {
   if (behaviorIdx >= 0) {
     const behaviorLines = [];
     for (let i = behaviorIdx + 1; i < lines.length; i++) {
-      if (/^(INPUT|OUTPUT|CONSTRAINTS|DATA CONTRACT|EXPERTISE|DUMP|DATA FLOW):/i.test(lines[i])) break;
+      if (/^(INPUT|OUTPUT|CONSTRAINTS|DATA CONTRACT|EXPERTISE( SIGNALS)?|DUMP|DATA FLOW|MODEL|API[_ ]?KEY|ENABLED):/i.test(lines[i])) break;
       behaviorLines.push(lines[i]);
     }
     agent.behavior = behaviorLines.join('\n').trim();
+  }
+
+  // Expertise signals: the questions this specialist instinctively asks.
+  // Injected after the behavior bullets — they shape *how* the model
+  // interrogates the architecture, not just what it does.
+  const signalsIdx = lines.findIndex(l => /^EXPERTISE SIGNALS:/i.test(l));
+  if (signalsIdx >= 0) {
+    const signals = [];
+    for (let i = signalsIdx + 1; i < lines.length; i++) {
+      const t = lines[i].trim();
+      if (!t || /^[A-Z_][A-Z_ ]*:/.test(lines[i])) break;
+      if (t.startsWith('-')) signals.push(t.replace(/^-\s*/, '').replace(/^"(.*)"$/, '$1'));
+    }
+    if (signals.length) agent.signals = signals;
   }
 
   agent.priority = parseInt(agent.priority || '5', 10);
@@ -58,17 +72,36 @@ function _parseAgentFile(content, filename) {
 }
 
 // Compact, token-efficient doctrine block for prompt injection.
-// Behavior bullets only (the operational core), capped at 600 chars —
-// roughly 120 tokens. Built once at load time, never per-call.
+// Identity line + behavior bullets (the operational core) + signature
+// questions, capped at whole-line boundaries near 1200 chars — roughly
+// 260 tokens. Built once at load time, never per-call.
+const PROMPT_BLOCK_MAX_CHARS = 1200;
+
 function _buildPromptBlock(agent) {
   if (!agent.behavior) return '';
+  const lines = [];
+  if (agent.agent && agent.role) {
+    lines.push(`You are ${agent.agent}, ${agent.role.toLowerCase()}. Think in your discipline; every judgment must come from it.`);
+  }
   const bullets = agent.behavior
     .split('\n')
     .map(l => l.trim())
-    .filter(l => l.startsWith('-'))
-    .join('\n');
-  const block = bullets || agent.behavior.trim();
-  return block.length > 600 ? block.slice(0, 597) + '...' : block;
+    .filter(l => l.startsWith('-'));
+  if (bullets.length) lines.push(...bullets);
+  else lines.push(agent.behavior.trim());
+  if (agent.signals?.length) {
+    lines.push('Interrogate the architecture with your signature questions:');
+    lines.push(...agent.signals.map(s => `- ${s}`));
+  }
+  // Trim at line boundaries — never mid-sentence.
+  const out = [];
+  let size = 0;
+  for (const line of lines) {
+    if (size + line.length + 1 > PROMPT_BLOCK_MAX_CHARS) break;
+    out.push(line);
+    size += line.length + 1;
+  }
+  return out.join('\n');
 }
 
 // Fuzzy domain match: role-registry domains (e.g. `computational_ecology`)

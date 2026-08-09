@@ -5,6 +5,43 @@ All notable changes to Mermate are documented here. Public releases follow
 lineage carried internal versions up to 5.0.0; public versioning starts at
 1.0.0 and supersedes that numbering.)
 
+## [1.1.0] — 2026-08-09
+
+Agent intelligence pass + Mermaid repairer correctness fix. No breaking
+changes; drop-in upgrade from 1.0.0.
+
+### Features
+
+- **Agent persona intelligence** — `agent-loader.js` now parses and injects
+  `EXPERTISE SIGNALS` into the runtime prompt (prefixed with an
+  interrogative directive), and `_buildPromptBlock` enforces identity-led,
+  imperative voice instead of third-person descriptive phrasing. The
+  `promptBlock` cap is now line-boundary-aware (no more mid-word truncation).
+- **New personas** — five new agent `.txt` files added to round out the
+  active domain registry: `ELIZABETH_DILLER`, `LINA_BO_BARDI`,
+  `LUDWIG_MIES`, `MIES_VANDERROHE`, `REM_KOOLHAAS`.
+- **Stage directive polish** — `_buildAgentRoleHeader` in
+  `server/routes/agent.js` emits clearer stage-specific directives and a
+  tighter fallback for unscoped roles.
+
+### Bug Fixes
+
+- **`mermaid-repairer.js` rule 8** — quote-stripping now only fires on
+  plain labels (no `[](){}|<>&#;` inside). Previously the rule stripped
+  quotes from labels that *required* them (e.g. `[Next]_vars`, `<br/>`,
+  `(parens)`), turning valid user-authored diagrams into parse failures.
+  Resolves the `aria.mmd` regression.
+- **Error sanitization** — `_sanitizeCompileError` (input-router.js) and
+  `_sanitizeError` (render.js) now preserve up to 3 context lines
+  (offending text, caret, `Expecting …`) instead of amputating after the
+  first line, so compile-failure toasts are actionable again.
+
+### Tests
+
+- `test-mermaid-repairer.js` — 2 new regression tests: reserved-char
+  labels stay quoted; plain labels still get cleaned.
+- Full `test:ci` suite green (149 fast + 17 compile, 0 fail).
+
 ## [1.0.0] — 2026-08-02
 
 First public production release. The raw-idea → verified-artifact pipeline

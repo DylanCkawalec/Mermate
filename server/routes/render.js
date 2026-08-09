@@ -1240,9 +1240,10 @@ function _sanitizeError(raw) {
     .replace(/at\s+\S+\s+\([^)]+\)/g, '')                    // stack trace frames
     .replace(/\n{3,}/g, '\n\n')                               // collapse blank runs
     .trim();
-  // Extract the meaningful Mermaid error line
-  const mermaidErr = cleaned.match(/((?:UnknownDiagramError|Error|Parse error)[^\n]+)/);
-  if (mermaidErr) return mermaidErr[1].trim();
+  // Extract the meaningful Mermaid error with its context lines (offending
+  // text, caret, "Expecting …") — the first line alone is useless to the user.
+  const mermaidErr = cleaned.match(/((?:UnknownDiagramError|Error|Parse error)[^\n]*(?:\n(?!\s*at\s)[^\n]+){0,3})/);
+  if (mermaidErr) return mermaidErr[1].trim().slice(0, 500);
   return cleaned.slice(0, 300) || 'Compilation failed';
 }
 

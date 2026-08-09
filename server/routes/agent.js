@@ -159,23 +159,24 @@ function _buildAgentRoleHeader(role, stage, modePromptSkeleton) {
     const shortName = role.name.replace(/^Doctor_/, 'Dr. ').replace(/_/g, ' ');
     const domain = (role.domain || 'general').replace(/_/g, ' ');
     parts.push(`[REASONING ROLE: ${shortName} — domain: ${domain}]`);
-    // Agent doctrine: the compact behavior block from agents/agent_*.txt,
-    // matched by domain. Precomputed at load time (~120 tokens max) — this
-    // is where the agent spec corpus actually shapes inference.
+    // Agent doctrine: identity + behavior + signature questions from
+    // agents/agent_*.txt, matched by domain. Precomputed at load time
+    // (~200 tokens max) — this is where the agent spec corpus actually
+    // shapes inference.
     const doctrine = agentLoader.getAgentByDomain(role.domain);
     if (doctrine?.promptBlock) {
       parts.push(doctrine.promptBlock);
     } else {
-      parts.push(`Reason as a specialist in ${domain}. Apply deep expertise in this domain when analysing the architecture.`);
+      parts.push(`Reason as a senior specialist in ${domain}. Bring this domain's characteristic failure modes, constraints, and design patterns to bear; judge the architecture only through that lens.`);
     }
   }
   if (stage === 'planning') {
-    parts.push(`[STAGE: Architecture Planning — analyse structure, constraints, entities, failure paths, and boundaries.]`);
+    parts.push(`[STAGE: Architecture Planning — decompose the input into entities, relationships, boundaries, and failure paths. Decide what is stateful vs structural, and name constraints before proposing structure.]`);
   } else if (stage === 'refining') {
-    parts.push(`[STAGE: Architecture Refinement — strengthen missing failure paths, boundaries, observability, and specificity.]`);
+    parts.push(`[STAGE: Architecture Refinement — close the gaps: missing failure paths, weak boundaries, absent observability, vague naming. Strengthen the draft without changing the user's intent.]`);
   }
   if (modePromptSkeleton) {
-    parts.push(`\n[MODE CONTEXT]\n${modePromptSkeleton.slice(0, 1500)}`);
+    parts.push(`\n[MODE CONTEXT]\n${modePromptSkeleton.trim().slice(0, 1500)}`);
   }
   return parts.join('\n');
 }

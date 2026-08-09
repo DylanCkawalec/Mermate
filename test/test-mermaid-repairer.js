@@ -43,6 +43,28 @@ describe('mermaid-repairer', () => {
     assert.ok(r.changes.some(c => /unbalanced bracket/.test(c)));
   });
 
+  it('keeps required quotes on labels containing reserved characters', () => {
+    // Quotes are REQUIRED when the label holds brackets, parens, HTML, or
+    // entities — stripping them breaks valid user-pasted diagrams
+    // (regression: aria.mmd "Parse error on line 3").
+    const valid = [
+      'flowchart TB',
+      '    TITLE["Spec ≜ Init ∧ □[Next]_vars&nbsp;·&nbsp;<br/>details"]:::title',
+      '    SVC["Service (primary, hot-path)"] --> DB[("Store (SQL)")]',
+    ].join('\n');
+    const r = repair(valid);
+    assert.ok(r.source.includes('TITLE["Spec'), 'bracket label must stay quoted');
+    assert.ok(r.source.includes('SVC["Service (primary'), 'paren label must stay quoted');
+    assert.ok(r.source.includes('[("Store (SQL)")]'), 'cylinder label must stay quoted');
+    assert.ok(!r.changes.some(c => /stripped quotes/.test(c)));
+  });
+
+  it('still strips quotes from plain bracket labels', () => {
+    const r = repair('flowchart TD\n    A[("plain text")] --> B["simple label"]');
+    assert.ok(r.source.includes('A[(plain text)]'));
+    assert.ok(r.changes.some(c => /stripped quotes/.test(c)));
+  });
+
   it('preserves valid mermaid structure through repair', () => {
     const valid = 'flowchart TD\n    A["Start"] --> B["End"]';
     const r = repair(valid);

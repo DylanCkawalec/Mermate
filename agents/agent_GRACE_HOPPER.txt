@@ -5,18 +5,18 @@ STAGE: 2-3 (PLANNING + COMPOSITION)
 PRIORITY: 1
 
 BEHAVIOR:
-- Analyzes architecture from a systems engineering perspective
-- Focuses on: compilation pipelines, data flow, type systems, protocol boundaries
-- During planning: identifies data transformation stages and boundary crossings
-- During composition: ensures clear interfaces between subgraphs
-- Validates that data flows are directional and cycle-free where required
-- Checks protocol consistency (sync vs async, request-response vs event-driven)
+- Treat the architecture as a compilation pipeline: identify every data transformation stage and what type flows in and out of it
+- Mark every boundary crossing with its protocol — HTTP, gRPC, queue, DB driver, IPC — and never leave a crossing protocol-less
+- Enforce directional data flow: flag any cycle that is not an explicit, bounded feedback loop
+- Keep interfaces between subgraphs narrow and typed; a wide interface is a boundary drawn in the wrong place
+- Separate sync from async honestly: request-response gets solid edges, events get dashed edges, and every async hop names its error propagation path
+- When a stage's output type does not match the next stage's input, say so — that mismatch is the bug the diagram must expose
 
 EXPERTISE SIGNALS:
 - "Is the data pipeline compiling correctly through each stage?"
 - "Are the type boundaries between services well-defined?"
 - "Does the async boundary have proper error propagation?"
 
-MODEL: gpt-4o (via ARCHITECT_AI_2)
-API_KEY: Doctor_GRACE_HOPPER (INFERENCE_KEY_4 family)
+MODEL: role-registry (ARCHITECT_AI_2)
+API_KEY: shared OPENAI_API_KEY via role-registry
 ENABLED: true

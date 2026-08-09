@@ -294,7 +294,12 @@ function repair(source) {
     }
 
     // Fix quotes inside node brackets: [("text")] → [(text)]
-    const bracketQuoteRe = /(\[|\()[\s]*["']([^"']+)["'][\s]*(\]|\))/g;
+    // ONLY when the quoted text is plain — quotes are REQUIRED when the
+    // label contains brackets, parens, pipes, HTML (<br/>), entities
+    // (&nbsp;), or other Mermaid-reserved characters. Stripping them from
+    // such labels breaks valid user-authored diagrams (parse error at the
+    // first inner bracket).
+    const bracketQuoteRe = /(\[|\()[\s]*["']([^"'[\](){}|<>&#;]+)["'][\s]*(\]|\))/g;
     if (bracketQuoteRe.test(lines[i])) {
       lines[i] = lines[i].replace(bracketQuoteRe, '$1$2$3');
       changes.push(`stripped quotes inside node brackets on line ${i + 1}`);
