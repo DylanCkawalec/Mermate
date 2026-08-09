@@ -348,9 +348,14 @@ function buildCopilotEnhancePrompt(enhanceMode, targetFormat) {
   let rules;
   if (isStructured && !isSelection) {
     // Structured formats always use refine-style rules with format-specific output
+    // For mmd specifically: add a hard line-count preservation rule so the model
+    // can't silently summarize a 500-line diagram into 50 lines.
+    const mmdPreservationRule = isMmd
+      ? `- LINE-COUNT PRESERVATION (HARD RULE): The input has {LINE_COUNT} non-empty lines. Your output MUST have at least {LINE_COUNT} non-empty lines. Enhance means improve clarity, fix syntax, and add missing detail — NOT condense, summarize, or drop sections. If you find yourself writing fewer lines than the input, STOP — you are summarizing, not enhancing.`
+      : `- Every entity, node, relationship, or definition the user wrote must appear in your output.`;
     rules = [
       `RULES (refine mode — ${fmt} format):`,
-      `- Every entity, node, relationship, or definition the user wrote must appear in your output.`,
+      mmdPreservationRule,
       `- Do not reverse flow directions or change semantic meaning.`,
       `- Preserve named technologies, variables, and identifiers verbatim.`,
       `- Do not add entirely new systems unless strongly implied.`,
@@ -569,6 +574,54 @@ function buildModelRepairUserPrompt(mmdSource, compileError) {
     compileError,
     '',
     `Fix the source so it compiles. Return only the corrected Mermaid source.`,
+  ].join('\n');
+}
+
+/**
+ * Build a SURGICAL repair prompt that sends only the error context window
+ * (±15 lines around the failing line) to the model, not the entire diagram.
+ * The model returns ONLY the corrected lines, which are then patched back
+ * into the original source.  This prevents the model from summarizing or
+ * rewriting a large diagram when only one line is broken.
+ *
+ * @param {string[]} contextLines - The lines around the error (already extracted)
+ * @param {number} startLine - 1-based line number in the original source where contextLines starts
+ * @param {number} errorLine - 1-based line number in the original source where the error is
+ * @param {string} compileError - The sanitized compile error
+ * @returns {string}
+ */
+function buildSurgicalRepairUserPrompt(contextLines, startLine, errorLine, compileError) {
+  const numberedContext = contextLines.map((line, i) => {
+    const lineNum = startLine + i;
+    const marker = lineNum === errorLine ? ' >>> ' : '     ';
+    return `${String(lineNum).padStart(5)}${marker}${line}`;
+  }).join('\n');
+
+  const errorRelativeLine = errorLine - startLine + 1;
+
+  return [
+    `[SURGICAL REPAIR — line ${errorLine} has a syntax error]`,
+    '',
+    `Below is a ${contextLines.length}-line excerpt from a larger Mermaid diagram.`,
+    `Line ${errorLine} (marked with >>>) caused a compile error.`,
+    '',
+    `CRITICAL INSTRUCTIONS:`,
+    `1. Return EXACTLY ${contextLines.length} lines — one per line, same order as input.`,
+    `2. Copy UNCHANGED lines verbatim — do not modify lines that are not broken.`,
+    `3. Fix ONLY the line(s) causing the syntax error.`,
+    `4. Do NOT add or remove nodes, edges, subgraphs, or classDef lines.`,
+    `5. Do NOT merge multiple lines into one. Each input line = one output line.`,
+    `6. Do NOT add line numbers, markers, or explanations.`,
+    `7. Do NOT wrap output in markdown code fences.`,
+    `8. Preserve empty lines — they are structurally significant in Mermaid.`,
+    '',
+    `[CONTEXT — ${contextLines.length} lines, error on relative line ${errorRelativeLine}]`,
+    numberedContext,
+    '',
+    `[COMPILE ERROR]`,
+    compileError,
+    '',
+    `Return the ${contextLines.length} corrected lines only. Same order, same count. No code fences.`,
   ].join('\n');
 }
 
@@ -1120,6 +1173,7 @@ module.exports = {
   buildRenderPrepareUserPrompt,
   buildModelRepairPrompt,
   buildModelRepairUserPrompt,
+  buildSurgicalRepairUserPrompt,
   buildDecomposePrompt,
   buildDecomposeUserPrompt,
   buildRepairFromTracePrompt,

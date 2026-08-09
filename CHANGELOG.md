@@ -5,6 +5,48 @@ All notable changes to Mermate are documented here. Public releases follow
 lineage carried internal versions up to 5.0.0; public versioning starts at
 1.0.0 and supersedes that numbering.)
 
+## [1.2.0] — 2026-08-09
+
+Enhance preservation + surgical render repair. No breaking changes; drop-in
+upgrade from 1.1.0.
+
+### Features
+
+- **Surgical line repair in render** — when a Mermaid diagram fails to
+  compile, `compileWithRetry` now extracts a ±15-line context window around
+  the error, sends only those lines to the model, and patches the returned
+  fix back into the full source.  The rest of the diagram is never touched
+  by the model.  This works even for user-authored `.mmd` with Enhance OFF
+  (surgical repair is safe — it can't silently rewrite the diagram).
+  Falls through to full-source model repair only if surgical repair is not
+  applicable (no line number in error) or fails.
+- **True enhancement for large .mmd** — the enhance source limit for
+  structured formats (mmd/md/tla/ts) is now 80K chars (was 8K).  A 500-line
+  `.mmd` is no longer truncated before the model sees it, so Enhance
+  receives the full diagram and can enhance instead of summarizing a
+  fragment.
+- **Line-count preservation rule in enhance prompt** — the mmd refine
+  prompt now includes an explicit hard rule: "The input has N non-empty
+  lines. Your output MUST have at least N non-empty lines."  The
+  `{LINE_COUNT}` placeholder is filled at runtime with the actual count.
+
+### Bug Fixes
+
+- **Enhance preservation guard** — after enhance, if the model's output has
+  fewer than 70% of the input's non-empty, non-comment lines, the
+  enhancement is rejected and the original is returned unchanged with a
+  `preservation_guard` field explaining the rejection.  Catches the model
+  silently summarizing a 200-line diagram into 50 lines.
+
+### Tests
+
+- Full `test:ci` suite green (149 fast + 17 compile, 0 fail).
+- Live-verified: 216-line `aria.mmd` enhanced with 1.14x line ratio (model
+  added detail, no content loss).
+- Live-verified: broken `aria.mmd` (unbalanced bracket on line 50) repaired
+  surgically — lines outside the ±15 window confirmed unchanged, 170KB SVG
+  rendered.
+
 ## [1.1.0] — 2026-08-09
 
 Agent intelligence pass + Mermaid repairer correctness fix. No breaking

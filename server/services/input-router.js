@@ -8,6 +8,7 @@ const { repair: deterministicRepair } = require('./mermaid-repairer');
 const { extractShadow, analyze } = require('./input-analyzer');
 const {
   buildRenderPrepareUserPrompt, buildModelRepairUserPrompt,
+  buildSurgicalRepairUserPrompt,
   buildFactExtractionUserPrompt, buildDiagramPlanUserPrompt,
   buildCompositionUserPrompt, buildSemanticRepairUserPrompt,
   buildMaxCompositionUserPrompt,
@@ -318,11 +319,57 @@ async function compileWithRetry(mmdSource, outputDir, baseName, ports = null, op
   logger.warn('compile.attempt2_failed', { baseName, error: attempt2Error });
 
   if (options.allowModelRepair === false) {
+    // Even when full-source model repair is disabled (user-authored mmd with
+    // Enhance OFF), surgical line repair is still safe — it only fixes the
+    // broken line(s) and leaves the rest of the diagram untouched.  Try it
+    // first; if it fails, skip the full-source repair.
+    const errorLineNum = _extractLineNumber(attempt2Error);
+    if (errorLineNum && errorLineNum > 0) {
+      const surgicalResult = await _surgicalLineRepair(
+        sourceForModelRepair, errorLineNum, attempt2Error, p, outputDir, baseName,
+      );
+      if (surgicalResult) {
+        repairChanges.push(`surgical line repair (line ${errorLineNum}) via ${surgicalResult.provider}`);
+        if (surgicalResult.deterministicChanges?.length > 0) {
+          repairChanges.push(...surgicalResult.deterministicChanges);
+        }
+        return {
+          result: surgicalResult.result,
+          mmdSource: surgicalResult.patchedSource,
+          attempts: 3,
+          repairChanges,
+        };
+      }
+    }
     logger.info('compile.model_repair_skipped', { baseName, reason: 'user_authored_mmd_enhance_off' });
     return { result, mmdSource, attempts: 2, repairChanges };
   }
 
-  // Attempt 3: model-assisted repair via provider + deterministic repair + recompile
+  // Attempt 3: SURGICAL line repair — extract ±15 lines around the error,
+  // send only those to the model, patch the returned lines back into the
+  // full source.  This is cheap, fast, and can't break the rest of the
+  // diagram because it never touches lines outside the window.
+  const errorLineNum = _extractLineNumber(attempt2Error);
+  if (errorLineNum && errorLineNum > 0) {
+    const surgicalResult = await _surgicalLineRepair(
+      sourceForModelRepair, errorLineNum, attempt2Error, p, outputDir, baseName,
+    );
+    if (surgicalResult) {
+      repairChanges.push(`surgical line repair (line ${errorLineNum}) via ${surgicalResult.provider}`);
+      if (surgicalResult.deterministicChanges?.length > 0) {
+        repairChanges.push(...surgicalResult.deterministicChanges);
+      }
+      return {
+        result: surgicalResult.result,
+        mmdSource: surgicalResult.patchedSource,
+        attempts: 3,
+        repairChanges,
+      };
+    }
+  }
+
+  // Attempt 4 (fallback): full-source model-assisted repair + deterministic repair + recompile.
+  // Used when surgical repair is not applicable (no line number in error) or failed.
   const repairUserPrompt = buildModelRepairUserPrompt(sourceForModelRepair, attempt2Error);
   const modelResult = await provider.infer('model_repair', { userPrompt: repairUserPrompt });
 
@@ -333,12 +380,126 @@ async function compileWithRetry(mmdSource, outputDir, baseName, ports = null, op
       const reRepaired = deterministicRepair(modelResult.output);
       if (reRepaired.changes.length > 0) repairChanges.push(...reRepaired.changes);
       result = await p.compiler.compile(reRepaired.source, outputDir, baseName);
-      if (result.ok) return { result, mmdSource: reRepaired.source, attempts: 3, repairChanges };
+      if (result.ok) return { result, mmdSource: reRepaired.source, attempts: 4, repairChanges };
     }
   }
 
-  logger.error('compile.all_attempts_failed', { baseName, attempts: 3, sourcePreview: mmdSource.slice(0, 2000) });
-  return { result, mmdSource, attempts: 3, repairChanges };
+  logger.error('compile.all_attempts_failed', { baseName, attempts: 4, sourcePreview: mmdSource.slice(0, 2000) });
+  return { result, mmdSource, attempts: 4, repairChanges };
+}
+
+/**
+ * Surgical line repair: extract a ±15 line context window around the error,
+ * send only those lines to the model, patch the returned lines back into the
+ * full source, and recompile.  Returns null if the repair didn't work.
+ *
+ * @param {string} mmdSource - Full Mermaid source (post-deterministic-repair)
+ * @param {number} errorLine - 1-based line number of the error
+ * @param {string} compileError - Sanitized compile error text
+ * @param {object} p - Resolved ports { compiler }
+ * @param {string} outputDir - Compile output directory
+ * @param {string} baseName - Diagram base name
+ * @returns {Promise<{result, patchedSource, provider, deterministicChanges}|null>}
+ */
+async function _surgicalLineRepair(mmdSource, errorLine, compileError, p, outputDir, baseName) {
+  const SURGICAL_CONTEXT = 15;
+  const lines = mmdSource.split('\n');
+
+  // 1-based to 0-based, clamp to valid range
+  const errorIdx = Math.max(0, Math.min(lines.length - 1, errorLine - 1));
+  const startIdx = Math.max(0, errorIdx - SURGICAL_CONTEXT);
+  const endIdx = Math.min(lines.length - 1, errorIdx + SURGICAL_CONTEXT);
+  const contextLines = lines.slice(startIdx, endIdx + 1);
+  const startLine = startIdx + 1; // 1-based
+
+  if (contextLines.length < 2) return null;
+
+  logger.info('compile.surgical_repair_attempt', {
+    baseName, errorLine, contextStart: startLine, contextEnd: endIdx + 1,
+    contextLines: contextLines.length,
+  });
+
+  // Send only the context window to the model
+  const surgicalPrompt = buildSurgicalRepairUserPrompt(contextLines, startLine, errorLine, compileError);
+  const modelResult = await provider.infer('model_repair', { userPrompt: surgicalPrompt });
+
+  if (!modelResult.output || !modelResult.output.trim()) {
+    logger.warn('compile.surgical_repair_empty_output', { baseName, provider: modelResult.provider });
+    return null;
+  }
+
+  // Clean the model output: strip markdown fencing, ANSI codes, and the
+  // npm-security-monitor prefix that sometimes leaks into model output.
+  let cleanedOutput = modelResult.output
+    .replace(/\u001b\[[0-9;]*m/g, '')
+    .replace(/\[npm-security-monitor\][^\n]*/g, '')
+    .replace(/^```(?:mermaid)?\s*\n?/i, '')
+    .replace(/\n?```\s*$/i, '')
+    .trim();
+
+  // The model should return approximately contextLines.length lines.
+  // It may merge or split lines when fixing syntax — that's fine.  We align
+  // the returned lines to the context window and pad/truncate to fit, then
+  // let the compiler decide if the result is valid.
+  // Preserve empty lines — they are structurally significant in Mermaid
+  // (separate subgraph blocks, improve readability).  Only strip trailing
+  // blank lines from the model output.
+  const rawReturned = cleanedOutput.split('\n');
+  while (rawReturned.length > 0 && rawReturned[rawReturned.length - 1].trim() === '') {
+    rawReturned.pop();
+  }
+  while (rawReturned.length > 0 && rawReturned[0].trim() === '') {
+    rawReturned.shift();
+  }
+  const returnedLines = rawReturned;
+  const expected = contextLines.length;
+
+  // Hard reject only if the model returned drastically fewer lines (< 50%)
+  // — that means it summarized instead of fixing.
+  if (returnedLines.length < Math.floor(expected * 0.5)) {
+    logger.warn('compile.surgical_repair_summarized', {
+      baseName, expected, got: returnedLines.length,
+      provider: modelResult.provider,
+    });
+    return null;
+  }
+
+  // Align returned lines to the context window: pad with originals at the
+  // end if the model returned fewer, truncate if more.
+  let patchedContext = returnedLines;
+  if (patchedContext.length < expected) {
+    patchedContext = [...patchedContext, ...contextLines.slice(patchedContext.length)];
+  } else if (patchedContext.length > expected) {
+    patchedContext = patchedContext.slice(0, expected);
+  }
+
+  // Patch the context back into the full source
+  const patchedLines = [...lines];
+  for (let i = 0; i < patchedContext.length; i++) {
+    patchedLines[startIdx + i] = patchedContext[i];
+  }
+  const patchedSource = patchedLines.join('\n');
+
+  // Run deterministic repair on the patched source (catches any new
+  // bracket/quote issues the model introduced) and recompile
+  const reRepaired = deterministicRepair(patchedSource);
+  const deterministicChanges = reRepaired.changes.length > 0 ? reRepaired.changes : [];
+  const finalSource = reRepaired.changes.length > 0 ? reRepaired.source : patchedSource;
+
+  const result = await p.compiler.compile(finalSource, outputDir, baseName);
+  if (result.ok) {
+    logger.info('compile.surgical_repair_success', {
+      baseName, errorLine, provider: modelResult.provider,
+      deterministicChanges: deterministicChanges.length,
+    });
+    return { result, patchedSource: finalSource, provider: modelResult.provider, deterministicChanges };
+  }
+
+  logger.warn('compile.surgical_repair_failed', {
+    baseName, errorLine, provider: modelResult.provider,
+    error: _sanitizeCompileError(result.error),
+  });
+  return null;
 }
 
 // ---- Provider-backed render-prepare for text/md inputs --------------------

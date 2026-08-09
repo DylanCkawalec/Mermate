@@ -351,6 +351,13 @@ router.post('/copilot/enhance', async (req, res) => {
 
     const flavorPrompt = require('../services/axiom-prompts').buildCopilotEnhancePrompt(flavor, targetFormat);
 
+    // For mmd enhance: fill in the {LINE_COUNT} placeholder in the system prompt
+    // so the model sees an explicit hard rule on how many lines it must preserve.
+    if (targetFormat === 'mmd' && flavorPrompt.system.includes('{LINE_COUNT}')) {
+      const nonEmptyLines = trimmed.split('\n').filter(l => l.trim() && !l.trim().startsWith('%%')).length;
+      flavorPrompt.system = flavorPrompt.system.replace(/\{LINE_COUNT\}/g, String(nonEmptyLines));
+    }
+
     // Previous-text context: lets the user iterate on enhancements
     // (click → distill → tweak → click again to refine that distillation).
     const previousText = (req.body?.previous_text || '').slice(0, 1500);
@@ -358,10 +365,12 @@ router.post('/copilot/enhance', async (req, res) => {
       ? `\nPrevious version (for iterative context): ${previousText}\n`
       : '';
 
-    // For distill mode, give the model the entire pasted source up to the
-    // model's practical context window. 80K chars ≈ 20K tokens, leaving
-    // plenty of room for the system prompt + reasoning + output.
-    const sourceLimit = flavor === 'distill' ? 80000 : 8000;
+    // For distill mode and structured formats (mmd/md/tla/ts), give the model
+    // the entire pasted source up to the model's practical context window.
+    // 80K chars ≈ 20K tokens, leaving plenty of room for the system prompt +
+    // reasoning + output.  Truncating a large .mmd at 8K chars silently cuts
+    // half the diagram — the model then "enhances" a fragment.
+    const sourceLimit = (flavor === 'distill' || isStructuredFormat) ? 80000 : 8000;
     const sourceForPrompt = sourceText.length > sourceLimit
       ? sourceText.slice(0, sourceLimit) + `\n\n[…TRUNCATED ${sourceText.length - sourceLimit} chars…]`
       : sourceText;
@@ -422,6 +431,31 @@ router.post('/copilot/enhance', async (req, res) => {
         // unchanged than to replace it with an English description.
         if (targetFormat === 'mmd') {
           enhancedSource = _sanitizeMmdOutput(enhancedSource, trimmed);
+        }
+
+        // Preservation guard for structured formats: if the model's output has
+        // significantly fewer non-empty lines than the input, it silently
+        // summarized instead of enhancing.  Reject and return the original so
+        // the user doesn't lose content.  Threshold: output must have ≥70% of
+        // the input's non-empty, non-comment lines.
+        if (isStructuredFormat) {
+          const inputLines = trimmed.split('\n').filter(l => l.trim() && !l.trim().startsWith('%%')).length;
+          const outputLines = enhancedSource.split('\n').filter(l => l.trim() && !l.trim().startsWith('%%')).length;
+          if (inputLines >= 10 && outputLines < Math.ceil(inputLines * 0.7)) {
+            logger.warn('copilot.enhance.preservation_guard_rejected', {
+              targetFormat, inputLines, outputLines, ratio: (outputLines / inputLines).toFixed(2),
+              provider: result.provider,
+            });
+            return res.json({
+              success: true,
+              enhanced_source: trimmed,
+              flavor,
+              provider: result.provider,
+              intent_preserved: true,
+              expansion_summary: 'Enhancement rejected by preservation guard — model output had fewer lines than input. Original returned unchanged.',
+              preservation_guard: { inputLines, outputLines, rejected: true },
+            });
+          }
         }
 
         return res.json({
